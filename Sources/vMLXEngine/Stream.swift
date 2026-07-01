@@ -2538,7 +2538,10 @@ extension Engine {
     /// primitives are all Sendable (String/Int/Double/Bool/NSNumber), but
     /// `JSONSerialization.jsonObject` returns `Any`, so we round-trip via
     /// NSDictionary to satisfy the Sendable marker protocol.
-    private func buildToolSpecs(from tools: [ChatRequest.Tool]) -> [ToolSpec] {
+    // internal (not private): also used by `Engine.countChatTokens`
+    // (EngineTokenize.swift) so token counts include the same tool specs
+    // the template render sees.
+    internal func buildToolSpecs(from tools: [ChatRequest.Tool]) -> [ToolSpec] {
         tools.map { t in
             var fn: [String: any Sendable] = [
                 "name": t.function.name,
@@ -2659,11 +2662,13 @@ extension Engine {
             params.enableCompiledDecode = true
         }
 
-        // TurboQuant KV-cache compression. Default on for every model
-        // (MLX + JANG alike) per user directive. `enableTurboQuant`
-        // in GlobalSettings defaults to true, and `turboQuantBits`
-        // defaults to 4 (≈3.6x compression, sweet spot from the TQ
-        // paper). Hybrid-SSM models are safe because
+        // TurboQuant KV-cache compression. Default OFF as of 2026-07-01
+        // (measured ≈40% decode cost at long context on M4 Pro — see
+        // GlobalSettings.kvCacheQuantization history); opt-in via the
+        // settings picker / `--kv-cache-quantization turboquant`, and
+        // JANG-calibrated models auto-activate below regardless.
+        // `turboQuantBits` defaults to 4 (≈3.6x compression, sweet spot
+        // from the TQ paper). Hybrid-SSM models are safe because
         // `maybeQuantizeKVCache` only compresses `KVCacheSimple`
         // layers and skips Mamba/Rotating/CacheList — see
         // `KVCache.swift:1666-1685`.

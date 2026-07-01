@@ -62,8 +62,8 @@ templates DO stamp their own — so reasoning-off uses §15 fallthrough
 | model_type `nemotron_h` | hybrid, nemotron tool, deepseek_r1 reasoning, thinkInTemplate true | `ModelTypeTable` entry matches exactly | PASS |
 | fc1/fc2 JANG rename | `.switch_mlp.up_proj. → .fc1.`, `.down_proj. → .fc2.` | `NemotronH.swift:919-922` remaps identically | PASS |
 | SwitchMLP (relu² 2-proj, NOT SwitchGLU) | yes | `NemotronHSwitchMLP` with `isSwitchGLU=false` | PASS |
-| 8-bit high-to-low gate dequant | yes (`project_nemotron_jang.md`) | **Not verified in this audit** — needs inspection of JANG loader gate path | PARTIAL — flag for follow-up |
-| MTP filter | Python strips MTP weights pre-load | **Not verified** — check JangLoader | PARTIAL |
+| 8-bit high-to-low gate dequant | yes (`project_nemotron_jang.md`) | Verified 2026-07-01 vs reference: `JangMXTQDequant.swift:255-276` unpack order is bit-identical to reference `TQBitPack.swift:77-88` (low-bit-first extraction, `i * bits` shifts); gate dequant `JangLoader.swift:644-707` matches reference exactly | PASS |
+| MTP filter | Python strips MTP weights pre-load | Verified 2026-07-01: `NemotronH.swift` sanitize filters `mtp.` + `.importance` + multimodal heads, semantically identical to reference `NemotronH.swift:897-914` / Python `jang_loader.py` | PASS |
 | 40 Mamba + 8 KV cache reconstruction | BatchKVCache list/tuple fix | hybrid cacheType + CacheCoordinator hybrid branch | PASS (structural) |
 | Latent MoE (`fc1_latent_proj`) | yes | `NemotronH.swift:591-658` implements the latent compress → experts → latent expand pattern | PASS |
 
@@ -95,25 +95,30 @@ templates DO stamp their own — so reasoning-off uses §15 fallthrough
 
 ## HIGH-severity findings (ranked)
 
-1. **`reasoning_effort` / `enable_thinking` not forwarded to the Jinja
-   chat template.** Affects MiniMax and Mistral4 most severely; also
-   affects any model whose template branches on these flags (Qwen3.5 is
-   partially handled because Swift injects a `<think>\n</think>` stub
-   when `thinkInTemplate=false`, and routes stray reasoning via §15 when
-   `thinkInTemplate=true`). Fix requires plumbing `additionalContext`
-   into `Tokenizer.applyChatTemplate` and every model's chat-template
-   call site. OpenAI route already parses `reasoning.effort` — the
-   value is just dropped. See `Stream.swift:278` — `effectiveThinking`
-   resolves but is never passed to the template renderer.
+1. **RESOLVED 2026-07-01 — `reasoning_effort` / `enable_thinking` template
+   forwarding.** The standard stream path had already gained the wiring
+   (deep audit 2026-04-14 #1: `Engine.buildTemplateExtras` →
+   `UserInput.additionalContext`). The 2026-07-01 pass closed the two
+   REMAINING holes: (a) the `gen_prompt_len` cache-suffix measurement
+   renders in `Stream.swift` now use the same template extras as the
+   real prompt (was: bare `add_generation_prompt`, wrong under template
+   override / thinking flags), and (b) the DFlash speculative path now
+   threads the full extras into its prompt render + mirrors the
+   iter-122 §197 stub strip (was: no extras at all — MiniMax DFlash
+   targets stamped reasoning in reasoning-off mode).
 
-2. **Nemotron JANG gate dequant (8-bit high-to-low) not verified.**
-   Historical regression source. Audit `JangLoader.swift` +
-   `NemotronH.swift` initializer for explicit high→low bit ordering
-   on the gate tensor.
+2. **RESOLVED 2026-07-01 — Nemotron JANG gate dequant verified correct.**
+   Fork unpack (`JangMXTQDequant.swift:255-276`) is bit-identical to
+   reference `TQBitPack.swift:77-88`; gate dequant path
+   (`JangLoader.swift:644-707`) matches reference exactly. The doc's
+   "high-to-low" phrasing described the historical bug, not the correct
+   order — both implementations extract low-bits-first (`i * bits`
+   shifts), matching Python.
 
-3. **Nemotron MTP weight filtering.** Python strips MTP layers before
-   load (smelt contamination). Swift JangLoader may or may not — not
-   verified in this audit.
+3. **RESOLVED 2026-07-01 — Nemotron MTP weight filtering verified
+   correct.** Fork sanitize strips `mtp.` + `.importance` + multimodal
+   heads, semantically identical to reference and Python
+   `jang_loader.py`.
 
 4. **Flash MoE slot bank default still 64 for explicit user settings.**
    Auto-size now kicks in only when user left the default. If a user

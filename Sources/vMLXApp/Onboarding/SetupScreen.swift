@@ -391,6 +391,7 @@ struct SetupScreen: View {
                 Text(status)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
+                    .textSelection(.enabled)
             }
             Spacer()
         }

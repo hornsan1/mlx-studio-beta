@@ -584,6 +584,9 @@ struct TrayItem: View {
                 Picker("", selection: Binding(
                     get: { draft.kvCacheQuantization },
                     set: { draft.kvCacheQuantization = $0; schedulePush() })) {
+                    // 2026-07-01: "None" restored — see SessionConfigForm;
+                    // measured TQ decode cost makes raw KV the default.
+                    Text("None").tag("none")
                     Text("TurboQuant").tag("turboquant")
                     Text("Q8").tag("q8")
                     Text("Q4").tag("q4")

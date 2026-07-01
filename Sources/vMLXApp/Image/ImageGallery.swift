@@ -606,9 +606,11 @@ struct ImageGallery: View {
                      : banner.title)
                     .font(Theme.Typography.bodyHi)
                     .foregroundStyle(Theme.Colors.textHigh)
+                    .textSelection(.enabled)
                 Text(banner.message)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
+                    .textSelection(.enabled)
             }
             Spacer()
             Button {

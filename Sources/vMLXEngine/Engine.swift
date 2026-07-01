@@ -46,20 +46,22 @@ public actor Engine {
         // (CLI chat/embedding subcommands) preserves prior behavior.
         public var usePagedCache: Bool = true
         public var pagedCacheBlockSize: Int = 64
-        // TurboQuant KV compression: default-OFF (perf audit 2026-04-16).
-        // Measured impact of flipping to default-off: Nemotron-Cascade-2-30B
-        // A3B 2.4 → 59.8 tok/s (25× speedup), Gemma-4-26B-A4B 34.9 → 49.0
-        // tok/s (+40%), Qwen3.5-9B 69.5 → 78.3 tok/s (+13%). The decode-time
-        // iter-64: flipped back to true per user directive — TurboQuant
-        // is the native default for vMLX v2. Production priority is
-        // memory savings on long contexts; users measuring raw decode
-        // tok/s can disable via settings UI, `vmlxctl serve
-        // --disable-turboquant`, or `VMLX_DISABLE_TURBO_QUANT=1`. MLA
-        // models auto-skip via `cacheTypeIsMLA` guard (Stream.swift:~2146);
-        // hybrid-SSM mamba layers auto-skip via the `KVCacheSimple`-only
-        // compression path in `maybeQuantizeKVCache`. JANG calibrated
-        // models continue to auto-activate regardless of this flag.
-        public var enableTurboQuant: Bool = true
+        // TurboQuant KV compression: default-OFF (2026-07-01,
+        // measurement-backed; mirrors GlobalSettings.kvCacheQuantization
+        // = "none", the canonical field this Bool is derived from in the
+        // settings resolver). Controlled A/B on M4 Pro 48GB,
+        // Qwen3.5-27B-4bit, 10.4k-token context (past the 4096-token
+        // compression window): TQ-on decoded ~8.4 tok/s vs ~14.1 with TQ
+        // off — ≈40% decode cost, no benefit when unified memory is not
+        // the constraint. Full history + earlier MoE measurements in the
+        // comment on GlobalSettings.kvCacheQuantization
+        // (SettingsTypes.swift). Opt-in: settings UI picker or
+        // `vmlxctl serve --enable-turbo-quant`. MLA models auto-skip via
+        // `cacheTypeIsMLA` guard (Stream.swift:~2146); hybrid-SSM mamba
+        // layers auto-skip via the `KVCacheSimple`-only compression path
+        // in `maybeQuantizeKVCache`. JANG calibrated models continue to
+        // auto-activate regardless of this flag.
+        public var enableTurboQuant: Bool = false
         public var enableJANG: Bool = true
         public var enablePrefixCache: Bool = true
         public var enableSSMCompanion: Bool = true

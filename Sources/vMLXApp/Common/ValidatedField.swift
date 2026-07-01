@@ -91,6 +91,7 @@ struct ValidatedField: View {
                 Text(error)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Color.red.opacity(0.9))
+                    .textSelection(.enabled)
             }
         }
     }

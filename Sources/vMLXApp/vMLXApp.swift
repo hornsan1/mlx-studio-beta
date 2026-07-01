@@ -154,6 +154,9 @@ struct MLXStudioApp: App {
             TrayItem()
                 .environment(appState)
                 .environment(\.appLocale, uiLocale)
+                // §F4 — tray popover text (model path, base URL, log tail)
+                // is copy-selectable like every other scene.
+                .textSelection(.enabled)
         }
         .menuBarExtraStyle(.window)
 
@@ -1851,6 +1854,7 @@ struct BannerView: View {
         Text(message)
             .font(Theme.Typography.bodyHi)
             .foregroundStyle(Theme.Colors.textHigh)
+            .textSelection(.enabled)
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.vertical, Theme.Spacing.sm)
             .background(

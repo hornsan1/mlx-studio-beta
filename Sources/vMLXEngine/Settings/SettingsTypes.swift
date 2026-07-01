@@ -196,26 +196,31 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     /// recommended in production).
     public var maxPromptTokens: Int = 262_144
 
-    // KV cache quantization. `none | q4 | q8 | turboquant`. Default is
-    // `none` as of perf audit 2026-04-16 — the previous `turboquant`
-    // default carried a 40-96% decode-speed tax on MoE / hybrid models:
-    // Nemotron-Cascade-2-30B-A3B 2.4 → 59.8 tok/s (25× speedup),
-    // Gemma-4-26B-A4B 34.9 → 49.0 tok/s (+40%), Qwen3.5-9B 69.5 → 78.3
-    // tok/s (+13%). The TQ compress+dequant cycle per decode step on the
-    // attention-half of layers dominated generation time. Users who need
-    // the 4× KV memory headroom for long contexts can opt back in via
-    // settings, and JANG models with a calibrated `turboquant` block in
+    // KV cache quantization. `none | q4 | q8 | turboquant`. This string
+    // is the CANONICAL source of truth for TurboQuant activation — the
+    // settings resolver derives `enableTurboQuant` from it (audit
+    // 2026-04-16 UX #3, SettingsStore.resolved()).
+    //
+    // Default `none` (2026-07-01, third flip — measurement-backed):
+    //   - 2026-04-16 perf audit: `turboquant` default carried a 40-96%
+    //     decode tax on MoE/hybrid (Nemotron-Cascade 2.4 → 59.8 tok/s,
+    //     Gemma-4-26B +40%, Qwen3.5-9B +13% when disabled) → `none`.
+    //   - 2026-04-30 user directive (iter-64/67): back to `turboquant`,
+    //     prioritizing long-context memory headroom; "None" removed
+    //     from the SessionConfigForm picker.
+    //   - 2026-07-01 controlled A/B (env-killswitch OFF vs explicit ON;
+    //     the earlier CLI-flag A/B was invalid because the flags only
+    //     wrote the derived Bool): M4 Pro 48GB, Qwen3.5-27B-4bit dense,
+    //     10.4k-token context — TQ-on decoded ~8.4 tok/s vs ~14.1 with
+    //     TQ off (≈40% decode cost past the 4096-token compression
+    //     window). Raw KV is the right default when unified memory is
+    //     not the constraint; contexts under 4096 tokens never engage
+    //     TQ either way. "None" restored to the pickers.
+    // JANG models with a calibrated `turboquant` block in
     // `jang_config.json` still auto-activate TQ via the
-    // `loadedJangConfig?.turboquant` path in `Stream.buildGenerateParameters`.
-    // Default-on TurboQuant KV cache (user directive 2026-04-30): the
-    // Server / Chat / Session settings UI surfaces should never present
-    // "None" as the default since that means raw fp16 KV cache and is a
-    // memory regression vs TurboQuant. The segmented picker in
-    // SessionConfigForm only exposes turboquant/q8/q4 (none was removed
-    // in iter-67); aligning the backing default here so a freshly-
-    // created session lands on TurboQuant without the picker silently
-    // mapping "none" → "q8".
-    public var kvCacheQuantization: String = "turboquant"  // cli.py --kv-cache-quantization: q4|q8|turboquant
+    // `loadedJangConfig?.turboquant` path in
+    // `Stream.buildGenerateParameters` regardless of this default.
+    public var kvCacheQuantization: String = "none"  // cli.py --kv-cache-quantization: none|q4|q8|turboquant
     // REVIEW LOW-19 ORPHAN (2026-07-01): settable (CLI --kv-cache-group-size,
     // forwarded into LoadOptions) but no Swift consumer reads it — the KV
     // quantizer does not currently parameterize its group size from this
@@ -229,9 +234,10 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     // cache kind (plain KVCacheSimple, QuantizedKVCache, TurboQuantKVCache,
     // MambaCache, the Nemotron-H / Qwen3.5-A3B / Jamba / FalconH1 hybrid
     // mix, and VL JANG) and round-trip is live-verified on the 2026-04-13
-    // cross-matrix. With TurboQuant also default-on, the on-disk payload
-    // is ~26× smaller than raw float16 so the 10 GB default budget covers
-    // many multi-turn sessions without the user doing anything.
+    // cross-matrix. (When TurboQuant is enabled the on-disk payload is
+    // ~26× smaller than raw float16; with the 2026-07-01 TQ default-off,
+    // raw-KV sessions consume the 10 GB budget faster — still enough for
+    // typical multi-turn use.)
     //
     // Users can still disable via the Server settings panel toggle or
     // `--disable-disk-cache` CLI flag.
@@ -290,29 +296,13 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     // `KVCacheSimple` layers and skips `MambaCache`/`RotatingKVCache`/
     // `CacheList` — Nemotron-H, Qwen3-Next, Jamba, FalconH1 etc. keep
     // their SSM paths untouched.
-    // Default-ON (iter-64 — user directive): TurboQuant KV cache is the
-    // NATIVE DEFAULT for vMLX v2. Production priority is memory savings
-    // on long contexts over raw decode throughput. Users who want to
-    // A/B against plain KV can flip `enableTurboQuant=false` via the
-    // Server tab's Cache section, the `vmlxctl serve --disable-turboquant`
-    // flag, or the `VMLX_DISABLE_TURBO_QUANT=1` env killswitch.
-    //
-    // History: iter-16 (2026-04-16) flipped this to false after a perf
-    // audit found 25-40% decode regressions on MoE/hybrid models. The
-    // user directive in iter-64 explicitly reinstates default-on because
-    // (a) most production queries need long context more than peak tok/s,
-    // (b) MLA models already skip TQ via `cacheTypeIsMLA` guard at
-    // Stream.swift:~2146, (c) hybrid-SSM mamba layers skip TQ via
-    // `maybeQuantizeKVCache`'s `KVCacheSimple`-only compression (SSM
-    // state + rotating windows pass through untouched), (d) the env
-    // killswitch makes A/B testing trivial.
-    //
-    // JANG models with calibrated `turboquant` blocks in their
-    // `jang_config.json` still auto-activate TQ through the explicit
-    // `loadedJangConfig?.turboquant` check in Stream.swift — that path
-    // does NOT read this flag, so calibrated models keep their ship-time
-    // behavior regardless of this default.
-    public var enableTurboQuant: Bool = true
+    // NOTE: derived field — the settings resolver overwrites this from
+    // `kvCacheQuantization` ("turboquant" → true, anything else → false;
+    // audit 2026-04-16 UX #3). The default here just mirrors the
+    // canonical `kvCacheQuantization = "none"` default above so bare
+    // GlobalSettings() construction is self-consistent. Measurement
+    // history lives in the kvCacheQuantization comment.
+    public var enableTurboQuant: Bool = false
     public var turboQuantBits: Int = 4
 
     // §403 — sliding-window mode override.

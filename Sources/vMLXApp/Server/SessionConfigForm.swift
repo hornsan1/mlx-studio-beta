@@ -306,6 +306,7 @@ struct SessionConfigForm: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .textSelection(.enabled)
             }
             .padding(.leading, 20)
             HStack {
@@ -326,10 +327,13 @@ struct SessionConfigForm: View {
             get: { s.kvCacheQuantization ?? globalDefaults.kvCacheQuantization },
             set: { s.kvCacheQuantization = $0; commit() }
         )) {
-            // Audit 2026-04-16: lead with TurboQuant (default + recommended).
-            // "None" removed — users shouldn't accidentally downgrade from
-            // TQ to raw fp16 KV cache; the advanced fixed-bit options stay
-            // available for comparison/testing.
+            // 2026-07-01: "None" restored and leads — measured A/B on
+            // M4 Pro 48GB (Qwen3.5-27B-4bit, 10.4k-token context) put
+            // TQ-on at a large decode-throughput cost once past the 4096
+            // compression window, so raw KV is the right default when
+            // unified memory is not the constraint. TurboQuant remains
+            // the recommended pick for memory-constrained setups.
+            Text("None").tag("none")
             Text("TurboQuant").tag("turboquant")
             Text("Q8").tag("q8")
             Text("Q4").tag("q4")

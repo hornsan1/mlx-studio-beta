@@ -228,6 +228,7 @@ struct MCPPanel: View {
                     .foregroundStyle(Theme.Colors.danger)
                     .lineLimit(2)
                     .truncationMode(.tail)
+                    .textSelection(.enabled)
                     .padding(.leading, 18)  // align under server name
             }
         }
@@ -663,6 +664,7 @@ struct MCPServerEditor: View {
                 Text(err)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.danger)
+                    .textSelection(.enabled)
             }
 
             HStack {
