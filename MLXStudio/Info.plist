@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>MLX Studio</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>safetensors</string>
+				<string>gguf</string>
+				<string>mlxq</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Model file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleExecutable</key>
+	<string>MLXStudio</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.dealign.mlxstudio.beta</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MLX Studio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>ai.dealign.mlxstudio.beta</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>mlxstudio</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>MLX Studio uses Apple Events to reveal files in Finder and coordinate with system tools when requested.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mlxstudio._tcp</string>
+		<string>_http._tcp</string>
+	</array>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>MLX Studio may save generated files and exported chats to your Downloads folder.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 DeAlign. All rights reserved.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MLX Studio serves local OpenAI/Ollama-compatible HTTP endpoints when Server mode is enabled.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MLX Studio needs microphone access if you record voice prompts for transcription.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

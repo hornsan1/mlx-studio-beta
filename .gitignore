@@ -1,0 +1,73 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Xcode build artifacts
+build/
+DerivedData/
+# scripts/build-release.sh writes archives, DMGs, and notarization zips here
+release/
+# scripts/package-mlx-studio-app.sh writes local beta app bundles here
+dist/
+
+# xcodegen output (committed only when regenerated)
+vMLX.xcodeproj/
+
+# Signing secrets
+.env.signing
+*.p12
+*.cer
+*.mobileprovision
+
+# macOS
+.DS_Store
+
+# Logs / temp
+*.log
+*.tmp
+.preview/
+*.zip
+*.dmg
+outputs/
+
+# Internal — never push to dev
+/Tests/
+!/tests/
+!/tests/**
+tests/e2e/reports/
+.claude/
+SESSION-*.md
+SWIFT-V2-PRODUCTION-AUDIT-*.md
+tests/e2e/AUDIT-REPORT.md
+tests/e2e/MATRIX.md
+docs/SESSION-*.md
+docs/session-*.md
+AUDIT-*.md
+AUDIT-*.txt
+APP-SURFACE-AUDIT-*.md
+SWIFT-DEEP-NUANCE-AUDIT-*.md
+SWIFT-ENGINE-ISSUES-AUDIT.md
+SWIFT-NO-REGRESSION-CHECKLIST.md
+SWIFT-PER-FAMILY-MATRIX-*.md
+SWIFT-REGRESSION-*.md
+UX-AUDIT.md
+PROGRESS.md
+HANDOFF-*.md
+BENCHMARK-*.md
+FLASH-MOE-UI-AUDIT-*.md
+TEST-MATRIX-*.md
+# Top-level internal audit artefacts ONLY — leading `/` anchors these
+# to the repo root so `docs/PERF-MOE-HALF-SPEED-ROOT-CAUSE.md` (a
+# reference doc that SHOULD ship) isn't accidentally swept up.
+/PERF-*.md
+/GEMMA4-*.md
+/WHY-*.md
+/REGRESSION-GUARD-*.md
+.agents/
+.sisyphus/
+.playwright-mcp/
+.env.signing.example
+.env.signing

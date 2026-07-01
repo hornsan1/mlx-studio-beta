@@ -1,0 +1,823 @@
+// Copyright © 2025 Apple Inc.
+
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/deepseek_v3.py
+
+import Foundation
+import MLX
+import vMLXLMCommon
+import MLXNN
+
+public struct DeepseekV3Configuration: Codable, Sendable {
+    var vocabSize: Int
+    var hiddenSize: Int
+    var intermediateSize: Int
+    var moeIntermediateSize: Int
+    var numHiddenLayers: Int
+    var numAttentionHeads: Int
+    var numKeyValueHeads: Int
+    var nSharedExperts: Int?
+    var nRoutedExperts: Int?
+    var routedScalingFactor: Float
+    var kvLoraRank: Int
+    var qLoraRank: Int
+    var qkRopeHeadDim: Int
+    var vHeadDim: Int
+    var qkNopeHeadDim: Int
+    var normTopkProb: Bool
+    var nGroup: Int?
+    var topkGroup: Int?
+    var numExpertsPerTok: Int?
+    var moeLayerFreq: Int
+    var firstKDenseReplace: Int
+    var maxPositionEmbeddings: Int
+    var rmsNormEps: Float
+    var ropeTheta: Float
+    var ropeScaling: [String: StringOrNumber]?
+    var attentionBias: Bool
+    // GLM-5.1 (model_type=glm_moe_dsa) adds a DeepSeek-Sparse-Attention
+    // indexer. These fields are absent in plain deepseek_v3/v2 configs,
+    // so they're optional — if any is nil the Indexer is not instantiated
+    // and the attention runs its standard dense path.
+    // Ralph iter-28: S03 chunk, indexer wiring prep.
+    var indexHeadDim: Int?
+    var indexNHeads: Int?
+    var indexTopk: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case vocabSize = "vocab_size"
+        case hiddenSize = "hidden_size"
+        case intermediateSize = "intermediate_size"
+        case moeIntermediateSize = "moe_intermediate_size"
+        case numHiddenLayers = "num_hidden_layers"
+        case numAttentionHeads = "num_attention_heads"
+        case numKeyValueHeads = "num_key_value_heads"
+        case nSharedExperts = "n_shared_experts"
+        case nRoutedExperts = "n_routed_experts"
+        case routedScalingFactor = "routed_scaling_factor"
+        case kvLoraRank = "kv_lora_rank"
+        case qLoraRank = "q_lora_rank"
+        case qkRopeHeadDim = "qk_rope_head_dim"
+        case vHeadDim = "v_head_dim"
+        case qkNopeHeadDim = "qk_nope_head_dim"
+        case normTopkProb = "norm_topk_prob"
+        case nGroup = "n_group"
+        case topkGroup = "topk_group"
+        case numExpertsPerTok = "num_experts_per_tok"
+        case moeLayerFreq = "moe_layer_freq"
+        case firstKDenseReplace = "first_k_dense_replace"
+        case maxPositionEmbeddings = "max_position_embeddings"
+        case rmsNormEps = "rms_norm_eps"
+        case ropeTheta = "rope_theta"
+        case ropeScaling = "rope_scaling"
+        case attentionBias = "attention_bias"
+        // GLM-5.1 DSA fields (all optional — plain deepseek_v3 omits them)
+        case indexHeadDim = "index_head_dim"
+        case indexNHeads = "index_n_heads"
+        case indexTopk = "index_topk"
+    }
+}
+
+private func yarnFindCorrectionDim(
+    numRotations: Float, dim: Float, base: Float = 10000, maxPositionEmbeddings: Float = 2048
+) -> Float {
+    return (dim * log(maxPositionEmbeddings / (numRotations * 2 * Float.pi))) / (2 * log(base))
+}
+
+private func yarnFindCorrectionRange(
+    lowRot: Float, highRot: Float, dim: Float, base: Float = 10000,
+    maxPositionEmbeddings: Float = 2048
+) -> (Float, Float) {
+    let low = floor(
+        yarnFindCorrectionDim(
+            numRotations: lowRot, dim: dim, base: base, maxPositionEmbeddings: maxPositionEmbeddings
+        ))
+    let high = ceil(
+        yarnFindCorrectionDim(
+            numRotations: highRot, dim: dim, base: base,
+            maxPositionEmbeddings: maxPositionEmbeddings))
+    return (max(low, 0), min(high, dim - 1))
+}
+
+private func clippedSilu(_ x: MLXArray) -> MLXArray {
+    clip(x * sigmoid(x), min: -100, max: 100)
+}
+
+class DeepseekV3Attention: Module {
+    var config: DeepseekV3Configuration
+    var hiddenSize: Int
+    var numHeads: Int
+    var maxPositionEmbeddings: Int
+    var ropeTheta: Float
+    var qLoraRank: Int?
+    var qkRopeHeadDim: Int
+    var kvLoraRank: Int
+    var vHeadDim: Int
+    var qkNopeHeadDim: Int
+    var qHeadDim: Int
+    var scale: Float
+
+    let rope: RoPELayer
+    @ModuleInfo(key: "q_proj") var qProj: Linear?
+    @ModuleInfo(key: "q_a_proj") var qAProj: Linear?
+    @ModuleInfo(key: "q_a_layernorm") var qALayerNorm: RMSNorm?
+    @ModuleInfo(key: "q_b_proj") var qBProj: Linear?
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+    @ModuleInfo(key: "kv_a_proj_with_mqa") var kvAProjWithMqa: Linear
+    @ModuleInfo(key: "kv_a_layernorm") var kvALayerNorm: RMSNorm
+    @ModuleInfo(key: "kv_b_proj") var kvBProj: Linear
+    /// DSA Indexer (GLM-5.1 `model_type: "glm_moe_dsa"` only). Absent on
+    /// plain deepseek_v3/v2 configs. When present, its output feeds
+    /// sparse top-k attention selection. Ralph iter-28: field landed;
+    /// iter-29+ wires it into `callAsFunction`.
+    @ModuleInfo(key: "indexer") var indexer: GlmMoeDsaIndexer?
+
+    init(config: DeepseekV3Configuration) {
+        self.config = config
+        self.hiddenSize = config.hiddenSize
+        self.numHeads = config.numAttentionHeads
+        self.maxPositionEmbeddings = config.maxPositionEmbeddings
+        self.ropeTheta = config.ropeTheta
+        self.qLoraRank = config.qLoraRank
+        self.qkRopeHeadDim = config.qkRopeHeadDim
+        self.kvLoraRank = config.kvLoraRank
+        self.vHeadDim = config.vHeadDim
+        self.qkNopeHeadDim = config.qkNopeHeadDim
+        self.qHeadDim = config.qkNopeHeadDim + config.qkRopeHeadDim
+
+        self.scale = pow(Float(qHeadDim), -0.5)
+
+        if let qLoraRank = qLoraRank {
+            self._qAProj.wrappedValue = Linear(
+                hiddenSize, qLoraRank, bias: config.attentionBias
+            )
+            self._qALayerNorm.wrappedValue = RMSNorm(dimensions: qLoraRank)
+            self._qBProj.wrappedValue = Linear(
+                qLoraRank, numHeads * qHeadDim, bias: false
+            )
+        } else {
+            self._qProj.wrappedValue = Linear(hiddenSize, numHeads * qHeadDim, bias: false)
+        }
+
+        self._kvAProjWithMqa.wrappedValue = Linear(
+            hiddenSize,
+            kvLoraRank + qkRopeHeadDim,
+            bias: config.attentionBias
+        )
+        self._kvALayerNorm.wrappedValue = RMSNorm(dimensions: kvLoraRank)
+        self._kvBProj.wrappedValue = Linear(
+            kvLoraRank,
+            numHeads * (qHeadDim - qkRopeHeadDim + vHeadDim),
+            bias: false
+        )
+        self._oProj.wrappedValue = Linear(
+            numHeads * vHeadDim, hiddenSize, bias: config.attentionBias)
+
+        if let ropeScaling = config.ropeScaling {
+            let mScaleAllDim = ropeScaling["mscale_all_dim"]?.asFloat() ?? 0.0
+            if mScaleAllDim != 0 {
+                let scalingFactor = ropeScaling["factor"]?.asFloat() ?? 1.0
+                if scalingFactor > 1 {
+                    let s = 0.1 * mScaleAllDim * log(scalingFactor) + 1.0
+                    self.scale = self.scale * s * s
+                }
+            }
+        }
+
+        self.rope = initializeRope(
+            dims: qkRopeHeadDim, base: ropeTheta, traditional: true,
+            scalingConfig: config.ropeScaling, maxPositionEmbeddings: maxPositionEmbeddings)
+
+        // GLM-5.1 DSA Indexer (Ralph iter-28). Instantiated only when
+        // the config advertises the three index_* fields. For plain
+        // deepseek_v3 / v2 / kimi_k25 the indexer stays nil and the
+        // attention runs its standard dense path. Wiring into
+        // `callAsFunction` lands in a follow-up iter (S03 remainder).
+        if let indexHeadDim = config.indexHeadDim,
+           let indexNHeads = config.indexNHeads,
+           let indexTopk = config.indexTopk {
+            // `config.qLoraRank` is required (non-optional) on the
+            // configuration; MLA-capable configs always provide it.
+            self._indexer.wrappedValue = GlmMoeDsaIndexer(
+                hiddenSize: hiddenSize,
+                indexNHeads: indexNHeads,
+                indexHeadDim: indexHeadDim,
+                qkRopeHeadDim: qkRopeHeadDim,
+                indexTopk: indexTopk,
+                qLoraRank: config.qLoraRank,
+                ropeTheta: ropeTheta,
+                maxPositionEmbeddings: maxPositionEmbeddings,
+                ropeScaling: config.ropeScaling
+            )
+        }
+    }
+
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> MLXArray {
+        let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
+
+        // Ralph iter-30: expose `qr` as a local so a later iter can feed
+        // it into the GLM-5.1 DSA Indexer (`self.indexer(x, qr: qr, ...)`).
+        // Behavior unchanged when `self.indexer == nil`. When non-nil,
+        // we perform a no-behavior-change indexer call site for
+        // structural prep; full sparse-gather wiring lands in iter-31+.
+        var q: MLXArray
+        var qr: MLXArray? = nil
+        if qLoraRank == nil {
+            q = self.qProj!(x)
+        } else {
+            let qrLocal = self.qALayerNorm!(self.qAProj!(x))
+            qr = qrLocal
+            q = self.qBProj!(qrLocal)
+        }
+
+        // GLM-5.1 DSA Indexer call site (iter-30 structural prep).
+        // Computes top-k attention indices; not yet consumed by the
+        // attention forward. MLX lazy-evaluates the graph so an unused
+        // return is pruned — this is intentional pending iter-31's
+        // sparse-gather integration. Compiles + loads the indexer's
+        // weight tensors from the bundle so safetensors loading of a
+        // GLM-5.1 `self_attn.indexer.*` tensor set does not fail.
+        //
+        // iter-37 note: full sparse-gather wiring requires refactoring
+        // the attention forward to use MLA "absorb" (Python deepseek_v32.py
+        // lines 188-264) pattern where pe_scores and nope_scores are
+        // computed separately and an MLXArray mask is materialized. Swift's
+        // `attentionWithCacheUpdate` takes `MLXFast.ScaledDotProductAttentionMaskMode`
+        // (an enum) not an MLXArray mask, so the sparse-mask path can't
+        // simply AND into the existing API. The required refactor is
+        // ~150 LOC — larger than a single Ralph iter. Tracked as S03b.
+        //
+        // Until then, keep the no-behavior-change call so indexer weights
+        // still load correctly from safetensors.
+        if let indexer = self.indexer, let qr = qr {
+            let offset = cache?.offset ?? 0
+            _ = indexer(x, qr: qr, mask: nil, offset: offset)
+        }
+
+        q = q.reshaped(B, L, self.numHeads, self.qHeadDim).transposed(0, 2, 1, 3)
+        let splitQ = split(q, indices: [qkNopeHeadDim], axis: -1)
+        var (qNope, qPe) = (splitQ[0], splitQ[1])
+        var compressedKv = self.kvAProjWithMqa(x)
+        let splitCompressedKv = split(compressedKv, indices: [kvLoraRank], axis: -1)
+        compressedKv = splitCompressedKv[0]
+        var kPe = splitCompressedKv[1]
+        kPe = kPe.reshaped(B, L, 1, self.qkRopeHeadDim).transposed(0, 2, 1, 3)
+        var kv = self.kvBProj(kvALayerNorm(compressedKv))
+        kv = kv.reshaped(B, L, self.numHeads, -1).transposed(0, 2, 1, 3)
+        let splitKv = split(kv, indices: [self.qkNopeHeadDim], axis: -1)
+
+        var (kNope, values) = (splitKv[0], splitKv[1])
+
+        qPe = applyRotaryPosition(rope, to: qPe, cache: cache)
+        kPe = applyRotaryPosition(rope, to: kPe, cache: cache)
+        kPe = repeated(kPe, count: numHeads, axis: 1)
+
+        var keys: MLXArray
+        if let cache = cache {
+            (keys, values) = cache.update(
+                keys: concatenated([kNope, kPe], axis: -1), values: values)
+        } else {
+            keys = concatenated([kNope, kPe], axis: -1)
+        }
+
+        let queries = concatenated([qNope, qPe], axis: -1)
+
+        let output = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask
+        )
+        .transposed(0, 2, 1, 3)
+        .reshaped(B, L, -1)
+
+        return self.oProj(output)
+    }
+
+    /// Apply DSA sparse attention given a topk_indices tensor from the
+    /// GLM-5.1 Indexer.
+    ///
+    /// Ralph iter-35: pure-function port of the sparse-gather branch in
+    /// `mlx_lm/models/deepseek_v32.py:211-234`. This helper is not yet
+    /// called by `callAsFunction` — integration lands in a follow-up
+    /// E iter (iter-37 per the iter-34 plan). Keeping it as a standalone
+    /// method lets the sparse-path math be unit-tested independently of
+    /// the attention forward.
+    ///
+    /// - Parameters:
+    ///   - topkIndices: output of `GlmMoeDsaIndexer(x, qr:)`, shape
+    ///     `(batch, 1, seqLen, indexTopk)`, or nil when kv length was
+    ///     already ≤ indexTopk.
+    ///   - kvLatent: `(batch, 1, kvLen, kvLoraRank)`. Consumed and
+    ///     returned, possibly sliced to top-k along axis=2 for L==1.
+    ///   - kPe: `(batch, numHeads, kvLen, qkRopeHeadDim)`. Same.
+    ///   - mask: existing attention mask (or nil). Merged with the
+    ///     sparse mask for L>1. Forced to nil for L==1 (taken care of
+    ///     by the gather).
+    ///   - L: sequence length of the query (`x.shape[1]`). Determines
+    ///     whether to use the take-along-axis (L==1) or sparse-mask
+    ///     (L>1) branch.
+    ///
+    /// Returns the updated `(kvLatent, kPe, mask)` triple for the
+    /// caller to plug into the next steps of the attention forward.
+    func applyDsaSparseGather(
+        topkIndices: MLXArray?,
+        kvLatent: MLXArray,
+        kPe: MLXArray,
+        mask: MLXArray?,
+        L: Int
+    ) -> (kvLatent: MLXArray, kPe: MLXArray, mask: MLXArray?) {
+        guard let topkIndices = topkIndices else {
+            // Indexer returned nil (kv length already <= indexTopk) —
+            // attention proceeds dense.
+            return (kvLatent, kPe, mask)
+        }
+
+        if L == 1 {
+            // take_along_axis branch. Python (deepseek_v32.py:213-222):
+            //   idx = topk_indices[:, :, 0, :, None]
+            //   kv_latent = take_along_axis(kv_latent, broadcast_to(idx, …), axis=2)
+            //   k_pe = take_along_axis(k_pe, broadcast_to(idx, …), axis=2)
+            //   mask = None
+            let idx = expandedDimensions(topkIndices[0..., 0..., 0, 0...], axis: -1)
+            // idx shape: (batch, 1, indexTopk, 1)
+            let kvFeat = kvLatent.dim(-1)
+            let kPeFeat = kPe.dim(-1)
+            let idxBroadcastKv = broadcast(
+                idx, to: Array(idx.shape.dropLast()) + [kvFeat]
+            )
+            let idxBroadcastPe = broadcast(
+                idx, to: Array(idx.shape.dropLast()) + [kPeFeat]
+            )
+            let kvGathered = takeAlong(kvLatent, idxBroadcastKv, axis: 2)
+            let kPeGathered = takeAlong(kPe, idxBroadcastPe, axis: 2)
+            return (kvGathered, kPeGathered, nil)
+        }
+
+        // Prefill branch (L > 1). Python (deepseek_v32.py:224-233):
+        //   shape = list(topk_indices.shape); shape[-1] = kv_latent.shape[2]
+        //   sparse_mask = zeros(shape, dtype=bool_)
+        //   sparse_mask = put_along_axis(sparse_mask, topk_indices, True, axis=-1)
+        //   if mask is not None: sparse_mask = sparse_mask & mask
+        //   mask = sparse_mask
+        var sparseShape = topkIndices.shape
+        sparseShape[sparseShape.count - 1] = kvLatent.dim(2)
+        var sparseMask = MLXArray.zeros(sparseShape, dtype: .bool)
+        sparseMask = putAlong(
+            sparseMask, topkIndices,
+            values: MLXArray(true), axis: -1
+        )
+        let merged: MLXArray
+        if let m = mask {
+            merged = logicalAnd(sparseMask, m)
+        } else {
+            merged = sparseMask
+        }
+        return (kvLatent, kPe, merged)
+    }
+}
+
+class DeepseekV3MLP: Module, UnaryLayer {
+    var config: DeepseekV3Configuration
+    var hiddenSize: Int
+    var intermediateSize: Int
+    @ModuleInfo(key: "gate_proj") var gateProj: Linear
+    @ModuleInfo(key: "up_proj") var upProj: Linear
+    @ModuleInfo(key: "down_proj") var downProj: Linear
+
+    init(config: DeepseekV3Configuration, hiddenSize: Int? = nil, intermediateSize: Int? = nil) {
+        self.config = config
+        self.hiddenSize = hiddenSize ?? config.hiddenSize
+        self.intermediateSize = intermediateSize ?? config.intermediateSize
+        self._gateProj.wrappedValue = Linear(self.hiddenSize, self.intermediateSize, bias: false)
+        self._upProj.wrappedValue = Linear(self.hiddenSize, self.intermediateSize, bias: false)
+        self._downProj.wrappedValue = Linear(self.intermediateSize, self.hiddenSize, bias: false)
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        self.downProj(silu(self.gateProj(x)) * self.upProj(x))
+    }
+}
+
+class MoEGate: Module {
+    var config: DeepseekV3Configuration
+    var topK: Int?
+    var normTopkProb: Bool
+    var nRoutedExperts: Int?
+    var routedScalingFactor: Float
+    var nGroup: Int
+    var topkGroup: Int?
+
+    var weight: MLXArray
+    var e_score_correction_bias: MLXArray
+
+    init(config: DeepseekV3Configuration) {
+        self.config = config
+        self.topK = config.numExpertsPerTok
+        self.normTopkProb = config.normTopkProb
+        self.nRoutedExperts = config.nRoutedExperts
+        self.routedScalingFactor = config.routedScalingFactor
+        self.nGroup = config.nGroup ?? 1
+        self.topkGroup = config.topkGroup
+        self.weight = zeros([self.nRoutedExperts ?? 1, config.hiddenSize])
+        self.e_score_correction_bias = zeros([self.nRoutedExperts ?? 1])
+    }
+
+    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
+        let (bsz, seqLen, _) = (x.dim(0), x.dim(1), x.dim(2))
+
+        let hiddenStates = x.matmul(weight.T)
+        var scores = sigmoid(hiddenStates)
+        let scoresForChoice = scores + e_score_correction_bias
+        let groupScores = scoresForChoice.reshaped(bsz, seqLen, self.nGroup, -1)
+        let topKGroup = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
+        var k = nGroup - (topkGroup ?? 1)
+        var groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
+        groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, (nRoutedExperts ?? 1) / nGroup])
+        scores = putAlong(groupScores, stopGradient(groupIdx), values: MLXArray(0.0, dtype: groupScores.dtype), axis: -2)
+        scores = flattened(scores, start: -2, end: -1)
+
+        k = topK ?? 1
+        let inds = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+        scores = takeAlong(scores, inds, axis: -1)
+        if topK ?? 1 > 1, normTopkProb {
+            let denominator = scores.sum(axis: -1, keepDims: true) + MLXArray(1e-20, dtype: scores.dtype)
+            scores = scores / denominator
+            scores = scores * routedScalingFactor
+        }
+
+        return (inds, scores)
+    }
+}
+
+class DeepseekV3MoE: Module, UnaryLayer {
+    var config: DeepseekV3Configuration
+    var numExpertsPerTok: Int
+    @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
+    var gate: MoEGate
+    @ModuleInfo(key: "shared_experts") var sharedExperts: DeepseekV3MLP?
+    /// Flash MoE drop-in replacement for the `switchMLP + weighted-sum`
+    /// path. When set (via `DeepseekV3DecoderLayer.replaceMoEBlock`), the
+    /// block owns routing + expert load + weighted aggregation. The
+    /// sharedExperts path stays native and is added on top. Single
+    /// if-let check per MoE layer per token; not a `@ModuleInfo` because
+    /// the block manages its own weight residency via the slot bank.
+    fileprivate var flashMoeShim: FlashMoEBlock?
+
+    init(config: DeepseekV3Configuration) {
+        self.config = config
+        self.numExpertsPerTok = config.numExpertsPerTok ?? 1
+
+        self._switchMLP.wrappedValue = SwitchGLU(
+            inputDims: config.hiddenSize,
+            hiddenDims: config.moeIntermediateSize,
+            numExperts: config.nRoutedExperts ?? 1,
+            activation: clippedSilu
+        )
+
+        self.gate = MoEGate(config: config)
+
+        if let sharedExpertCount = config.nSharedExperts {
+            let intermediateSize = config.moeIntermediateSize * sharedExpertCount
+            self._sharedExperts.wrappedValue = DeepseekV3MLP(
+                config: config, intermediateSize: intermediateSize)
+        }
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        var y: MLXArray
+        if let shim = flashMoeShim {
+            // FlashMoEBlock handles router + expert load + weighted sum
+            // in one call using its installed `router` closure.
+            y = shim(x)
+        } else {
+            let (indices, scores) = gate(x)
+            y = switchMLP(x, indices)
+            y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        }
+
+        if let shared = sharedExperts {
+            y = y + shared(x)
+        }
+        return y
+    }
+}
+
+class DeepseekV3DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: DeepseekV3Attention
+    var mlp: UnaryLayer
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
+
+    init(config: DeepseekV3Configuration, layerIdx: Int) {
+        self._selfAttn.wrappedValue = DeepseekV3Attention(config: config)
+
+        if config.nRoutedExperts != nil,
+            layerIdx >= config.firstKDenseReplace,
+            layerIdx % config.moeLayerFreq == 0
+        {
+            self.mlp = DeepseekV3MoE(config: config)
+        } else {
+            self.mlp = DeepseekV3MLP(config: config)
+        }
+
+        self._inputLayerNorm.wrappedValue = RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._postAttentionLayerNorm.wrappedValue = RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+    }
+
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> MLXArray {
+        let r = selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
+        let h = x + r
+        let r2 = mlp(postAttentionLayerNorm(h))
+        return h + r2
+    }
+}
+
+public class DeepseekV3ModelInner: Module {
+    var config: DeepseekV3Configuration
+    var vocabSize: Int
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    var layers: [DeepseekV3DecoderLayer]
+    var startIdx: Int
+    var endIdx: Int
+    var numLayers: Int
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+    var pipelineRank: Int
+    var pipelineSize: Int
+
+    init(config: DeepseekV3Configuration) {
+        self.config = config
+        self.vocabSize = config.vocabSize
+        self._embedTokens.wrappedValue = Embedding(
+            embeddingCount: config.vocabSize, dimensions: config.hiddenSize)
+        self.layers = (0 ..< config.numHiddenLayers).map {
+            DeepseekV3DecoderLayer(config: config, layerIdx: $0)
+        }
+        self.startIdx = 0
+        self.endIdx = layers.count
+        self.numLayers = endIdx
+        self._norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self.pipelineRank = 0
+        self.pipelineSize = 1
+    }
+
+    func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
+        var h = embedTokens(x)
+
+        let attentionMask = createAttentionMask(h: h, cache: cache?.first)
+
+        for (i, layer) in layers.enumerated() {
+            h = layer(h, mask: attentionMask, cache: cache?[i])
+        }
+
+        return norm(h)
+    }
+
+    /// Forward pass that also captures per-layer hidden states at each
+    /// requested decoder index. Used by JANG-DFlash to feed target
+    /// hiddens into the drafter's KV injection (see DFlash §4.1).
+    ///
+    /// DeepSeek V3 uses MLA attention — the internal compressed K/V
+    /// representations are not a stable tap surface, so the tap is the
+    /// **post-decoder-block residual hidden state** (same `h` as standard
+    /// forward). This matches MiniMax / Mistral 4 semantics and the
+    /// drafter's distillation contract.
+    ///
+    /// - Parameters:
+    ///   - inputs: token ID tensor `[B, L]`
+    ///   - cache:  optional per-layer KV caches (may be nil for cacheless)
+    ///   - tapLayers: decoder indices whose post-layer hidden state to
+    ///     capture
+    ///   - providedMask: when non-nil, replaces the auto-built causal
+    ///     mask (used for tree-attention verification during spec-dec)
+    func callAsFunctionWithTaps(
+        _ inputs: MLXArray,
+        cache: [KVCache]?,
+        tapLayers: Set<Int>,
+        providedMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil
+    ) -> (output: MLXArray, taps: [Int: MLXArray]) {
+        var h = embedTokens(inputs)
+
+        let mask: MLXFast.ScaledDotProductAttentionMaskMode
+        if let providedMask {
+            mask = providedMask
+        } else {
+            mask = createAttentionMask(h: h, cache: cache?.first)
+        }
+
+        var taps: [Int: MLXArray] = [:]
+        taps.reserveCapacity(tapLayers.count)
+
+        for (i, layer) in layers.enumerated() {
+            h = layer(h, mask: mask, cache: cache?[i])
+            if tapLayers.contains(i) {
+                taps[i] = h
+            }
+        }
+
+        return (norm(h), taps)
+    }
+}
+
+public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+    public var kvHeads: [Int] = []
+
+    var args: DeepseekV3Configuration
+    public var model: DeepseekV3ModelInner
+    @ModuleInfo(key: "lm_head") var lmHead: Linear
+
+    init(_ args: DeepseekV3Configuration) {
+        self.args = args
+        self.model = DeepseekV3ModelInner(config: args)
+        self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
+    }
+
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        let out = model(inputs, cache: cache)
+        return lmHead(out)
+    }
+
+    /// Forward pass that exposes per-layer hidden-state taps alongside
+    /// the logits. Wraps `DeepseekV3ModelInner.callAsFunctionWithTaps`
+    /// and routes the final hidden state through `lm_head` the same way
+    /// as the standard forward.
+    public func callAsFunctionWithTaps(
+        _ inputs: MLXArray,
+        cache: [KVCache]?,
+        tapLayers: Set<Int>,
+        providedMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil
+    ) -> (logits: MLXArray, taps: [Int: MLXArray]) {
+        let (out, taps) = model.callAsFunctionWithTaps(
+            inputs, cache: cache, tapLayers: tapLayers, providedMask: providedMask)
+        return (lmHead(out), taps)
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        // Ralph iter-33: strip multi-token-prediction (MTP) layer weights.
+        // GLM-5.1 (model_type=glm_moe_dsa) bundles include layer-N tensors
+        // (where N = num_hidden_layers) for speculative-decode MTP heads
+        // that the inference model doesn't implement. Mirrors the Python
+        // deepseek_v32.py:509-516 sanitize: drop any `model.layers.{k}.*`
+        // with k >= numHiddenLayers. Also drops ancillary MTP keys
+        // (`enorm`, `hnorm`, `eh_proj`, `shared_head`) that live under
+        // that layer index. Safe for plain deepseek_v3 / v2 bundles which
+        // have no such tensors — the filter simply matches none.
+        let mtpLayerIndex = args.numHiddenLayers
+        var filtered: [String: MLXArray] = [:]
+        filtered.reserveCapacity(weights.count)
+        var strippedCount = 0
+        for (key, value) in weights {
+            let parts = key.split(separator: ".")
+            if parts.count >= 3 && parts[1] == "layers",
+               let layerIdx = Int(parts[2]),
+               layerIdx >= mtpLayerIndex {
+                strippedCount += 1
+                continue
+            }
+            filtered[key] = value
+        }
+        if strippedCount > 0 {
+            // Lightweight observability — matches the loader log noise
+            // level elsewhere in this file.
+            print("DeepseekV3.sanitize: stripped \(strippedCount) MTP layer tensor(s) at index \(mtpLayerIndex)+ (ralph iter-33)")
+        }
+
+        var newWeights = filtered
+
+        func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
+            let bs = 128
+            let (m, n) = (weight.shape[0], weight.shape[1])
+            let padBottom = (bs - m % bs) % bs
+            let padSide = (bs - n % bs) % bs
+
+            var padded = padded(weight, widths: [.init((0, padBottom)), .init((0, padSide))])
+            padded = padded.reshaped([(m + padBottom) / bs, bs, (n + padSide) / bs, bs])
+            let scaled = padded * scaleInv[0..., .newAxis, 0..., .newAxis]
+            return scaled.reshaped([m + padBottom, n + padSide])[0 ..< m, 0 ..< n]
+        }
+
+        // iter-33: iterate `filtered` (MTP-stripped) so the subsequent
+        // dequant + copy-through loop doesn't re-introduce MTP-layer
+        // tensors that we just filtered out. For non-GLM-5.1 configs
+        // `filtered == weights` so behavior is unchanged.
+        for (key, value) in filtered {
+            if key.contains("weight_scale_inv") {
+                let weightKey = key.replacingOccurrences(of: "_scale_inv", with: "")
+                if let weight = filtered[weightKey] {
+                    let dequantized = dequant(weight: weight, scaleInv: value)
+                    newWeights[weightKey] = dequantized
+                }
+            } else if newWeights[key] == nil {
+                newWeights[key] = value
+            }
+        }
+
+        for l in 0 ..< args.numHiddenLayers {
+            let prefix = "model.layers.\(l)"
+            for (_, projName) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
+                for key in ["weight", "scales", "biases"] {
+                    let firstKey = "\(prefix).mlp.experts.0.\(projName).\(key)"
+                    if weights[firstKey] != nil {
+                        let joined = (0 ..< (args.nRoutedExperts ?? 1)).map {
+                            weights["\(prefix).mlp.experts.\($0).\(projName).\(key)"]!
+                        }
+                        newWeights["\(prefix).mlp.switch_mlp.\(projName).\(key)"] = stacked(joined)
+                    }
+                }
+            }
+        }
+
+        return newWeights.filter { key, _ in
+            !key.starts(with: "model.layers.61") && !key.contains("rotary_emb.inv_freq")
+        }
+    }
+
+    public var loraLayers: [Module] {
+        model.layers
+    }
+}
+
+// MARK: - Flash MoE conformance (F-G6)
+//
+// DeepSeek V3 MoE: router (MoEGate with sigmoid + group selection +
+// e_score_correction_bias) + switch_mlp (SwitchGLU) + optional
+// shared_experts (DeepseekV3MLP, added AFTER the expert output).
+//
+// Layout pattern: single-block replacement via `flashMoeShim` field on
+// `DeepseekV3MoE` (same pattern as Gemma4TextModel fix, Gap K). The
+// shim owns router+load+weighted-sum; the shared_experts path stays
+// native and is summed on top. Dense layers (firstKDenseReplace) return
+// `.none` so the traversal skips them.
+//
+// Router closure captures the existing MoEGate, so Flash MoE decode
+// uses identical routing math as the native path. The only change is
+// expert matmul: native runs SwitchGLU inline, Flash MoE streams
+// experts via the slot bank from SSD.
+
+extension DeepseekV3Model: FlashMoEReplaceable {
+    public var flashMoELayers: [FlashMoELayer] {
+        model.layers
+    }
+}
+
+extension DeepseekV3DecoderLayer: FlashMoELayer {
+    public var flashMoELayout: FlashMoELayout {
+        (mlp is DeepseekV3MoE) ? .textPathSwitchGLU : .none
+    }
+
+    public func replaceMoEBlock(with block: FlashMoEBlock) throws {
+        guard let moe = mlp as? DeepseekV3MoE else { return }
+        // Capture the native gate so Flash MoE decode uses the same
+        // sigmoid + group selection + e_score_correction_bias math.
+        let gate = moe.gate
+        let topK = moe.numExpertsPerTok
+        block.topK = topK
+        block.router = { x in
+            return gate(x)
+        }
+        // Install the shim. DeepseekV3MoE.callAsFunction branches on
+        // `flashMoeShim` and still runs sharedExperts on top natively.
+        moe.flashMoeShim = block
+    }
+}
+
+// MARK: - JANG-DFlash target adapter
+//
+// Bridges `DeepseekV3Model.callAsFunctionWithTaps(...)` to the
+// architecture-agnostic `JangDFlashTarget` protocol defined in
+// vMLXLMCommon/DFlash/JangDFlashSpecDec.swift. Mirrors
+// `MiniMaxDFlashTarget` — kept as an adapter (rather than a direct
+// conformance) so vMLXLMCommon stays model-agnostic.
+public final class DeepseekV3DFlashTarget: JangDFlashTarget {
+    public let model: DeepseekV3Model
+
+    public init(_ model: DeepseekV3Model) { self.model = model }
+
+    public func forwardWithTaps(
+        inputs: MLXArray,
+        cache: [KVCache]?,
+        tapLayers: Set<Int>,
+        providedMask: MLXFast.ScaledDotProductAttentionMaskMode?
+    ) -> (logits: MLXArray, taps: [Int: MLXArray]) {
+        return model.callAsFunctionWithTaps(
+            inputs,
+            cache: cache,
+            tapLayers: tapLayers,
+            providedMask: providedMask
+        )
+    }
+
+    public func makeCache() -> [KVCache] {
+        // Same disambiguation trick used in `MiniMaxDFlashTarget` — pass
+        // `parameters: nil` explicitly so the compiler picks the
+        // non-deprecated overload of `makePromptCache`.
+        return makePromptCache(model: model, parameters: nil)
+    }
+}

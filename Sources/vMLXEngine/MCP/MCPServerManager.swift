@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// MCP server manager. Owns one `MCPStdioClient` per configured server,
+// handles lazy startup + handshake, surfaces status for the
+// `/v1/mcp/servers` route, and exposes the flattened tool catalog
+// for `/v1/mcp/tools`.
+//
+// Port of `vmlx_engine/mcp/manager.py` — same responsibilities but
+// Swift-native concurrency instead of threads. The manager itself is
+// an actor so multiple route handlers can call `listTools()` /
+// `executeTool(...)` concurrently without clobbering each other.
+
+import Foundation
+
+public actor MCPServerManager {
+
+    // MARK: - State
+
+    private var config: MCPConfig
+    private var clients: [String: MCPStdioClient] = [:]
+    private var statuses: [String: MCPServerStatus] = [:]
+    /// Cached tool catalog per server, populated after `initialize` +
+    /// `tools/list`. Refreshed when the caller explicitly re-starts a
+    /// server or after a protocol error.
+    private var tools: [String: [MCPTool]] = [:]
+
+    // MARK: - Init
+
+    public init(config: MCPConfig = MCPConfig()) {
+        self.config = config
+        // Seed statuses so /v1/mcp/servers always has a row per config entry.
+        for (name, server) in config.servers {
+            self.statuses[name] = MCPServerStatus(
+                name: name,
+                state: .disconnected,
+                transport: server.transport,
+                timeoutSeconds: server.timeout
+            )
+        }
+    }
+
+    // MARK: - Config swap
+
+    /// Replace the active config. Any currently-running clients whose
+    /// server entry was removed or changed are torn down. New entries
+    /// become discoverable but are not started until first use (lazy).
+    public func setConfig(_ newConfig: MCPConfig) async {
+        // Stop clients whose config disappeared or changed materially.
+        let oldNames = Set(config.servers.keys)
+        let newNames = Set(newConfig.servers.keys)
+        let toStop = oldNames.subtracting(newNames).union(
+            oldNames.intersection(newNames).filter {
+                config.servers[$0] != newConfig.servers[$0]
+            }
+        )
+        for name in toStop {
+            if let client = clients.removeValue(forKey: name) {
+                await client.stop()
+            }
+            tools.removeValue(forKey: name)
+            statuses[name] = nil
+        }
+        // Add fresh rows for new entries.
+        for name in newNames.subtracting(oldNames) {
+            if let server = newConfig.servers[name] {
+                statuses[name] = MCPServerStatus(
+                    name: name,
+                    state: .disconnected,
+                    transport: server.transport,
+                    timeoutSeconds: server.timeout
+                )
+            }
+        }
+        config = newConfig
+    }
+
+    public func currentConfig() -> MCPConfig { config }
+
+    // MARK: - Startup
+
+    /// Start a specific server if it isn't already running. Idempotent.
+    public func startServer(_ name: String) async throws {
+        guard let server = config.servers[name] else {
+            throw MCPError.serverNotFound(name: name)
+        }
+        guard server.enabled else {
+            // Disabled servers aren't an error — they're just skipped.
+            return
+        }
+        if clients[name] != nil { return }
+
+        statuses[name] = MCPServerStatus(
+            name: name,
+            state: .connecting,
+            transport: server.transport,
+            timeoutSeconds: server.timeout
+        )
+        let client = MCPStdioClient(server: server)
+        do {
+            try await client.start()
+            try await client.initialize()
+            let discovered = try await client.listTools()
+            clients[name] = client
+            tools[name] = discovered
+            statuses[name] = MCPServerStatus(
+                name: name,
+                state: .connected,
+                transport: server.transport,
+                toolsCount: discovered.count,
+                error: nil,
+                lastConnected: Date(),
+                timeoutSeconds: server.timeout
+            )
+        } catch {
+            await client.stop()
+            statuses[name] = MCPServerStatus(
+                name: name,
+                state: .error,
+                transport: server.transport,
+                toolsCount: 0,
+                error: String(describing: error),
+                lastConnected: statuses[name]?.lastConnected,
+                timeoutSeconds: server.timeout
+            )
+            throw error
+        }
+    }
+
+    /// Bring every enabled server up in parallel. Failed servers are
+    /// recorded as `.error` state but do not abort the overall start.
+    public func startAll() async {
+        await withTaskGroup(of: Void.self) { group in
+            for (name, server) in config.servers where server.enabled {
+                group.addTask {
+                    try? await self.startServer(name)
+                }
+            }
+        }
+    }
+
+    /// Stop a single server by name. Transitions the status to
+    /// `.disconnected`, tears down the subprocess/transport, and drops
+    /// its tool list from the shared catalog. Safe to call on an already-
+    /// stopped server — the tool cache and client map are both idempotent
+    /// on missing keys.
+    public func stopServer(_ name: String) async throws {
+        guard config.servers[name] != nil else {
+            throw MCPError.serverNotFound(name: name)
+        }
+        if let client = clients[name] {
+            await client.stop()
+            clients.removeValue(forKey: name)
+        }
+        tools.removeValue(forKey: name)
+        if let s = statuses[name] {
+            statuses[name] = MCPServerStatus(
+                name: s.name,
+                state: .disconnected,
+                transport: s.transport,
+                toolsCount: 0,
+                error: nil,
+                lastConnected: s.lastConnected,
+                timeoutSeconds: s.timeoutSeconds
+            )
+        }
+    }
+
+    /// Stop every running client and clear the tool cache.
+    public func stopAll() async {
+        for (name, client) in clients {
+            await client.stop()
+            if let s = statuses[name] {
+                statuses[name] = MCPServerStatus(
+                    name: s.name,
+                    state: .disconnected,
+                    transport: s.transport,
+                    toolsCount: 0,
+                    error: nil,
+                    lastConnected: s.lastConnected,
+                    timeoutSeconds: s.timeoutSeconds
+                )
+            }
+        }
+        clients.removeAll()
+        tools.removeAll()
+    }
+
+    // MARK: - Query
+
+    /// Flattened tool catalog across every connected server, with
+    /// namespacing via `server__tool` in `fullName`.
+    public func listTools() -> [MCPTool] {
+        // Sort by server name for deterministic ordering across runs —
+        // `tools` is a dict and iteration order was nondeterministic, so
+        // the merged tool catalog reached the model in different orders
+        // per restart, changing sampling when the model tie-breaks on
+        // tool position. Audit 2026-04-15.
+        return tools.keys.sorted().flatMap { tools[$0] ?? [] }
+    }
+
+    public func listServers() -> [MCPServerStatus] {
+        config.servers.keys.sorted().compactMap { statuses[$0] }
+    }
+
+    /// §338 (vmlx#47) — look up a tool by its namespaced name
+    /// (`server__tool`) so callers can access its `inputSchemaJSON`
+    /// for pre-dispatch argument coercion. Nil if the tool isn't
+    /// known yet; caller should proceed with the raw arguments.
+    public func findTool(namespaced fullName: String) -> MCPTool? {
+        listTools().first { $0.fullName == fullName }
+    }
+
+    // MARK: - Execution
+
+    /// Execute a tool by its namespaced name (`server__tool`). If the
+    /// server isn't running yet, it's lazily started on first call.
+    public func executeTool(
+        namespaced fullName: String,
+        arguments: [String: Any]
+    ) async throws -> MCPToolResult {
+        // Split `server__tool`. A server name can't contain `__` so
+        // this is unambiguous (matches Python split).
+        let parts = fullName.components(separatedBy: "__")
+        guard parts.count >= 2 else {
+            throw MCPError.protocolError(reason: "tool name missing server prefix")
+        }
+        let serverName = parts[0]
+        let toolName = parts.dropFirst().joined(separator: "__")
+
+        guard config.servers[serverName] != nil else {
+            throw MCPError.serverNotFound(name: serverName)
+        }
+        if clients[serverName] == nil {
+            try await startServer(serverName)
+        }
+        guard let client = clients[serverName] else {
+            throw MCPError.serverNotFound(name: serverName)
+        }
+        // iter-93 §120: if the client throws `.processFailure`, the
+        // subprocess died between calls — handleEOF nilled `process`
+        // on its side but the manager's `clients` map still holds
+        // the zombie. Next invocation would keep throwing through
+        // the stale stdin pipe. Tear it down so the NEXT call starts
+        // fresh via the lazy-start branch above. Status is surfaced
+        // as `.error` so /v1/mcp/servers shows the dead state.
+        do {
+            return try await client.callTool(name: toolName, arguments: arguments)
+        } catch let mcpError as MCPError {
+            if case .processFailure(let reason) = mcpError {
+                await markServerDead(serverName, reason: reason)
+            }
+            throw mcpError
+        }
+    }
+
+    /// Raw JSON-RPC passthrough — forwards an arbitrary `method` +
+    /// `params` to the named MCP server and returns the raw result
+    /// dictionary. Used by `POST /mcp/<server>/<method>` for clients
+    /// that want direct protocol access (e.g. `resources/list`,
+    /// `prompts/get`, custom server extensions).
+    ///
+    /// The server is lazily started if not yet running, mirroring
+    /// `executeTool`. Errors bubble up as `MCPError.serverNotFound`
+    /// or `MCPError.protocolError` / `.timeout` from the transport.
+    public func rawCall(
+        server serverName: String,
+        method: String,
+        params: [String: Any]?
+    ) async throws -> [String: Any] {
+        guard config.servers[serverName] != nil else {
+            throw MCPError.serverNotFound(name: serverName)
+        }
+        if clients[serverName] == nil {
+            try await startServer(serverName)
+        }
+        guard let client = clients[serverName] else {
+            throw MCPError.serverNotFound(name: serverName)
+        }
+        // iter-93 §120: same dead-subprocess teardown as executeTool.
+        do {
+            return try await client.call(method: method, params: params)
+        } catch let mcpError as MCPError {
+            if case .processFailure(let reason) = mcpError {
+                await markServerDead(serverName, reason: reason)
+            }
+            throw mcpError
+        }
+    }
+
+    /// Tear down a zombie client after its subprocess died between
+    /// calls. Called from the `.processFailure` branch of
+    /// `executeTool` / `rawCall`. Status transitions to `.error` so
+    /// `/v1/mcp/servers` surfaces the dead state, and the client is
+    /// dropped from the registry so the NEXT call triggers the
+    /// lazy-start branch above (fresh subprocess).
+    private func markServerDead(_ name: String, reason: String) async {
+        if let client = clients.removeValue(forKey: name) {
+            await client.stop()
+        }
+        tools.removeValue(forKey: name)
+        if let s = statuses[name] {
+            statuses[name] = MCPServerStatus(
+                name: s.name,
+                state: .error,
+                transport: s.transport,
+                toolsCount: 0,
+                error: "subprocess died: \(reason)",
+                lastConnected: s.lastConnected,
+                timeoutSeconds: s.timeoutSeconds
+            )
+        }
+    }
+}

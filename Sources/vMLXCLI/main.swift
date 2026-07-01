@@ -1,0 +1,1784 @@
+import ArgumentParser
+import Foundation
+import MLX
+import MLXFast
+import vMLXEngine
+import vMLXLLM
+import vMLXLMCommon
+import vMLXServer
+
+/// Wrapper around MLX.asyncEval so callers don't have to spell out the
+/// raw identifier scattered across this file. `asyncEval` kicks off GPU
+/// materialization without blocking the caller — sufficient here
+/// because every subsequent `.item()` or shape access will block on
+/// completion anyway.
+@inline(__always)
+private func materialize(_ a: MLXArray) { asyncEval(a) }
+
+@main
+struct VMLX: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "vmlx",
+        abstract: "vMLX — local LLM server (Swift)",
+        subcommands: [Serve.self, Chat.self, Pull.self, List.self, DFlashSmoke.self, BenchDirect.self, Images.self],
+        defaultSubcommand: Serve.self
+    )
+}
+
+struct Serve: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Start the OpenAI-compatible server")
+
+    @Option(name: .shortAndLong, help: "Path to the chat model. Optional when --embedding-model is set (embedding-only server).")
+    var model: String?
+    @Option(name: .long, help: "Path to an embedding model. When set, `/v1/embeddings` becomes callable. Alongside --model; the chat model still serves /v1/chat/completions etc.")
+    var embeddingModel: String?
+    @Option(name: .long, help: "P1 §294 — path to an image-generation model (Flux, Z-Image, Qwen-Image). When set, `/v1/images/generations` and `/v1/images/edits` route to this model. Independent of --model; both can coexist.")
+    var imageModel: String?
+    @Option(name: .shortAndLong) var host: String = "127.0.0.1"
+    @Option(name: .shortAndLong) var port: Int = 8000
+    @Option(name: .long) var apiKey: String?
+    @Option(name: .long, help: "Admin token for /admin/* and /v1/cache/* routes. Without it those endpoints are open.")
+    var adminToken: String?
+    @Flag(name: .long, help: "Print progress as JSON-lines to stderr for scripting.")
+    var jsonProgress: Bool = false
+
+    // L2 disk cache flags — parity with Python `vmlx_engine serve
+    // --enable-disk-cache --disk-cache-dir --disk-cache-max-gb`.
+    // Persists prompt KV caches to SSD so they survive server restarts.
+    // Acts as an L2 cache: on L1 (paged in-memory) miss, checks disk
+    // before recomputing. Safe for all model types including hybrid
+    // SSM (companion state is stored alongside in the same coordinator).
+    @Flag(name: .long, help: "Persist prompt KV caches to disk (L2). Survives restarts.")
+    var enableDiskCache: Bool = false
+    @Option(name: .long, help: "Directory for L2 disk cache. Default: ~/Library/Application Support/vMLX/disk_cache")
+    var diskCacheDir: String?
+    @Option(name: .long, help: "Maximum L2 disk cache size in GB (default 10).")
+    var diskCacheMaxGb: Double = 10.0
+
+    // Reasoning + tool parser overrides — explicit names from
+    // ParserRegistry (qwen3, deepseek_r1, mistral, gemma4, gpt_oss, auto)
+    // for reasoning; (hermes, qwen, llama, mistral, deepseek, kimi,
+    // granite, nemotron, step3p5, xlam, functionary, glm47, minimax,
+    // gemma4, native) for tools. Empty string = let CapabilityDetector
+    // pick from the model. Mirrors `cli.py --reasoning-parser` /
+    // `--tool-call-parser`.
+    @Option(name: .long, help: "Override reasoning parser. Empty = auto-detect from model. Names: qwen3, deepseek_r1, mistral, gemma4, gpt_oss, auto.")
+    var reasoningParser: String = ""
+    @Option(name: .long, help: "Override tool-call parser. Empty = auto-detect from model. Names: hermes, qwen, llama, mistral, deepseek, kimi, granite, nemotron, step3p5, xlam, functionary, glm47, minimax, gemma4, native.")
+    var toolCallParser: String = ""
+
+    // Default sampling overrides (server-wide). Each one sets the
+    // corresponding GlobalSettings field; per-request fields still
+    // override these via the 4-tier resolver. Mirrors `cli.py`.
+    @Option(name: .long, help: "Default temperature (0..2). Per-request overrides win.")
+    var defaultTemperature: Double?
+    @Option(name: .long, help: "Default top-p (0..1).")
+    var defaultTopP: Double?
+    @Option(name: .long, help: "Default repetition penalty.")
+    var defaultRepetitionPenalty: Double?
+    @Option(name: .long, help: "Default enable_thinking (true|false). Per-request overrides win.")
+    var defaultEnableThinking: Bool?
+    // Audit 2026-04-15: flags that had settings fields but no CLI surface.
+    @Option(name: .long, help: "Default top-k (0 = disabled).")
+    var defaultTopK: Int?
+    @Option(name: .long, help: "Default min-p (0..1). Per-request overrides win.")
+    var defaultMinP: Double?
+    @Option(name: .long, help: "Default max_tokens when client omits it.")
+    var defaultMaxTokens: Int?
+    @Option(name: .long, help: "Request inactivity timeout (seconds). 0 = no timeout.")
+    var timeout: Double?
+
+    // Chat template overrides — mirror `cli.py --chat-template`.
+    // `--chat-template` accepts either a path to a .jinja file OR an
+    // inline template string (auto-detected by checking for file
+    // existence). `--chat-template-kwargs` is a JSON blob threaded into
+    // every render via `UserInput.additionalContext`.
+    @Option(name: .long, help: "Path to a .jinja chat template OR an inline template string.")
+    var chatTemplate: String?
+    @Option(name: .long, help: "JSON blob of default chat_template_kwargs threaded into every render.")
+    var chatTemplateKwargs: String?
+
+    // Networking — rate limit + TLS. Match `cli.py --rate-limit` and
+    // `--ssl-keyfile`/`--ssl-certfile`.
+    @Option(name: .long, help: "Per-IP rate limit (requests/min). 0 disables.")
+    var rateLimit: Int = 0
+    @Option(name: .long, help: "PEM TLS key file. Set together with --ssl-certfile to enable HTTPS.")
+    var sslKeyfile: String?
+    @Option(name: .long, help: "PEM TLS cert file. Set together with --ssl-keyfile to enable HTTPS.")
+    var sslCertfile: String?
+
+    // JANG-DFlash speculative decoding. All flags opt-in; --dflash alone
+    // enables the feature and the bundled defaults match the MiniMax-M2.7
+    // checkpoint shape. Requires a target model that conforms to
+    // JangDFlashTarget (MiniMax family today).
+    @Flag(name: .long, help: "Enable JANG-DFlash speculative decoding.")
+    var dflash: Bool = false
+    @Option(name: .long, help: "Path to a JangDFlashDrafter safetensors checkpoint.")
+    var dflashDrafter: String?
+    @Option(name: .long, help: "DFlash block size B (default 16).")
+    var dflashBlockSize: Int = 16
+    @Option(name: .long, help: "DFlash per-slot top-k for DDTree (default 4).")
+    var dflashTopK: Int = 4
+    @Option(name: .long, help: "DFlash max paths kept after lattice beam (default 60).")
+    var dflashNumPaths: Int = 60
+    @Option(name: .long, help: "Comma-separated target-layer indices whose hidden states feed the drafter.")
+    var dflashTapLayers: String = "10,22,34,46,58"
+    @Option(name: .long, help: "Target model hidden dim (default 3072 for MiniMax-M2.7).")
+    var dflashTargetHiddenDim: Int = 3072
+
+    // FIX-G-H (2026-04-16): CLI flag coverage for engine-perf knobs that
+    // previously could only be set via the SwiftUI settings panel. Each
+    // flag is opt-in: absence leaves the existing settings value alone.
+    // CLI writes win over SQLite for the session lifetime.
+
+    // TurboQuant KV-cache compression
+    @Flag(name: [.customLong("disable-turbo-quant")], help: "Disable TurboQuant KV compression (override settings).")
+    var disableTurboQuant: Bool = false
+    @Flag(name: [.customLong("enable-turbo-quant")], help: "Enable TurboQuant KV compression globally.")
+    var enableTurboQuant: Bool = false
+    @Option(name: .long, help: "TurboQuant KV bit width (3-8; default 4).")
+    var turboQuantBits: Int?
+
+    // KV quantization (classic, not TurboQuant)
+    @Option(name: .long, help: "KV cache quantization: none | q4 | q8 | turboquant.")
+    var kvCacheQuantization: String?
+    @Option(name: .long, help: "KV quantization group size (default 64).")
+    var kvCacheGroupSize: Int?
+
+    // Prefix cache
+    @Flag(name: [.customLong("disable-prefix-cache")], help: "Disable L1 paged prefix cache.")
+    var disablePrefixCache: Bool = false
+    @Flag(name: [.customLong("enable-prefix-cache")], help: "Explicitly enable L1 paged prefix cache (default on).")
+    var enablePrefixCache: Bool = false
+
+    // L1.5 memory cache
+    @Flag(name: [.customLong("disable-memory-cache")], help: "Disable L1.5 byte-budgeted memory cache.")
+    var disableMemoryCache: Bool = false
+    @Option(name: .long, help: "Memory cache percent of available RAM (0.05-0.80).")
+    var memoryCachePercent: Double?
+    @Option(name: .long, help: "Memory cache TTL in minutes (0 = no TTL).")
+    var memoryCacheTtlMinutes: Double?
+
+    // L2 disk cache — negative flag to complement the existing positive.
+    @Flag(name: [.customLong("disable-disk-cache")], help: "Disable L2 on-disk cache.")
+    var disableDiskCache: Bool = false
+
+    // Flash MoE expert streaming
+    @Flag(name: [.customLong("flash-moe")], help: "Enable Flash MoE expert streaming (SSD-backed experts).")
+    var flashMoe: Bool = false
+    @Option(name: .long, help: "Flash MoE slot bank size (<=64 triggers auto-sizing from layers × experts_per_tok × 1.5).")
+    var flashMoeSlotBank: Int?
+    @Option(name: .long, help: "Flash MoE prefetch policy: none | temporal.")
+    var flashMoePrefetch: String?
+    @Option(name: .long, help: "Flash MoE I/O parallelism (default 4).")
+    var flashMoeIoSplit: Int?
+
+    // Smelt partial-expert loading
+    @Flag(name: [.customLong("smelt")], help: "Enable smelt mode (partial expert loading).")
+    var smelt: Bool = false
+    @Option(name: .long, help: "Smelt expert count (default 50).")
+    var smeltExperts: Int?
+    @Option(name: .long, help: "Smelt mode: default | aggressive.")
+    var smeltMode: String?
+
+    // SSM re-derive
+    @Flag(name: [.customLong("disable-ssm-re-derive")], help: "Disable post-generation SSM re-derive for hybrid+thinking models.")
+    var disableSsmReDerive: Bool = false
+
+    // §282 Idle lifecycle. Previously only settable via SwiftUI +
+    // SQLite; operators / testing harnesses couldn't override. Flows
+    // through `engine.settings.setGlobal` so the existing IdleTimer
+    // subscription picks up the new config on next `load()`.
+    @Option(name: .long, help: "Seconds of idle before soft-sleep (caches clear, weights retained). 0 disables.")
+    var idleSoftSec: Double?
+    @Option(name: .long, help: "Seconds of idle before deep-sleep (weights unloaded). 0 disables. Must exceed --idle-soft-sec.")
+    var idleDeepSec: Double?
+    @Flag(name: [.customLong("disable-idle")], help: "Disable the idle timer entirely (never auto-sleep).")
+    var disableIdle: Bool = false
+
+    func run() async throws {
+        // Ignore SIGPIPE so mid-stream client disconnect (curl drop,
+        // harness SIGTERM, websocket close) surfaces as EPIPE on the
+        // writer instead of terminating the process. See the long note
+        // on `VMLX.sigpipeInstall` above. Must precede the first
+        // network write — putting it at the top of `Serve.run` is the
+        // reliable placement (the `sigpipeInstall` static is lazy and
+        // may not fire before Hummingbird accepts the first connection).
+        // 2026-04-18 harness observation: Qwen3.6-35B-A3B-MXFP4
+        // cancel_midstream reproducibly silent-killed vmlxctl here.
+        _ = signal(SIGPIPE, SIG_IGN)
+
+        let engine = Engine()
+
+        // Override GlobalSettings with any CLI cache flags the user passed.
+        // These flow through `Engine.load` → `CacheCoordinatorConfig` →
+        // `DiskCache(cacheDir:maxSizeGB:modelKey:)`, same path the SwiftUI
+        // app settings use. Persisting the override means the next
+        // `resolved()` call in Stream.swift picks it up automatically.
+        // Apply CLI-supplied GlobalSettings overrides BEFORE loading so the
+        // parser/template choices are visible during model load (caps
+        // detection consults `defaultReasoningParser`/`defaultToolParser`
+        // when set). Each flag is opt-in: nil/empty leaves the existing
+        // value alone.
+        do {
+            var g = await engine.settings.global()
+            var dirty = false
+            if !reasoningParser.isEmpty { g.defaultReasoningParser = reasoningParser; dirty = true }
+            if !toolCallParser.isEmpty { g.defaultToolParser = toolCallParser; dirty = true }
+            if let t = defaultTemperature { g.defaultTemperature = t; dirty = true }
+            if let p = defaultTopP { g.defaultTopP = p; dirty = true }
+            if let r = defaultRepetitionPenalty { g.defaultRepetitionPenalty = r; dirty = true }
+            if let e = defaultEnableThinking { g.defaultEnableThinking = e; dirty = true }
+            if let k = defaultTopK { g.defaultTopK = k; dirty = true }
+            if let m = defaultMinP { g.defaultMinP = m; dirty = true }
+            if let mt = defaultMaxTokens { g.defaultMaxTokens = mt; dirty = true }
+            if let to = timeout { g.requestTimeout = to; dirty = true }
+            if let tpl = chatTemplate, !tpl.isEmpty {
+                // Auto-detect: if the value names an existing file, read it
+                // in as the template body. Otherwise treat it as inline.
+                let fm = FileManager.default
+                if fm.fileExists(atPath: tpl),
+                   let body = try? String(contentsOfFile: tpl, encoding: .utf8)
+                {
+                    g.chatTemplate = body
+                } else {
+                    g.chatTemplate = tpl
+                }
+                dirty = true
+            }
+            if let kw = chatTemplateKwargs, !kw.isEmpty {
+                g.chatTemplateKwargs = kw
+                dirty = true
+            }
+            if rateLimit > 0 { g.rateLimit = rateLimit; dirty = true }
+            if let key = sslKeyfile, !key.isEmpty { g.sslKeyFile = key; dirty = true }
+            if let cert = sslCertfile, !cert.isEmpty { g.sslCertFile = cert; dirty = true }
+            if dflash {
+                g.dflash = true
+                g.dflashBlockSize = dflashBlockSize
+                g.dflashTopK = dflashTopK
+                g.dflashNumPaths = dflashNumPaths
+                g.dflashTapLayers = dflashTapLayers
+                g.dflashTargetHiddenDim = dflashTargetHiddenDim
+                if let d = dflashDrafter, !d.isEmpty { g.dflashDrafterPath = d }
+                dirty = true
+            }
+            // FIX-G-H: engine-perf CLI overrides. Each one opt-in, absence
+            // leaves the existing settings value alone. Disable flags win
+            // over enable flags when both are somehow set (shouldn't happen
+            // but guards against accidental both-flagged).
+            if disableTurboQuant { g.enableTurboQuant = false; dirty = true }
+            else if enableTurboQuant { g.enableTurboQuant = true; dirty = true }
+            if let bits = turboQuantBits { g.turboQuantBits = bits; dirty = true }
+            if let q = kvCacheQuantization, !q.isEmpty { g.kvCacheQuantization = q; dirty = true }
+            if let gs = kvCacheGroupSize { g.kvCacheGroupSize = gs; dirty = true }
+            if disablePrefixCache { g.enablePrefixCache = false; dirty = true }
+            else if enablePrefixCache { g.enablePrefixCache = true; dirty = true }
+            if disableMemoryCache { g.enableMemoryCache = false; dirty = true }
+            if let p = memoryCachePercent { g.memoryCachePercent = p; dirty = true }
+            if let t = memoryCacheTtlMinutes { g.memoryCacheTTLMinutes = t; dirty = true }
+            if disableDiskCache { g.enableDiskCache = false; dirty = true }
+            if flashMoe {
+                g.flashMoe = true; dirty = true
+                if let sb = flashMoeSlotBank { g.flashMoeSlotBank = sb }
+                if let pf = flashMoePrefetch, !pf.isEmpty { g.flashMoePrefetch = pf }
+                if let io = flashMoeIoSplit { g.flashMoeIoSplit = io }
+            }
+            if smelt {
+                g.smelt = true; dirty = true
+                if let e = smeltExperts { g.smeltExperts = e }
+                if let m = smeltMode, !m.isEmpty { g.smeltMode = m }
+            }
+            if disableSsmReDerive { g.enableSSMReDerive = false; dirty = true }
+            // §282 idle lifecycle wiring.
+            if let s = idleSoftSec { g.idleSoftSec = s; dirty = true }
+            if let d = idleDeepSec { g.idleDeepSec = d; dirty = true }
+            if disableIdle { g.idleEnabled = false; dirty = true }
+            if dirty { await engine.settings.setGlobal(g) }
+        }
+
+        if enableDiskCache {
+            var g = await engine.settings.global()
+            g.enableDiskCache = true
+            if let dir = diskCacheDir, !dir.isEmpty {
+                g.diskCacheDir = dir
+            } else if g.diskCacheDir.isEmpty {
+                // Default location parallels Python's
+                // `~/.cache/vmlx/disk_cache` but on macOS we use the
+                // platform-appropriate Application Support dir.
+                let appSupport = FileManager.default.urls(
+                    for: .applicationSupportDirectory, in: .userDomainMask
+                ).first?.appendingPathComponent("vMLX/disk_cache")
+                g.diskCacheDir = appSupport?.path
+                    ?? (NSString(string: "~/Library/Application Support/vMLX/disk_cache")
+                        .expandingTildeInPath)
+            }
+            g.diskCacheMaxGB = diskCacheMaxGb
+            await engine.settings.setGlobal(g)
+            FileHandle.standardError.write(Data(
+                "[cli] L2 disk cache ON at \(g.diskCacheDir) (max \(diskCacheMaxGb) GB)\n".utf8))
+        }
+
+        // Drain the AsyncThrowingStream to completion BEFORE starting the
+        // HTTP listener. Prior bug: `try await engine.load(...)` returned
+        // immediately because `load` returns a stream handle, not an async
+        // function — the server came up before the model was ready and
+        // the first request hit "no model loaded".
+        //
+        // LoadOptions must pull from the (possibly-overridden) GlobalSettings
+        // so the CLI `--enable-disk-cache` flag actually flows into
+        // `CacheCoordinatorConfig`. Default `LoadOptions(modelPath:)`
+        // ignores GlobalSettings entirely, which is why the cache flag
+        // was silently dropped before this change.
+        // P1 §294 — `--image-model` is also a valid standalone startup:
+        // an image-only server serves /v1/images/{generations,edits}
+        // without needing a chat or embedding backend resident. Reject
+        // only when ALL THREE model flags are empty.
+        let hasModel = !(model?.isEmpty ?? true)
+        let hasEmbedding = !(embeddingModel?.isEmpty ?? true)
+        let hasImage = !(imageModel?.isEmpty ?? true)
+        if !hasModel && !hasEmbedding && !hasImage {
+            FileHandle.standardError.write(Data(
+                "[cli] error: provide --model, --embedding-model, and/or --image-model\n".utf8))
+            throw ExitCode.failure
+        }
+
+        if let modelPath = model, !modelPath.isEmpty {
+            let resolved = await engine.settings.resolved(sessionId: nil, chatId: nil)
+            let loadOpts = Engine.LoadOptions(
+                modelPath: URL(fileURLWithPath: modelPath),
+                from: resolved
+            )
+            let loadStream = await engine.load(loadOpts)
+            do {
+                for try await event in loadStream {
+                    switch event {
+                    case .progress(let p):
+                        if jsonProgress {
+                            let line = #"{"phase":"\#(p.phase.rawValue)","message":"\#(p.label)","fraction":\#(p.fraction)}"#
+                            FileHandle.standardError.write(Data((line + "\n").utf8))
+                        } else {
+                            FileHandle.standardError.write(
+                                Data("[load] \(p.phase.rawValue): \(p.label)\n".utf8)
+                            )
+                        }
+                    case .done:
+                        break
+                    case .failed(let reason):
+                        throw EngineError.modelNotFound(URL(fileURLWithPath: modelPath))
+                            .context("\(reason)")
+                    }
+                }
+            } catch {
+                FileHandle.standardError.write(Data("[load] failed: \(error)\n".utf8))
+                throw ExitCode.failure
+            }
+        }
+
+        // Embedding model side-load. `--embedding-model` lets the server
+        // serve `/v1/embeddings` in addition to `/v1/chat/completions`.
+        // Without this the endpoint throws `no embedding model loaded
+        // (call loadEmbeddingModel first)` — which is correct but not
+        // useful for a one-shot `vmlxctl serve` invocation. Same-port
+        // multiplexing: the gateway dispatches by route prefix.
+        if let emb = embeddingModel, !emb.isEmpty {
+            do {
+                try await engine.loadEmbeddingModel(at: URL(fileURLWithPath: emb))
+                FileHandle.standardError.write(Data(
+                    "[cli] embedding model ready: \((emb as NSString).lastPathComponent)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[cli] embedding model load failed: \(error)\n".utf8))
+                // Not fatal — chat still works. Just log and continue.
+            }
+        }
+
+        // P1 §294 — image model side-load. `--image-model` lets
+        // /v1/images/generations and /v1/images/edits route to this
+        // model without needing ModelLibrary registration or the
+        // SwiftUI app. Pre-loads the FluxBackend so the first gen
+        // request has no cold-start. Name is derived from the path
+        // lastComponent; any request's `model` field is accepted as
+        // long as a backend is loaded (FluxBackend handles the
+        // fallback in preloadImageModel below).
+        if let img = imageModel, !img.isEmpty {
+            let url = URL(fileURLWithPath: img)
+            do {
+                try await engine.preloadImageModel(at: url)
+                FileHandle.standardError.write(Data(
+                    "[cli] image model ready: \(url.lastPathComponent)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[cli] image model load failed: \(error)\n".utf8))
+            }
+        }
+
+        // Load the DFlash drafter AFTER the target model is up so the
+        // target adapter is already bound and `dflashIsReady()` flips
+        // to true the moment the drafter lands. Failure to load is a
+        // warning, not a fatal — the user probably wants the server
+        // up regardless and can re-point the drafter path via settings.
+        if dflash, let d = dflashDrafter, !d.isEmpty {
+            let url = URL(fileURLWithPath: d)
+            do {
+                try await engine.loadDFlashDrafter(from: url)
+                FileHandle.standardError.write(Data(
+                    "[dflash] drafter loaded from \(url.lastPathComponent)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[dflash] drafter load FAILED: \(error)\n".utf8))
+            }
+        } else if dflash {
+            let msg = "[dflash] --dflash set but --dflash-drafter omitted; DFlash will fall back to the standard path per request.\n"
+            FileHandle.standardError.write(Data(msg.utf8))
+        }
+
+        // Graceful shutdown is handled by Hummingbird's ServiceGroup,
+        // which wires SIGTERM + SIGINT to its internal cancellation
+        // token (see `Application.runService(gracefulShutdownSignals:)`
+        // — default is `[.sigterm, .sigint]`). On signal receipt it
+        // stops accepting new connections, drains in-flight requests,
+        // then returns from `server.run()`. We just run post-return
+        // cleanup below.
+        //
+        // PRIOR BUG (smoke test 2026-04-15): we used to install our own
+        // DispatchSource handlers AND `signal(SIGTERM, SIG_IGN)` here.
+        // That collided with Hummingbird's ServiceGroup signal wiring
+        // — the process exited silently the moment any signal arrived
+        // (including implicit SIGPIPE from a dying parent shell).
+        // Dropping our custom setup fixed it.
+
+        let resolvedSettings = await engine.settings.global()
+        let scheme = (!resolvedSettings.sslKeyFile.isEmpty && !resolvedSettings.sslCertFile.isEmpty)
+            ? "https" : "http"
+        let server = Server(
+            engine: engine, host: host, port: port, apiKey: apiKey,
+            adminToken: adminToken ?? resolvedSettings.adminToken,
+            tlsKeyPath: resolvedSettings.sslKeyFile.isEmpty ? nil : resolvedSettings.sslKeyFile,
+            tlsCertPath: resolvedSettings.sslCertFile.isEmpty ? nil : resolvedSettings.sslCertFile,
+            rateLimitPerMinute: resolvedSettings.rateLimit,
+            allowedOrigins: resolvedSettings.corsOrigins
+        )
+        // Announce via stderr (unbuffered) AND stdout so both redirected
+        // and terminal invocations show the URL. `print` uses block-
+        // buffered stdout when redirected to a file, which used to hide
+        // this line entirely when the process exited quickly for any
+        // reason.
+        let banner = model ?? embeddingModel ?? "(no model)"
+        FileHandle.standardError.write(Data(
+            "vmlx serving \(banner) at \(scheme)://\(host):\(port)\n".utf8))
+        print("vmlx serving \(banner) at \(scheme)://\(host):\(port)")
+        do {
+            try await server.run()
+            FileHandle.standardError.write(Data(
+                "[vmlx] graceful shutdown: flushing settings + stopping engine...\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[vmlx] server.run() threw: \(error) — attempting cleanup\n".utf8))
+        }
+        // §246 parity: swap MLX abort-on-error handler for a
+        // swallow-to-stderr one before teardown. Late-arriving kernel
+        // dispatches on the now-stopping ThreadPool otherwise SIGTRAP
+        // via fatalError and produce a spurious crash report after a
+        // clean shutdown banner. Repro 2026-04-21 in per-model-pmc.sh
+        // teardown (segfault after 8/8 PASS).
+        MLX.setErrorHandler({ msg, _ in
+            if let m = msg.map({ String(cString: $0) }) {
+                FileHandle.standardError.write(Data("[vmlx-terminate] MLX: \(m)\n".utf8))
+            }
+        })
+        // Post-shutdown cleanup — flush any pending debounced settings
+        // writes to SQLite, then release the model. Bounded to 2s so a
+        // wedged store can't block process exit forever.
+        let cleanupSem = DispatchSemaphore(value: 0)
+        Task.detached { [engine] in
+            await engine.settings.flushPending()
+            await engine.stop()
+            cleanupSem.signal()
+        }
+        _ = cleanupSem.wait(timeout: .now() + .seconds(2))
+    }
+}
+
+/// Thin REPL. Reads a line from stdin, streams the response, repeats.
+/// No chat history on disk — just in-memory multi-turn for one session.
+struct Chat: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Interactive chat (REPL) with optional agentic shell tools",
+        discussion: """
+        vmlxctl chat loads a model and opens a streaming REPL. By default
+        the model gets unrestricted shell access via the `bash` tool:
+        the model can run commands, read/write files, spawn processes,
+        hit the network, and build multi-step plans the same way Claude
+        Code or Codex do.
+
+        The agentic loop is wired in-process via the engine's
+        ToolDispatcher — when the model emits a tool_call chunk, we
+        execute it, feed stdout/stderr/exitcode back into the
+        conversation as a `tool` message, then re-prompt. Iterates up to
+        --max-tool-calls per user turn.
+
+        --no-tools turns this off and gives you a plain REPL. --reasoning
+        low/medium/high steers the thinking budget. --system sets a
+        persistent instruction.
+        """
+    )
+
+    @Option(name: .shortAndLong) var model: String
+    @Option(name: .long) var system: String?
+    @Option(name: .long, help: "Disable shell tool (plain chat, no agentic loop)")
+    var noTools: Bool = false
+    @Option(name: .long, help: "Working directory the agent runs bash from")
+    var cwd: String?
+    @Option(name: .long, help: "Reasoning effort: none|low|medium|high")
+    var reasoning: String?
+    @Option(name: .long, help: "Temperature override (default: model's generation_config.json)")
+    var temperature: Double?
+    @Option(name: .long, help: "Maximum tokens to generate for each assistant turn.")
+    var maxTokens: Int?
+    @Option(name: .long, help: "Max iterations per user turn before giving up (default 16)")
+    var maxToolCalls: Int = 16
+
+    // §369 — scope flags. These shape the system prompt instead of
+    // injecting new tool schemas because MCP-style tool round-trips
+    // have per-call handshake overhead (schema decode + args validation
+    // + resultencoding + model re-tokenization of the result). Native
+    // bash + a prompt-level boundary is the fast path: one tool schema,
+    // one dispatch, same model state.
+    @Option(name: .long, help: "Read-only mode: model instructed not to modify files or spawn long-running processes")
+    var readOnly: Bool = false
+    @Option(name: .long, help: "No-network mode: model instructed not to make network requests")
+    var noNetwork: Bool = false
+    @Option(name: .long, help: "Forbid destructive commands (rm -rf, dd, mkfs, force-push, etc.)")
+    var noDestructive: Bool = true
+    @Option(name: .long, help: "Constrain the model's working directory to --cwd (no cd out of it)")
+    var sandboxCwd: Bool = false
+
+    // §370 — verbose + reasoning surfaces. Modern agentic models
+    // (Qwen3, GLM-5.1, DeepSeek-V3, MiniMax-M2.7, Nemotron) interleave
+    // thinking with tool calls: reason → call bash → read output →
+    // reason about result → call bash again → finalize. The CLI
+    // should surface all three streams so the user can debug the
+    // agent's decision loop, not just see the final output.
+    @Option(name: .long, help: "Show full bash commands + output before feeding back to the model")
+    var verbose: Bool = false
+    @Option(name: .long, help: "Show model reasoning content (if model emits <think> blocks or reasoning_content SSE chunks)")
+    var showReasoning: Bool = true
+    @Option(name: .long, help: "Reasoning-model thinking budget via enable_thinking kwarg (off for non-reasoning models)")
+    var enableThinking: Bool = true
+
+    func run() async throws {
+        let engine = Engine()
+        let modelURL = URL(fileURLWithPath: model).resolvingSymlinksInPath()
+        FileHandle.standardError.write(Data("Loading \(modelURL.lastPathComponent)…\n".utf8))
+        let loadStream = await engine.load(.init(modelPath: modelURL))
+        for try await event in loadStream {
+            if case .failed(let reason) = event {
+                FileHandle.standardError.write(Data("[load] failed: \(reason)\n".utf8))
+                throw ExitCode.failure
+            }
+        }
+
+        // §367 — generation_config.json fallback. Qwen/Gemma/Nemotron
+        // each ship different recommended temp/top_p. If the user didn't
+        // pass --temperature explicitly, read the model's own defaults
+        // and surface them to the engine via the ChatRequest field.
+        let (modelTemp, modelTopP, modelTopK) = readGenerationConfig(modelURL)
+        let effectiveTemp = temperature ?? modelTemp
+
+        // Resolve cwd. `--cwd foo/bar` → absolute path starting from
+        // the user's actual pwd, not the engine's. Default is the
+        // current working directory at invocation time.
+        let agentCwd: URL = {
+            if let c = cwd {
+                return URL(fileURLWithPath: c, isDirectory: true,
+                           relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+            }
+            return URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
+                       isDirectory: true)
+        }()
+
+        let toolsOn = !noTools
+        if toolsOn {
+            FileHandle.standardError.write(Data(
+                "Ready. Shell tool ENABLED — the model can run arbitrary commands in \(agentCwd.path)\n".utf8))
+            FileHandle.standardError.write(Data(
+                "Type a message, /quit to exit. --no-tools to disable.\n".utf8))
+        } else {
+            FileHandle.standardError.write(Data(
+                "Ready. Plain chat (no tools). Type a message, /quit to exit.\n".utf8))
+        }
+        if let t = modelTemp, temperature == nil {
+            var msg = "Defaults from generation_config.json: temp=\(t)"
+            if let p = modelTopP { msg += ", top_p=\(p)" }
+            if let k = modelTopK { msg += ", top_k=\(k)" }
+            msg += "\n"
+            FileHandle.standardError.write(Data(msg.utf8))
+        }
+
+        var messages: [ChatRequest.Message] = []
+        if let sys = system {
+            messages.append(ChatRequest.Message(role: "system", content: .string(sys)))
+        } else if toolsOn {
+            // §367 + §369 — default agentic system prompt, with scope
+            // adjustments from CLI flags folded in. Matches Claude Code /
+            // Codex tone: the model knows it has shell access and
+            // should prefer running commands over guessing.
+            //
+            // Scope flags are expressed as plain-text boundaries in the
+            // prompt, not as separate tool schemas, to keep the
+            // tool-call hot path cheap. Schema bloat = per-call
+            // overhead = slow agentic loops. Text instructions = zero
+            // extra round-trip cost; the model just honors them.
+            var scope = ""
+            if readOnly {
+                scope += "\n- READ-ONLY MODE: do NOT modify files (no redirects, no edits, no mkdir, no touch). You may read + inspect freely."
+            }
+            if noNetwork {
+                scope += "\n- NO NETWORK: do NOT make HTTP/HTTPS requests. No curl, wget, git push/fetch/clone, brew, npm install, pip install, or similar."
+            }
+            if noDestructive {
+                scope += "\n- NO DESTRUCTIVE COMMANDS: refuse rm -rf, dd if=, mkfs, force-push, sudo, systemctl-stop, kill -9 on system procs, killall, unless the user EXPLICITLY asks with unambiguous wording."
+            }
+            if sandboxCwd {
+                scope += "\n- SANDBOXED WORKDIR: stay inside \(agentCwd.path). Do not `cd` out of it or reference absolute paths outside it."
+            }
+            let scopeBlock = scope.isEmpty
+                ? ""
+                : "\n\nScope rules (enforced by plain-text boundary, not by a sandbox):\(scope)"
+            messages.append(ChatRequest.Message(
+                role: "system",
+                content: .string("""
+                You are an autonomous terminal agent. You have ONE tool: `bash`. Your job is to USE the tool, not describe it.
+
+                Current working directory: \(agentCwd.path).
+
+                CRITICAL RULES — VIOLATING THESE BREAKS THE INTERFACE:
+                  1. NEVER write ```bash code blocks in your reply text. The user CANNOT execute markdown — markdown means you've failed to use the tool.
+                  2. EVERY shell command MUST go through the `bash` tool call mechanism, NOT prose, NOT markdown.
+                  3. NEVER say "Let me check…" or "I'll run…" without ALSO emitting the tool call in the same response. Talking about what you would do = task failed.
+                  4. When in doubt: call the tool. Empty output is fine. Wrong-command output is fine. The tool is cheap.
+
+                AGENTIC LOOP:
+                  • User asks → call `bash` with the best first command
+                  • Read tool result: stdout, stderr, exit_code
+                  • exit_code != 0 → reason about WHY, call `bash` again with a fix
+                  • Common recoveries:
+                     - Command not found → `which X` / install via brew
+                     - Permission denied → `ls -la` to inspect ownership
+                     - No such file → `ls` the parent directory
+                  • Verified complete → write a one-paragraph summary
+                \(scopeBlock)
+
+                DO NOT FORGET RULE #1. NO MARKDOWN CODE BLOCKS. CALL THE TOOL.
+                """)
+            ))
+        }
+
+        let tools: [ChatRequest.Tool]? = toolsOn ? [BashTool.openAISchema] : nil
+
+        while let line = readLine() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if trimmed == "/quit" || trimmed == "/exit" { break }
+            if trimmed == "/reset" {
+                let keepSystem = messages.first?.role == "system" ? [messages.first!] : []
+                messages = keepSystem
+                print("[reset]")
+                continue
+            }
+
+            messages.append(ChatRequest.Message(role: "user", content: .string(trimmed)))
+            let req = ChatRequest(
+                model: model,
+                messages: messages,
+                stream: true,
+                maxTokens: maxTokens,
+                temperature: effectiveTemp,
+                topP: modelTopP,
+                enableThinking: enableThinking,
+                reasoningEffort: reasoning,
+                tools: tools,
+                toolChoice: toolsOn ? .auto : nil,
+                includeReasoning: showReasoning
+            )
+            // Stream.swift handles in-process tool dispatch — tool_call
+            // and tool_status chunks come back naturally. We just print
+            // content deltas, echo tool calls to stderr, and collect the
+            // final assistant message.
+            // §370 — stream demultiplexer that handles interleaved thinking.
+            // Modern reasoning models (Qwen3, GLM-5.1, DeepSeek-V3,
+            // MiniMax-M2.7, Nemotron) emit THREE parallel streams:
+            //   • content  → user-visible answer
+            //   • reasoning → <think> blocks or reasoning_content SSE
+            //   • toolCalls + toolStatus → agent actions
+            // The model can switch between all three mid-turn: start
+            // thinking, call bash, read output, go back to thinking,
+            // call bash again, finally emit content. We render each
+            // stream with a distinct prefix/color so the user can see
+            // the full decision loop.
+            var assistant = ""
+            var reasoning = ""
+            var iterations = 0
+            var lastStream: String = ""   // "content" | "reasoning"
+            let stream = await engine.stream(request: req)
+            do {
+                for try await chunk in stream {
+                    // Reasoning deltas go to stderr with a color prefix
+                    // so content stays clean on stdout. Grouped so we
+                    // only print the "[thinking]" header once per
+                    // uninterrupted run.
+                    if showReasoning, let think = chunk.reasoning, !think.isEmpty {
+                        if lastStream != "reasoning" {
+                            FileHandle.standardError.write(Data(
+                                "\n\u{001B}[2m[thinking] ".utf8))
+                            lastStream = "reasoning"
+                        }
+                        FileHandle.standardError.write(Data(think.utf8))
+                        reasoning += think
+                    }
+                    if let delta = chunk.content {
+                        if lastStream == "reasoning" {
+                            FileHandle.standardError.write(Data(
+                                "\u{001B}[0m\n".utf8))   // end the dim block
+                        }
+                        lastStream = "content"
+                        print(delta, terminator: "")
+                        fflush(stdout)
+                        assistant += delta
+                    }
+                    if let calls = chunk.toolCalls, !calls.isEmpty {
+                        // Close any open reasoning block before echoing
+                        // the tool call so ANSI doesn't bleed.
+                        if lastStream == "reasoning" {
+                            FileHandle.standardError.write(Data("\u{001B}[0m\n".utf8))
+                            lastStream = ""
+                        }
+                        iterations += calls.count
+                        for c in calls {
+                            let name = c.function.name
+                            let args = c.function.arguments
+                            var line = "\n\u{001B}[33m[tool] \(name)"
+                            if verbose {
+                                line += " \(args)"
+                            } else {
+                                // Short form: first 80 chars of the
+                                // command-field specifically (if name
+                                // is "bash"). Keeps terminal clean.
+                                line += " \(args.prefix(80))"
+                                if args.count > 80 { line += "…" }
+                            }
+                            line += "\u{001B}[0m\n"
+                            FileHandle.standardError.write(Data(line.utf8))
+                        }
+                        if iterations >= maxToolCalls {
+                            FileHandle.standardError.write(Data(
+                                "\u{001B}[31m[tool] max-tool-calls (\(maxToolCalls)) reached — halting agentic loop\u{001B}[0m\n".utf8))
+                            break
+                        }
+                    }
+                    if let status = chunk.toolStatus {
+                        if lastStream == "reasoning" {
+                            FileHandle.standardError.write(Data("\u{001B}[0m\n".utf8))
+                            lastStream = ""
+                        }
+                        var line = "\u{001B}[2m[tool \(status.phase.rawValue)] \(status.name)"
+                        if let m = status.message {
+                            if verbose {
+                                line += ": \(m)"
+                            } else {
+                                let head = String(m.prefix(120))
+                                line += ": \(head)"
+                                if m.count > 120 { line += "…" }
+                            }
+                        }
+                        line += "\u{001B}[0m\n"
+                        FileHandle.standardError.write(Data(line.utf8))
+                    }
+                }
+                // Close any dangling reasoning block at end of turn.
+                if lastStream == "reasoning" {
+                    FileHandle.standardError.write(Data("\u{001B}[0m\n".utf8))
+                }
+                print("")
+                messages.append(
+                    ChatRequest.Message(role: "assistant", content: .string(assistant))
+                )
+            } catch {
+                print("\n[error] \(error)")
+            }
+        }
+    }
+
+    /// §367 — read the model's generation_config.json if present.
+    /// Returns (temperature, top_p, top_k) or nils per field. Swallow
+    /// errors silently — falling back to engine defaults is the right
+    /// thing to do if the file is absent or malformed.
+    private func readGenerationConfig(
+        _ modelURL: URL
+    ) -> (Double?, Double?, Int?) {
+        let cfgURL = modelURL.appendingPathComponent("generation_config.json")
+        guard let data = try? Data(contentsOf: cfgURL),
+              let obj = try? JSONSerialization.jsonObject(with: data)
+                        as? [String: Any]
+        else { return (nil, nil, nil) }
+        let temp = (obj["temperature"] as? NSNumber)?.doubleValue
+        let topP = (obj["top_p"] as? NSNumber)?.doubleValue
+        let topK = (obj["top_k"] as? NSNumber)?.intValue
+        return (temp, topP, topK)
+    }
+}
+
+struct Pull: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Download a model from HuggingFace")
+    @Argument var repo: String
+
+    /// Explicit HF token override. If not set, falls back to the macOS
+    /// Keychain entry written by the GUI's HuggingFaceTokenCard, then to
+    /// the `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` env vars. This order
+    /// matches what `huggingface-cli download` does so CI flows work.
+    @Option(name: .long, help: "HuggingFace token for gated repos. Falls back to Keychain then HF_TOKEN env.")
+    var hfToken: String?
+
+    func run() async throws {
+        // Resolve the HF token: explicit flag → Keychain → env var.
+        // An anonymous call is fine for public repos; gated models
+        // return 401/403 which the DownloadManager surfaces as a
+        // human-readable error.
+        let token = hfToken
+            ?? KeychainHelper.load(.hfToken)
+            ?? ProcessInfo.processInfo.environment["HF_TOKEN"]
+            ?? ProcessInfo.processInfo.environment["HUGGING_FACE_HUB_TOKEN"]
+
+        let manager = DownloadManager()
+        if let token, !token.isEmpty {
+            await manager.setHFAuthToken(token)
+            print("Using HuggingFace token: \(token.prefix(6))…")
+        }
+
+        let events = await manager.subscribe()
+        let displayName = repo.split(separator: "/").last.map(String.init) ?? repo
+        let jobId = await manager.enqueue(repo: repo, displayName: displayName)
+
+        print("Downloading \(repo)…")
+        for await event in events {
+            switch event {
+            case .progress(let job) where job.id == jobId:
+                let pct = job.totalBytes > 0
+                    ? Double(job.receivedBytes) / Double(job.totalBytes) * 100
+                    : 0
+                print(String(format: "  %.1f%% (%.1f MB/s)",
+                    pct, job.bytesPerSecond / 1e6),
+                      terminator: "\r")
+                fflush(stdout)
+            case .completed(let job) where job.id == jobId:
+                print("\nDone: \(job.localPath?.path ?? "(unknown path)")")
+                return
+            case .failed(let id, let reason) where id == jobId:
+                print("\nFailed: \(reason)")
+                throw ExitCode.failure
+            case .cancelled(let id) where id == jobId:
+                print("\nCancelled.")
+                throw ExitCode.failure
+            default:
+                break
+            }
+        }
+    }
+}
+
+struct List: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls",
+        abstract: "List downloaded models"
+    )
+
+    func run() async throws {
+        let engine = Engine()
+        _ = await engine.modelLibrary.scan(force: true)
+        let entries = await engine.modelLibrary.entries()
+        if entries.isEmpty {
+            print("No models found. Downloads live under ~/.cache/huggingface/hub or user-configured directories.")
+            return
+        }
+        // Column widths picked to accommodate the longest `org/repo-family`.
+        // Iter-36: switched from `String(format: "%-50s ...")` to native
+        // Swift padding. Variadic `%s` bridged through ObjC expects a
+        // `const char *`, but Swift String passed via CVarArg hands in a
+        // garbage pointer on modern toolchains — the crash surfaces as
+        // `_platform_strlen` SIGSEGV the first time `vmlxctl ls` finds
+        // any models. `Double`-based `%.2f` / `%12s` still use printf
+        // formatting via `formatBytes` but stay on numeric fast paths.
+        print(row("NAME", "FAMILY", "MODE", "QUANT", "SIZE", "PATH"))
+        for e in entries {
+            let quant = e.quantBits.map { "Q\($0)" } ?? "fp16"
+            let size = formatBytes(e.totalSizeBytes)
+            let mode = modeLabel(e.modality)
+            print(row(e.displayName, e.family, mode, quant, size, e.canonicalPath.path))
+        }
+    }
+
+    /// Translate Modality to a short tag shown under the MODE column so
+    /// operators can see at a glance which flag to load with
+    /// (`--model` for chat/vision, `--image-model` for image, etc).
+    private func modeLabel(_ m: ModelLibrary.Modality) -> String {
+        switch m {
+        case .text:      return "chat"
+        case .vision:    return "vision"
+        case .embedding: return "embed"
+        case .image:     return "[image]"
+        case .rerank:    return "rerank"
+        case .unknown:   return "?"
+        }
+    }
+
+    /// Print one row with fixed-width columns. Native Swift padding —
+    /// avoids the `%s` varargs bridge that SIGSEGVs on ARM64 macOS.
+    private func row(_ name: String, _ family: String, _ mode: String,
+                     _ quant: String, _ size: String, _ path: String) -> String {
+        let nameCol   = name.padding(toLength: 50, withPad: " ", startingAt: 0)
+        let familyCol = family.padding(toLength: 10, withPad: " ", startingAt: 0)
+        let modeCol   = mode.padding(toLength: 8,  withPad: " ", startingAt: 0)
+        let quantCol  = quant.padding(toLength: 8,  withPad: " ", startingAt: 0)
+        // Size right-aligned in 12 cols.
+        let sizeCol: String = {
+            if size.count >= 12 { return size }
+            return String(repeating: " ", count: 12 - size.count) + size
+        }()
+        return "\(nameCol) \(familyCol) \(modeCol) \(quantCol) \(sizeCol)  \(path)"
+    }
+
+    private func formatBytes(_ b: Int64) -> String {
+        let gb = Double(b) / 1e9
+        if gb >= 1 { return String(format: "%.2f GB", gb) }
+        let mb = Double(b) / 1e6
+        return String(format: "%.1f MB", mb)
+    }
+}
+
+// MARK: - EngineError context helper
+
+extension EngineError {
+    /// Attach a message to an existing case by wrapping in `unsupportedModelType`.
+    /// Only used by the CLI for friendlier failure strings.
+    fileprivate func context(_ s: String) -> EngineError {
+        .unsupportedModelType("\(self): \(s)")
+    }
+}
+
+// MARK: - dflash-smoke subcommand
+//
+// End-to-end JANG-DFlash + DDTree pipeline smoke. Loads a MiniMax
+// target via the standard Engine path, loads a JangDFlashDrafter
+// checkpoint (or constructs a random-init one for a dry-run), and
+// runs ONE spec-dec cycle:
+//
+//     target forward (prompt, tap capture)
+//       → bonus token + per-layer hidden taps
+//       → drafter 1-step denoising forward
+//       → softmax → top-k per slot
+//       → lattice beam → prefix trie → ancestry mask
+//       → target verify forward (tree attention mask)
+//       → greedy walker → accepted token sequence
+//
+// Purpose: validate that the pipeline runs end-to-end on real MLX
+// weights before any trained drafter exists. With a random-init
+// drafter, expected behavior is low-to-zero acceptance rate and
+// coherent walker output — the point is to prove the plumbing.
+
+struct DFlashSmoke: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "dflash-smoke",
+        abstract: "End-to-end JANG-DFlash + DDTree pipeline smoke test"
+    )
+
+    @Option(name: .shortAndLong, help: "Path to the target model (must be MiniMax-JANG-*).")
+    var model: String
+
+    @Option(
+        name: .long,
+        help: "Path to a JangDFlashDrafter safetensors checkpoint. If omitted, uses a randomly-initialized drafter (pipeline-only smoke).")
+    var drafter: String?
+
+    @Option(name: .long, help: "Prompt text to seed the pipeline.")
+    var prompt: String = "The Roman Empire reached its greatest territorial extent"
+
+    @Option(name: .long, help: "Spec-dec block size B (DFlash default 16).")
+    var blockSize: Int = 16
+
+    @Option(name: .long, help: "Top-K per slot for DDTree expansion.")
+    var topK: Int = 4
+
+    @Option(name: .long, help: "Max paths kept after lattice beam.")
+    var numPaths: Int = 60
+
+    @Option(
+        name: .long,
+        help: "Comma-separated target layer indices to tap. Default: 5 evenly spaced across 62 MiniMax layers.")
+    var tapLayersOpt: String = "10,22,34,46,58"
+
+    @Option(name: .long, help: "Max new tokens to generate (multi-block loop).")
+    var maxNewTokens: Int = 16
+
+    @Flag(name: .long, help: "Use the v2 cached-KV generate path (persistent target KV cache + tap accumulation).")
+    var cached: Bool = false
+
+    @Flag(name: .long, help: "Interactive loop: read prompts from stdin line-by-line, model stays loaded between prompts.")
+    var loop: Bool = false
+
+    func run() async throws {
+        let tapIdx = Set(tapLayersOpt.split(separator: ",").compactMap { Int($0) })
+        guard !tapIdx.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] no valid tap layers parsed from \(tapLayersOpt)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        // Load target via the standard engine path.
+        let engine = Engine()
+        let loadOpts = Engine.LoadOptions(modelPath: URL(fileURLWithPath: model))
+        let loadStream = await engine.load(loadOpts)
+        for try await ev in loadStream {
+            switch ev {
+            case .progress(let p):
+                FileHandle.standardError.write(Data(
+                    "[load] \(p.phase.rawValue): \(p.label)\n".utf8))
+            case .done: break
+            case .failed(let reason):
+                FileHandle.standardError.write(Data(
+                    "[load] failed: \(reason)\n".utf8))
+                throw ExitCode.failure
+            }
+        }
+
+        guard let container = await engine.loaded else {
+            FileHandle.standardError.write(Data("[dflash-smoke] no loaded container\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let drafterPath = drafter.map { URL(fileURLWithPath: $0) }
+        let B = blockSize
+        let k = topK
+        let m = numPaths
+        let maxN = maxNewTokens
+        let useCached = cached
+
+        if loop {
+            // Interactive loop: read prompts from stdin, one per line.
+            // Model stays loaded between prompts. Empty line skips;
+            // `:q` or EOF exits. Prints the response followed by a
+            // separator line to make the output easy to consume from
+            // pipes and test harnesses.
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] loop mode — enter prompts, one per line, ':q' or Ctrl-D to exit\n".utf8))
+            while let line = readLine() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == ":q" || trimmed == ":quit" || trimmed == ":exit" {
+                    break
+                }
+                if trimmed.isEmpty { continue }
+                let start = Date()
+                let result: DFlashSmokeImpl.GenerateResult
+                do {
+                    result = try await container.perform { (ctx: ModelContext) in
+                        try DFlashSmokeImpl.runGenerate(
+                            ctx: ctx,
+                            drafterPath: drafterPath,
+                            prompt: trimmed,
+                            blockSize: B,
+                            topK: k,
+                            numPaths: m,
+                            tapLayers: tapIdx,
+                            maxNewTokens: maxN,
+                            cached: useCached
+                        )
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data(
+                        "[dflash-smoke] generation failed: \(error)\n".utf8))
+                    print("---")
+                    continue
+                }
+                let wall = Date().timeIntervalSince(start)
+                print(result.decodedText)
+                let effRate = Double(result.generatedTokens.count) / max(wall, 1e-6)
+                let nTok = result.generatedTokens.count
+                let nBlk = result.blockOutcomes.count
+                let accStr = String(format: "%.2f", result.meanAcceptedPerBlock)
+                let rateStr = String(format: "%.2f", effRate)
+                let statsLine = "[dflash] \(nTok) tok, \(nBlk) blocks, \(accStr) acc/blk, \(rateStr) tok/s\n"
+                FileHandle.standardError.write(Data(statsLine.utf8))
+                print("---")
+            }
+            return
+        }
+
+        // Single-shot mode (default) — matches session-1 output format.
+        let start = Date()
+        let promptCopy = prompt
+        let result = try await container.perform { (ctx: ModelContext) in
+            try DFlashSmokeImpl.runGenerate(
+                ctx: ctx,
+                drafterPath: drafterPath,
+                prompt: promptCopy,
+                blockSize: B,
+                topK: k,
+                numPaths: m,
+                tapLayers: tapIdx,
+                maxNewTokens: maxN,
+                cached: useCached
+            )
+        }
+        let wall = Date().timeIntervalSince(start)
+
+        print("")
+        print("=== DFlash generate ===")
+        print("  prompt:          \"\(prompt)\"")
+        print("  block size B:    \(blockSize)")
+        print("  top-k per slot:  \(topK)")
+        print("  m paths:         \(numPaths)")
+        print("  tap layers:      \(tapIdx.sorted())")
+        print("  drafter:         \(drafter ?? "(random init)")")
+        print("  max new tokens:  \(maxNewTokens)")
+        print("  blocks run:      \(result.blockOutcomes.count)")
+        print("  generated:       \(result.generatedTokens.count) tokens")
+        print("  mean accept/blk: \(String(format: "%.2f", result.meanAcceptedPerBlock))")
+        print("  target wall sum: \(String(format: "%.3fs", result.totalTargetWallSec))")
+        print("  drafter wall sum:\(String(format: "%.3fs", result.totalDrafterWallSec))")
+        print("  verify wall sum: \(String(format: "%.3fs", result.totalVerifyWallSec))")
+        print("  total wall:      \(String(format: "%.3fs", wall))")
+        print("  eff tok/s:       \(String(format: "%.2f", Double(result.generatedTokens.count) / max(wall, 1e-6)))")
+        print("")
+        print("=== Text ===")
+        print(result.decodedText)
+        print("")
+        print("  pipeline:        OK")
+    }
+}
+
+/// Non-Sendable impl lives in an enum so it can return a plain Sendable
+/// struct across the container actor boundary.
+enum DFlashSmokeImpl {
+    struct GenerateResult: Sendable {
+        var generatedTokens: [Int]
+        var decodedText: String
+        var blockOutcomes: [JangDFlashBlockOutcome]
+        var totalTargetWallSec: Double
+        var totalDrafterWallSec: Double
+        var totalVerifyWallSec: Double
+        var meanAcceptedPerBlock: Double
+    }
+
+    static func runGenerate(
+        ctx: ModelContext,
+        drafterPath: URL?,
+        prompt: String,
+        blockSize: Int,
+        topK: Int,
+        numPaths: Int,
+        tapLayers: Set<Int>,
+        maxNewTokens: Int,
+        cached: Bool
+    ) throws -> GenerateResult {
+        guard let minimax = ctx.model as? MiniMaxModel else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] loaded model is not MiniMaxModel (got \(type(of: ctx.model)))\n".utf8))
+            throw ExitCode.validationFailure
+        }
+        let target = MiniMaxDFlashTarget(minimax)
+
+        let drafterCfg = JangDFlashConfig(blockSize: blockSize)
+        let drafter: JangDFlashDrafter
+        if let drafterPath {
+            drafter = try JangDFlashLoader.loadNew(config: drafterCfg, from: drafterPath)
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] loaded drafter from \(drafterPath.path)\n".utf8))
+        } else {
+            drafter = JangDFlashDrafter(drafterCfg)
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] using random-init drafter (pipeline smoke only)\n".utf8))
+        }
+
+        var specCfg = JangDFlashSpecConfig()
+        specCfg.blockSize = blockSize
+        specCfg.topK = topK
+        specCfg.numPaths = numPaths
+        specCfg.tapLayers = tapLayers
+        let specDec = JangDFlashSpecDec(target: target, drafter: drafter, cfg: specCfg)
+
+        let promptIDs = ctx.tokenizer.encode(text: prompt)
+        guard !promptIDs.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] tokenizer returned empty token list\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let eosSet: Set<Int>
+        if let eosId = ctx.tokenizer.eosTokenId {
+            eosSet = [eosId]
+        } else {
+            eosSet = []
+        }
+
+        var outcomes: [JangDFlashBlockOutcome] = []
+        let onBlockCallback: (JangDFlashBlockOutcome) -> Void = { outcome in
+            outcomes.append(outcome)
+            let acc = outcome.acceptedTokens.count
+            let tree = outcome.treeSize
+            let targetS = String(format: "%.3fs", outcome.targetWallSec)
+            let draftS = String(format: "%.3fs", outcome.drafterWallSec)
+            let verifyS = String(format: "%.3fs", outcome.verifyWallSec)
+            let line = "[dflash] block \(outcomes.count): accepted=\(acc) tree=\(tree) "
+                + "target=\(targetS) draft=\(draftS) verify=\(verifyS)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+        let generated: [Int]
+        if cached {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] using cached-KV generate path\n".utf8))
+            let (accepted, _) = try specDec.cachedGenerate(
+                promptIDs: promptIDs,
+                maxNewTokens: maxNewTokens,
+                eosTokenIDs: eosSet,
+                onBlock: onBlockCallback
+            )
+            generated = accepted
+        } else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] using v1 cacheless generate path\n".utf8))
+            generated = try specDec.generate(
+                promptIDs: promptIDs,
+                maxNewTokens: maxNewTokens,
+                eosTokenIDs: eosSet,
+                onBlock: onBlockCallback
+            )
+        }
+
+        let decoded = ctx.tokenizer.decode(tokenIds: generated)
+
+        let sumT = outcomes.reduce(0.0) { $0 + $1.targetWallSec }
+        let sumD = outcomes.reduce(0.0) { $0 + $1.drafterWallSec }
+        let sumV = outcomes.reduce(0.0) { $0 + $1.verifyWallSec }
+        let meanAcc: Double = outcomes.isEmpty ? 0 :
+            Double(outcomes.reduce(0) { $0 + $1.acceptedTokens.count }) / Double(outcomes.count)
+
+        return GenerateResult(
+            generatedTokens: generated,
+            decodedText: decoded,
+            blockOutcomes: outcomes,
+            totalTargetWallSec: sumT,
+            totalDrafterWallSec: sumD,
+            totalVerifyWallSec: sumV,
+            meanAcceptedPerBlock: meanAcc
+        )
+    }
+
+    // Legacy single-cycle path preserved below for reference but no
+    // longer called. Can be deleted once the multi-block loop lands
+    // in production; kept here as a known-good shape-checker.
+    struct CycleResult: Sendable {
+        var targetWallSec: Double
+        var drafterWallSec: Double
+        var verifyWallSec: Double
+        var treeSize: Int
+        var acceptedTokens: [Int]
+    }
+
+    static func runOneCycle(
+        ctx: ModelContext,
+        drafterPath: URL?,
+        prompt: String,
+        blockSize: Int,
+        topK: Int,
+        numPaths: Int,
+        tapLayers: Set<Int>
+    ) throws -> CycleResult {
+        guard let minimax = ctx.model as? MiniMaxModel else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] loaded model is not MiniMaxModel (got \(type(of: ctx.model)))\n".utf8))
+            throw ExitCode.validationFailure
+        }
+        let target = MiniMaxDFlashTarget(minimax)
+
+        let drafterCfg = JangDFlashConfig(blockSize: blockSize)
+
+        let drafter: JangDFlashDrafter
+        if let drafterPath {
+            drafter = try JangDFlashLoader.loadNew(config: drafterCfg, from: drafterPath)
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] loaded drafter from \(drafterPath.path)\n".utf8))
+        } else {
+            drafter = JangDFlashDrafter(drafterCfg)
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] using random-init drafter (pipeline smoke only)\n".utf8))
+        }
+
+        var specCfg = JangDFlashSpecConfig()
+        specCfg.blockSize = blockSize
+        specCfg.topK = topK
+        specCfg.numPaths = numPaths
+        specCfg.tapLayers = tapLayers
+        let specDec = JangDFlashSpecDec(target: target, drafter: drafter, cfg: specCfg)
+
+        // Tokenize
+        let promptIDs = ctx.tokenizer.encode(text: prompt)
+        guard !promptIDs.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] tokenizer returned empty token list\n".utf8))
+            throw ExitCode.failure
+        }
+        let inputArr = MLXArray(promptIDs.map { Int32($0) }).reshaped(1, promptIDs.count)
+
+        // Target forward with tap capture
+        let tTarget0 = Date()
+        let (targetLogits, taps) = target.forwardWithTaps(
+            inputs: inputArr,
+            cache: nil,
+            tapLayers: tapLayers,
+            providedMask: nil
+        )
+        materialize(targetLogits)
+        for (_, t) in taps { materialize(t) }
+        let targetWall = Date().timeIntervalSince(tTarget0)
+
+        // Bonus token
+        let finalLogits = targetLogits[0, promptIDs.count - 1]
+        let bonusArr = argMax(finalLogits, axis: -1)
+        materialize(bonusArr)
+        let bonusID = Int(bonusArr.item(Int32.self))
+
+        // Block input
+        var blockIDsArr = [Int32](repeating: Int32(drafterCfg.maskTokenId), count: blockSize)
+        blockIDsArr[0] = Int32(bonusID)
+        let block = MLXArray(blockIDsArr).reshaped(1, blockSize)
+
+        // Tap concatenation → slice/pad to block length
+        let hCtxFull = specDec.buildTapConcatenation(taps: taps)
+        let Tctx = hCtxFull.dim(1)
+        let sliceStart = max(0, Tctx - blockSize)
+        let hCtxBlock = hCtxFull[0..., sliceStart ..< Tctx, 0...]
+        let hCtxPadded: MLXArray
+        if hCtxBlock.dim(1) < blockSize {
+            let pad = MLXArray.zeros(
+                [1, blockSize - hCtxBlock.dim(1), hCtxBlock.dim(2)],
+                dtype: hCtxBlock.dtype
+            )
+            hCtxPadded = concatenated([pad, hCtxBlock], axis: 1)
+        } else {
+            hCtxPadded = hCtxBlock
+        }
+
+        // Drafter forward
+        let tDraft0 = Date()
+        let drafterLogits = drafter(block, hTaps: hCtxPadded)
+        materialize(drafterLogits)
+        let drafterWall = Date().timeIntervalSince(tDraft0)
+
+        // Top-k per slot
+        let drafterProbs = specDec.softmaxLastAxis(drafterLogits[0..., 1..., 0...])
+        materialize(drafterProbs)
+        let (vals, ids) = specDec.topKPerSlot(probs: drafterProbs, k: topK)
+
+        // Beam + trie
+        let paths = DDTreeBuilder.beamTopMLattice(vals: vals, ids: ids, m: numPaths)
+        guard !paths.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "[dflash-smoke] beam returned zero paths\n".utf8))
+            throw ExitCode.failure
+        }
+        let flatTree = DDTreeBuilder.flatten(paths: paths)
+        let n = flatTree.flatTokens.count
+
+        // Build additive mask for verify
+        let totalLen: Int = promptIDs.count + n
+        let negInf: Float = -1e9
+        var biasFlat = [Float](repeating: negInf, count: totalLen * totalLen)
+        for i in 0 ..< promptIDs.count {
+            for j in 0 ... i {
+                biasFlat[i * totalLen + j] = 0
+            }
+        }
+        for i in 0 ..< n {
+            let treeRow = promptIDs.count + i
+            for j in 0 ..< promptIDs.count {
+                biasFlat[treeRow * totalLen + j] = 0
+            }
+            for j in 0 ..< n where flatTree.ancestryMask[i][j] {
+                biasFlat[treeRow * totalLen + (promptIDs.count + j)] = 0
+            }
+        }
+        let bias = MLXArray(biasFlat, [totalLen, totalLen])
+
+        let verifyIds: [Int32] =
+            promptIDs.map { Int32($0) } + flatTree.flatTokens.map { Int32($0) }
+        let verifyInput = MLXArray(verifyIds).reshaped(1, totalLen)
+
+        let tVerify0 = Date()
+        let (verifyLogits, _) = target.forwardWithTaps(
+            inputs: verifyInput,
+            cache: nil,
+            tapLayers: [],
+            providedMask: .array(bias)
+        )
+        materialize(verifyLogits)
+        let verifyWall = Date().timeIntervalSince(tVerify0)
+
+        // Extract argmax at each tree node.
+        let treeLogits = verifyLogits[0, promptIDs.count ..< totalLen]
+        let treeArg = argMax(treeLogits, axis: -1)
+        materialize(treeArg)
+        let treeArgArr = treeArg.asArray(Int32.self).map { Int($0) }
+
+        let accepted = JangDFlashSpecDec.walkAcceptGreedy(
+            flatTokens: flatTree.flatTokens,
+            ancestryMask: flatTree.ancestryMask,
+            targetArgmax: treeArgArr,
+            bonusToken: bonusID
+        )
+
+        return CycleResult(
+            targetWallSec: targetWall,
+            drafterWallSec: drafterWall,
+            verifyWallSec: verifyWall,
+            treeSize: n,
+            acceptedTokens: accepted
+        )
+    }
+}
+
+// MARK: - bench-direct: bypass vMLXEngine, drive model via TokenIterator
+//
+// vmlx-swift-lm benchmarks Qwen3.5-35B-A3B at ~98 tok/s on M4 Max.
+// The vmlx model files are byte-identical to vmlx-swift-lm. The 3× gap
+// observed via vmlxctl serve must be in the engine wrapping (metrics,
+// settings, prefix cache, chat-template, HTTP serialization, tool parser),
+// not in the kernels. This subcommand proves that by loading the model
+// via LLMModelFactory directly and decoding through TokenIterator with a
+// tight-loop mirror of vmlx-swift-lm's TestRunner main.swift:613-640.
+//
+// Per-token decode() is deliberately avoided in the hot loop — collect
+// all token IDs, decode at the end. The vmlx-swift-lm bench notes
+// "per-token decode() serializes GPU/CPU and kills throughput".
+
+struct BenchDirect: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "bench-direct",
+        abstract: "Decode bench bypassing vMLXEngine — proves the kernel path is fast"
+    )
+
+    @Option(name: .shortAndLong) var model: String
+    @Option(name: .long) var prompt: String = "Explain quantum mechanics briefly."
+    @Option(name: .long) var maxTokens: Int = 128
+    @Flag(name: .long, inversion: .prefixedNo, help: "Run a 6-token warmup before the timed pass.") var warmup: Bool = true
+
+    func run() async throws {
+        let url = URL(fileURLWithPath: model)
+        FileHandle.standardError.write(Data("[bench-direct] loading \(model)\n".utf8))
+        let loader = TransformersTokenizerLoader()
+        let t0 = Date()
+        let container = try await LLMModelFactory.shared.loadContainer(
+            from: url, using: loader
+        )
+        let loadDt = Date().timeIntervalSince(t0)
+        FileHandle.standardError.write(Data(
+            "[bench-direct] loaded in \(String(format: "%.2f", loadDt))s\n".utf8))
+
+        let promptCopy = prompt
+        let n = maxTokens
+        let doWarmup = warmup
+        let result = try await container.perform { (ctx: ModelContext) in
+            try await BenchDirectImpl.run(
+                ctx: ctx, prompt: promptCopy, maxTokens: n, warmup: doWarmup)
+        }
+
+        print("")
+        print("=== bench-direct (no vMLXEngine) ===")
+        print("  model:       \(model)")
+        print("  prompt:      \(prompt)")
+        print("  load wall:   \(String(format: "%.2f", loadDt))s")
+        print("  prefill:     \(String(format: "%.2f", result.prefillSec))s (\(result.promptTokens) prompt tok)")
+        print("  decode wall: \(String(format: "%.2f", result.decodeSec))s")
+        print("  generated:   \(result.tokens.count) tokens")
+        print("  decode rate: \(String(format: "%.2f", Double(result.tokens.count) / max(result.decodeSec, 1e-6))) tok/s")
+        print("")
+        print("--- output ---")
+        print(result.text)
+        print("---")
+    }
+}
+
+enum BenchDirectImpl {
+    struct BenchResult: Sendable {
+        var text: String
+        var tokens: [Int]
+        var promptTokens: Int
+        var prefillSec: Double
+        var decodeSec: Double
+    }
+
+    static func run(
+        ctx: ModelContext, prompt: String, maxTokens: Int, warmup: Bool
+    ) async throws -> BenchResult {
+        // Tokenize prompt + prepare input via the model's processor (handles
+        // chat template if needed; otherwise falls back to raw encode).
+        let userInput = UserInput(prompt: prompt)
+        let input = try await ctx.processor.prepare(input: userInput)
+        let promptTokensCount = input.text.tokens.dim(input.text.tokens.ndim - 1)
+
+        // Warmup: a tiny TokenIterator pass so the first compile + cache
+        // alloc don't pollute the timed pass.
+        if warmup {
+            let warmIter = try TokenIterator(
+                input: input, model: ctx.model,
+                parameters: GenerateParameters(maxTokens: 4, temperature: 0)
+            )
+            for _ in warmIter.prefix(4) {}
+        }
+
+        let prefillStart = Date()
+        let iterator = try TokenIterator(
+            input: input, model: ctx.model,
+            parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0)
+        )
+        // The first .next() call drives prefill. Time it separately from
+        // the steady-state decode loop.
+        var iter = iterator
+        guard let firstToken = iter.next() else {
+            return BenchResult(text: "", tokens: [], promptTokens: promptTokensCount,
+                               prefillSec: Date().timeIntervalSince(prefillStart),
+                               decodeSec: 0)
+        }
+        let prefillDt = Date().timeIntervalSince(prefillStart)
+
+        // EOS-aware stop set: drop generation the moment an EOS lands so
+        // the decoded text doesn't include the EOS token's literal form
+        // (e.g. MiniMax-M2.7 uses eos_token="[e~[" which would otherwise
+        // print as tail garbage). Mirrors generateLoopTask's stop check.
+        var stopIds: Set<Int> = []
+        if let eos = ctx.tokenizer.eosTokenId { stopIds.insert(eos) }
+        if let unk = ctx.tokenizer.unknownTokenId { stopIds.insert(unk) }
+
+        var tokens: [Int] = stopIds.contains(firstToken) ? [] : [firstToken]
+        let decodeStart = Date()
+        for token in iter {
+            if tokens.count >= maxTokens { break }
+            if stopIds.contains(token) { break }
+            tokens.append(token)
+        }
+        let decodeDt = Date().timeIntervalSince(decodeStart)
+
+        // Decode all tokens at once at the end (per vmlx-swift-lm note:
+        // per-token decode in hot loop serializes GPU/CPU).
+        let text = ctx.tokenizer.decode(tokenIds: tokens)
+        return BenchResult(
+            text: text, tokens: tokens, promptTokens: promptTokensCount,
+            prefillSec: prefillDt, decodeSec: decodeDt
+        )
+    }
+}
+
+// MARK: - Images
+
+/// P2 §294 — one-shot image generation from the CLI without booting a
+/// full HTTP server. Loads the model once, runs a single request,
+/// writes the PNG to disk, exits. Honest about which models actually
+/// reach pixel-level synthesis versus which are stubs — on a stub
+/// throw we exit non-zero with the error message so scripts know.
+struct Images: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "images",
+        abstract: "Generate an image from a prompt (one-shot, no server)"
+    )
+
+    @Option(name: .shortAndLong, help: "Path to the image-generation model directory.")
+    var model: String
+
+    @Option(name: .long, help: "Canonical image runtime name, e.g. flux1-schnell or flux2-klein. Defaults to inference from --model path.")
+    var runtime: String?
+
+    @Option(name: .shortAndLong, help: "Prompt text.")
+    var prompt: String
+
+    @Option(name: .shortAndLong, help: "Output PNG path. If a directory, file is named by timestamp.")
+    var output: String = "./vmlx-gen.png"
+
+    @Option(name: .long, help: "Image width (must match model's native resolution).")
+    var width: Int = 1024
+
+    @Option(name: .long, help: "Image height.")
+    var height: Int = 1024
+
+    @Option(name: .long, help: "Sampling steps (0 = model default).")
+    var steps: Int = 0
+
+    @Option(name: .long, help: "CFG guidance scale (0 = model default).")
+    var guidance: Double = 0
+
+    @Option(name: .long, help: "Random seed (-1 = random).")
+    var seed: Int = -1
+
+    func run() async throws {
+        _ = signal(SIGPIPE, SIG_IGN)
+        let modelURL = URL(fileURLWithPath: model)
+        guard FileManager.default.fileExists(atPath: modelURL.path) else {
+            FileHandle.standardError.write(Data(
+                "error: model path does not exist: \(model)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let requestedRuntime = runtime?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var settings = ImageGenSettings()
+        settings.width = width
+        settings.height = height
+        settings.numImages = 1
+        if steps > 0 { settings.steps = steps }
+        if guidance > 0 { settings.guidance = guidance }
+        settings.seed = seed
+        let derivedName: String
+        if let requestedRuntime, !requestedRuntime.isEmpty {
+            derivedName = requestedRuntime
+        } else {
+            derivedName = modelURL.lastPathComponent.lowercased()
+        }
+
+        let modelStorageBytes = Self.modelStorageBytes(at: modelURL)
+        let estimate = ImageGenerationSafety.estimate(
+            settings: settings,
+            modelStorageBytes: modelStorageBytes
+        )
+        let storageSummary = modelStorageBytes.map(Self.formatBytes) ?? "unknown storage"
+        FileHandle.standardError.write(Data(
+            ("[images] memory estimate: \(estimate.summary), \(estimate.budgetSummary), model=\(storageSummary)\n").utf8))
+        if let message = ImageGenerationSafety.validationMessage(
+            settings: settings,
+            modelStorageBytes: modelStorageBytes
+        ) {
+            FileHandle.standardError.write(Data(
+                "[images] refused: \(message)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let engine = Engine()
+        let runtimeSuffix: String
+        if let requestedRuntime, !requestedRuntime.isEmpty {
+            runtimeSuffix = " runtime=\(requestedRuntime)"
+        } else {
+            runtimeSuffix = ""
+        }
+        FileHandle.standardError.write(Data(
+            ("[images] loading model: \(modelURL.lastPathComponent)\(runtimeSuffix)\n").utf8))
+        do {
+            try await engine.preloadImageModel(at: modelURL, runtimeName: requestedRuntime)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[images] load failed: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        FileHandle.standardError.write(Data(
+            "[images] generating: \(settings.width)x\(settings.height) steps=\(settings.steps) seed=\(settings.seed)\n".utf8))
+        let srcURL: URL
+        do {
+            srcURL = try await engine.generateImage(
+                prompt: prompt,
+                model: derivedName,
+                settings: settings)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[images] generation failed: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        // Resolve the destination. If --output points at a directory,
+        // generate a timestamped filename inside it; otherwise treat
+        // it as the final file path and create parent directories as
+        // needed.
+        let fm = FileManager.default
+        var destURL = URL(fileURLWithPath: output)
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: destURL.path, isDirectory: &isDir), isDir.boolValue {
+            let ts = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            destURL = destURL.appendingPathComponent("vmlx-\(ts).png")
+        }
+        try? fm.createDirectory(
+            at: destURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        do {
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.copyItem(at: srcURL, to: destURL)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[images] failed to write output: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        do {
+            let verification = try ImageRuntimeProofStore.recordVerifiedPNG(
+                runtimeName: derivedName,
+                modelPath: modelURL.path,
+                outputURL: destURL,
+                settings: settings
+            )
+            FileHandle.standardError.write(Data(
+                String(
+                    format: "[images] verified PNG: %dx%d variance=%.2f\n",
+                    verification.width,
+                    verification.height,
+                    verification.pixelVariance
+                ).utf8
+            ))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[images] output verification failed: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        print(destURL.path)
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    }
+
+    private static func modelStorageBytes(at root: URL) -> Int64? {
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
+            return nil
+        }
+
+        var total: Int64 = 0
+        var seenResolvedFiles = Set<String>()
+        func addFile(_ url: URL) {
+            let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+            guard seenResolvedFiles.insert(resolved.path).inserted else { return }
+            guard let attrs = try? fm.attributesOfItem(atPath: resolved.path),
+                  let fileType = attrs[.type] as? FileAttributeType,
+                  fileType == .typeRegular,
+                  let size = attrs[.size] as? NSNumber
+            else { return }
+            total += size.int64Value
+        }
+
+        if !isDirectory.boolValue {
+            addFile(root)
+            return total
+        }
+
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        for case let url as URL in enumerator {
+            addFile(url)
+        }
+        return total
+    }
+}
