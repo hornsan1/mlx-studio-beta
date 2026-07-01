@@ -371,8 +371,16 @@ private func groupExpertSelect(
 ) -> (MLXArray, MLXArray) {
     let (bsz, seqLen) = (gates.dim(0), gates.dim(1))
 
-    // Original scores using sigmoid
-    let origScores = sigmoid(gates)
+    // Original scores using sigmoid. fp32 precision floor matches Python
+    // `mlx_lm/models/dots1.py:116` and `mlx_lm/models/nemotron_h.py:324`
+    // (both do `mx.sigmoid(gates.astype(mx.float32))`). NemotronH's caller
+    // passes bf16 gates without a pre-cast, so without this fp32 cast the
+    // sigmoid + downstream score-add ran in bf16. This is a deliberate,
+    // once-per-layer router cast (ported from reference `4b18d6a`) — NOT
+    // one of the forbidden per-expert untyped-scalar AsType cascades from
+    // PERF-MOE-HALF-SPEED-ROOT-CAUSE.md §3; consumers cast the weighted
+    // expert sum back to the activation dtype at the layer boundary.
+    let origScores = sigmoid(gates.asType(.float32))
     var scores = origScores + eSCB
 
     // Group-based selection if n_group > 1
@@ -909,6 +917,23 @@ private class NemotronHBackbone: Module {
     }
 }
 
+// MARK: - Load-time stacking
+
+/// Stack per-expert tensors at load time and materialize the result
+/// immediately. Without the eager `eval` + cache flush, the lazy
+/// `stacked` graph keeps every per-expert source buffer alive until
+/// first forward, doubling peak load memory for 128-expert MoE bundles
+/// and stalling the first token. Local port of reference
+/// `MLXLMCommon/LoadTimeStacking.swift:loadTimeMaterializedStacked`
+/// (commit `98fbb3a`) — file-private until the shared helper lands in
+/// vMLXLMCommon.
+private func loadTimeMaterializedStacked(_ arrays: [MLXArray], axis: Int = 0) -> MLXArray {
+    let result = MLX.stacked(arrays, axis: axis)
+    MLX.eval(result)
+    MLX.Memory.clearCache()
+    return result
+}
+
 // MARK: - Main Model (matches Python's Model class)
 
 public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
@@ -979,6 +1004,11 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        // Honor `parameters.maxKVSize` for the attention slots (ported from
+        // reference). NemotronH previously ignored maxKVSize, leaving the
+        // CacheCoordinator's `defaultMaxKVSize` contract a silent no-op
+        // for the Cascade-2 / Nemotron-Omni hybrid family. Mamba layers
+        // ignore the bound by design (their hidden state is fixed-size).
         let pattern = Array(configuration.hybridOverridePattern)
         return pattern.compactMap { char -> KVCache? in
             let blockType = NemotronHBlockType(from: char)
@@ -986,6 +1016,9 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
             case .mamba:
                 return MambaCache()
             case .attention:
+                if let maxKVSize = parameters?.maxKVSize {
+                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                }
                 return KVCacheSimple()
             case .mlp, .moe:
                 return nil  // No cache needed for MLP/MoE layers
@@ -1028,6 +1061,21 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
                 finalValue = value.swappedAxes(1, 2)
             }
 
+            // Tied-embeddings — drop redundant `lm_head.*` when the LM
+            // shares weights with `backbone.embeddings`. The init guard
+            // already declines to allocate `lmHead`; the redundant tensors
+            // otherwise survive only because `verify: [.noUnusedKeys]`
+            // silently absorbs them. Forward-compat: also drops
+            // scales/biases for bundles that quantize lm_head despite
+            // tied embeddings. (Ported from reference `98fbb3a`.)
+            if configuration.tieWordEmbeddings,
+                key == "lm_head.weight"
+                    || key == "lm_head.scales"
+                    || key == "lm_head.biases"
+            {
+                continue
+            }
+
             sanitized[key] = finalValue
         }
 
@@ -1058,7 +1106,8 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
                         sanitized.removeValue(forKey: "\(prefix).experts.\(e).\(m).weight")
                     }
                     if !toJoin.isEmpty {
-                        sanitized["\(prefix).switch_mlp.\(n).weight"] = MLX.stacked(toJoin)
+                        sanitized["\(prefix).switch_mlp.\(n).weight"] =
+                            loadTimeMaterializedStacked(toJoin)
                     }
                 }
             }
@@ -1162,8 +1211,13 @@ public struct NemotronHConfiguration: Codable, Sendable {
         case timeStepLimitMax = "time_step_limit_max"
     }
 
+    private enum RawCodingKeys: String, CodingKey {
+        case timeStepLimit = "time_step_limit"
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawContainer = try decoder.container(keyedBy: RawCodingKeys.self)
 
         modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "nemotron_h"
         vocabSize = try container.decode(Int.self, forKey: .vocabSize)
@@ -1214,14 +1268,20 @@ public struct NemotronHConfiguration: Codable, Sendable {
                 debugDescription: "hybrid_override_pattern must be string or array of strings")
         }
 
-        // Handle time_step_limit - can be array [min, max] or separate fields
-        if let limits = try? container.decode([Float].self, forKey: .timeStepLimitMin) {
-            // Actually this is time_step_limit as array
-            timeStepLimitMin = limits[0]
-            timeStepLimitMax = limits.count > 1 ? limits[1] : limits[0]
+        // mlx-lm stores Nemotron-H as `time_step_limit: [min, max]`.
+        // (The old decode probed the array under the `time_step_limit_min`
+        // key, which never matches — every bundle silently fell back to
+        // (0.0, inf), i.e. no dt clamp in the SSM step.)
+        // A lower bound of 0.0 is normalized to 0.001 upstream before the
+        // selective-scan dt clamp. Keep Swift decode and update passes aligned.
+        if let limits = try? rawContainer.decode([Float].self, forKey: .timeStepLimit),
+           let first = limits.first
+        {
+            timeStepLimitMin = first <= 0 ? 0.001 : first
+            timeStepLimitMax = limits.count > 1 ? limits[1] : first
         } else {
-            timeStepLimitMin =
-                try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMin) ?? 0.0
+            let decodedMin = try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMin) ?? 0.001
+            timeStepLimitMin = decodedMin <= 0 ? 0.001 : decodedMin
             timeStepLimitMax =
                 try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMax)
                 ?? Float.infinity
@@ -1340,7 +1400,13 @@ extension NemotronHBlock: FlashMoELayer {
         block.topK = moe.numExpertsPerTok
         block.router = { x in
             let out = gate(x)
-            return (indices: out.0, scores: out.1)
+            // The gate computes routing scores in fp32 (precision floor,
+            // see `groupExpertSelect`). FlashMoEBlock multiplies expert
+            // outputs by these scores directly — cast back to the
+            // activation dtype here so the shim's weighted sum (and the
+            // residual stream behind it) doesn't get promoted to fp32
+            // on every MoE layer (AsType cascade, root-cause doc §1/§3).
+            return (indices: out.0, scores: out.1.asType(x.dtype))
         }
         moe.flashMoeShim = block
     }
