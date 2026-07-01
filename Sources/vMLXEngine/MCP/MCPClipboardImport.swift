@@ -149,9 +149,17 @@ public enum MCPClipboardImport {
         let timeout = (entry["timeout"] as? Double)
             ?? (entry["timeout_seconds"] as? Double)
             ?? 30.0
-        let skipSec = (entry["skip_security_validation"] as? Bool)
-            ?? (entry["skipSecurityValidation"] as? Bool)
-            ?? false
+        // REVIEW MED-14 (2026-07-01): clipboard content is UNTRUSTED (the
+        // user may paste a config from anywhere). Honoring a pasted
+        // `skip_security_validation: true` would let a malicious paste turn
+        // off MCP command/URL validation entirely. Force validation ON for
+        // every clipboard-imported entry regardless of what the paste
+        // claims. A user who genuinely needs to bypass validation must do
+        // so via a trusted on-disk config (MCPConfigLoader), not a paste.
+        if (entry["skip_security_validation"] as? Bool) == true
+            || (entry["skipSecurityValidation"] as? Bool) == true {
+            // Intentionally ignored on the clipboard path — see above.
+        }
 
         return MCPServerConfig(
             name: name,
@@ -162,7 +170,7 @@ public enum MCPClipboardImport {
             url: url,
             enabled: enabled,
             timeout: timeout,
-            skipSecurityValidation: skipSec
+            skipSecurityValidation: false
         )
     }
 }

@@ -221,6 +221,13 @@ public final class Flux2Klein: ImageGenerator, @unchecked Sendable {
 
         let total = scheduler.stepCount
         let startedAt = Date()
+        // REVIEW MED-8: Flux axial RoPE (step-invariant), built from the grid.
+        let kleinHeadDim = transformer.config.dim / transformer.config.numHeads
+        let kleinRope = FluxRoPE(
+            headDim: kleinHeadDim,
+            textLen: textHidden.dim(1),
+            latentH: request.height / (8 * transformer.config.patchSize),
+            latentW: request.width / (8 * transformer.config.patchSize))
         for step in 0..<total {
             if Task.isCancelled { continuation.yield(.cancelled); return }
             let imgPatched = patchify(
@@ -235,7 +242,7 @@ public final class Flux2Klein: ImageGenerator, @unchecked Sendable {
                 pooledClip: pooledClip,
                 timestep: timestep,
                 guidance: guidance,
-                rope: nil
+                rope: kleinRope
             )
             let velocity = unpatchify(
                 velocityPatched,

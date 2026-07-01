@@ -117,6 +117,13 @@ public final class QwenImage: ImageGenerator, @unchecked Sendable {
 
         let total = scheduler.stepCount
         let startedAt = Date()
+        // REVIEW MED-8: build the Flux axial RoPE once from the patch grid.
+        let qHeadDim = transformer.config.dim / transformer.config.numHeads
+        let qRope = FluxRoPE(
+            headDim: qHeadDim,
+            textLen: textHidden.dim(1),
+            latentH: request.height / (8 * transformer.config.patchSize),
+            latentW: request.width / (8 * transformer.config.patchSize))
         for step in 0..<total {
             if Task.isCancelled { continuation.yield(.cancelled); return }
             let imgPatched = patchify(
@@ -131,7 +138,7 @@ public final class QwenImage: ImageGenerator, @unchecked Sendable {
                 pooledClip: pooledClip,
                 timestep: timestep,
                 guidance: guidance,
-                rope: nil
+                rope: qRope
             )
             let velocity = unpatchify(
                 velocityPatched,

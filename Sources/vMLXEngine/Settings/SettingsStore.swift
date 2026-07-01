@@ -439,6 +439,8 @@ extension Engine.LoadOptions {
         self.maxNumSeqs = r.maxNumSeqs
         self.prefillStepSize = r.prefillStepSize
         self.maxCacheBlocks = r.maxCacheBlocks
+        self.usePagedCache = r.usePagedCache
+        self.pagedCacheBlockSize = r.pagedCacheBlockSize
         self.enableTurboQuant = r.enableTurboQuant
         self.enableJANG = r.enableJANG
         self.enablePrefixCache = r.enablePrefixCache
@@ -449,6 +451,8 @@ extension Engine.LoadOptions {
         self.idleEnabled = r.idleEnabled
         // Cache stack
         self.enableMemoryCache = r.enableMemoryCache
+        self.memoryCachePercent = r.memoryCachePercent
+        self.memoryCacheTTLMinutes = r.memoryCacheTTLMinutes
         self.enableDiskCache = r.enableDiskCache
         self.diskCacheDir = r.diskCacheDir
         self.diskCacheMaxGB = r.diskCacheMaxGB

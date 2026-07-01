@@ -68,25 +68,31 @@ enum StudioLibraryModelSearch {
         let path = model.ref.localURL?.path
         let repo = model.ref.repo
 
+        // Built imperatively rather than as one large array literal: the
+        // Swift type-checker times out ("unable to type-check this
+        // expression in reasonable time") on a literal this size mixing
+        // ternaries and Optional.map. Appending is trivially typed.
+        var tokens: [String] = []
+        tokens.append(model.ref.displayName)
+        tokens.append(model.family)
+        tokens.append(model.modality)
+        tokens.append(model.labels.joined(separator: " "))
+        tokens.append(loadStateLabel)
+        tokens.append(model.isLoaded ? "loaded model" : "not loaded model")
+        tokens.append(model.isLoaded ? "active model" : "downloaded model")
+        tokens.append(model.isLoaded ? "ready in memory" : "available on disk")
+        tokens.append("\(model.sizeBytes)")
+        tokens.append(formattedBytes(model.sizeBytes))
+        tokens.append(repo ?? "")
+        tokens.append(repo.map { "repo \($0)" } ?? "")
+        tokens.append(path ?? "")
+        tokens.append(path.map { "local path \($0)" } ?? "")
+        tokens.append(model.ref.localURL?.lastPathComponent ?? "")
+        tokens.append(contentsOf: model.labels)
+
         return Summary(
             loadStateLabel: loadStateLabel,
-            searchTokens: [
-                model.ref.displayName,
-                model.family,
-                model.modality,
-                model.labels.joined(separator: " "),
-                loadStateLabel,
-                model.isLoaded ? "loaded model" : "not loaded model",
-                model.isLoaded ? "active model" : "downloaded model",
-                model.isLoaded ? "ready in memory" : "available on disk",
-                "\(model.sizeBytes)",
-                formattedBytes(model.sizeBytes),
-                repo ?? "",
-                repo.map { "repo \($0)" } ?? "",
-                path ?? "",
-                path.map { "local path \($0)" } ?? "",
-                model.ref.localURL?.lastPathComponent ?? "",
-            ] + model.labels
+            searchTokens: tokens
         )
     }
 }

@@ -96,6 +96,142 @@ public struct RoPE2D {
     }
 }
 
+// MARK: - Flux axial RoPE (EmbedND)
+//
+// REVIEW MED-8 (2026-07-01): the real Flux rotary embedding, replacing the
+// former `rope: nil` TODO in the DiT blocks. Faithful port of
+// black-forest-labs/flux `math.py` (EmbedND + apply_rope):
+//   • Per-axis position ids over `axesDim` (Flux: [16,56,56], sum == headDim).
+//     Text tokens use position 0 on every axis (→ identity); image tokens use
+//     (0, row, col) on the 3 axes.
+//   • Interleaved pairing: for pair i, rotate (x[2i], x[2i+1]) by angle
+//     pos·omega, omega_j = theta^(-2j/axesDim[axis]).
+// Validated bit-for-bit against a NumPy reference (tests/e2e/rope-verify) and
+// for rotation invariants (norm-preserving; position-0 identity) in
+// `regression-check`.
+public struct FluxRoPE {
+    public let cosCache: MLXArray   // (L, headDim/2)
+    public let sinCache: MLXArray   // (L, headDim/2)
+    public let seqLen: Int
+
+    /// Build the rope caches for a concatenated [text, image] sequence.
+    /// - textLen: number of leading text tokens (position 0 on all axes).
+    /// - latentH/latentW: image patch grid (image tokens = latentH*latentW).
+    public init(headDim: Int, textLen: Int, latentH: Int, latentW: Int,
+                theta: Float = 10_000, axesDim: [Int]? = nil) {
+        // Default to Flux's [16,56,56] when headDim==128; otherwise split the
+        // head dim across a batch axis (small) + two spatial axes evenly.
+        let axes: [Int]
+        if let axesDim { axes = axesDim }
+        else if headDim == 128 { axes = [16, 56, 56] }
+        else {
+            let spatial = ((headDim / 2) / 2) * 2   // even
+            axes = [headDim - 2 * spatial, spatial, spatial]
+        }
+        precondition(axes.reduce(0, +) == headDim, "axesDim must sum to headDim")
+        let half = headDim / 2
+
+        // Position ids: text → (0,0,0); image → (0, row, col).
+        var positions: [[Float]] = []
+        positions.reserveCapacity(textLen + latentH * latentW)
+        for _ in 0..<textLen { positions.append([0, 0, 0]) }
+        for y in 0..<latentH {
+            for x in 0..<latentW { positions.append([0, Float(y), Float(x)]) }
+        }
+        let L = positions.count
+        self.seqLen = L
+
+        // Precompute per-pair (axis, omega).
+        var pairAxis: [Int] = []
+        var pairOmega: [Float] = []
+        for (a, dim) in axes.enumerated() {
+            let pairs = dim / 2
+            for j in 0..<pairs {
+                pairAxis.append(a)
+                pairOmega.append(1.0 / pow(theta, Float(2 * j) / Float(dim)))
+            }
+        }
+        precondition(pairAxis.count == half)
+
+        var cosFlat = [Float](); cosFlat.reserveCapacity(L * half)
+        var sinFlat = [Float](); sinFlat.reserveCapacity(L * half)
+        for pos in positions {
+            for p in 0..<half {
+                let ang = pos[pairAxis[p]] * pairOmega[p]
+                cosFlat.append(cos(ang))
+                sinFlat.append(sin(ang))
+            }
+        }
+        self.cosCache = MLXArray(cosFlat).reshaped([L, half])
+        self.sinCache = MLXArray(sinFlat).reshaped([L, half])
+    }
+
+    /// Apply to a (B, H, L, headDim) tensor. Interleaved-pair rotation,
+    /// matching Flux `apply_rope`. Norm-preserving.
+    public func apply(_ x: MLXArray) -> MLXArray {
+        let b = x.dim(0), h = x.dim(1), l = x.dim(2), d = x.dim(3)
+        let half = d / 2
+        let xr = x.reshaped([b, h, l, half, 2])
+        let x0 = xr[.ellipsis, 0]   // (B,H,L,half)
+        let x1 = xr[.ellipsis, 1]
+        let c = cosCache.reshaped([1, 1, l, half])
+        let s = sinCache.reshaped([1, 1, l, half])
+        let o0 = x0 * c - x1 * s
+        let o1 = x0 * s + x1 * c
+        return stacked([o0, o1], axis: -1).reshaped([b, h, l, d])
+    }
+}
+
+// MARK: - Text conditioning adapter (REVIEW MED-7)
+//
+// Z-Image (and the Qwen-Image scaffold) previously ENCODED the prompt and
+// then threw it away — feeding the DiT `zeros` for both the token sequence
+// and the pooled vector, so the prompt had zero effect on the output
+// (prompt-independent noise). This helper adapts the real text-encoder
+// features into the DiT's expected shapes WITHOUT trained projection
+// weights, preserving prompt information so the output is prompt-dependent.
+// (Photorealistic quality still needs the real Z-Image DiT + weights; this
+// fixes the specific "prompt is ignored" defect and is unit-testable
+// without any model download.)
+public enum TextConditioningAdapter {
+    /// Adapt raw encoder features `(1, S, E)` → a `(1, nTxt, textDim)` token
+    /// sequence + a `(1, pooledDim)` pooled vector. Feature/seq dims are
+    /// padded or truncated (no learned projection); the pooled vector is a
+    /// mean over the sequence. Output is non-zero and varies with the prompt.
+    public static func adapt(
+        encoderOut: MLXArray, nTxt: Int, textDim: Int, pooledDim: Int
+    ) -> (txt: MLXArray, pooled: MLXArray) {
+        let s = encoderOut.dim(1)
+        let e = encoderOut.dim(2)
+
+        // Feature dim E → textDim.
+        var seq = encoderOut
+        if e > textDim {
+            seq = seq[0..., 0..., 0 ..< textDim]
+        } else if e < textDim {
+            let pad = MLXArray.zeros([1, s, textDim - e], dtype: encoderOut.dtype)
+            seq = concatenated([seq, pad], axis: 2)
+        }
+        // Seq S → nTxt.
+        if s > nTxt {
+            seq = seq[0..., 0 ..< nTxt, 0...]
+        } else if s < nTxt {
+            let pad = MLXArray.zeros([1, nTxt - s, textDim], dtype: encoderOut.dtype)
+            seq = concatenated([seq, pad], axis: 1)
+        }
+
+        // Pooled = mean over the (original) sequence, adapted to pooledDim.
+        var pooled = mean(encoderOut, axis: 1)   // (1, E)
+        if e > pooledDim {
+            pooled = pooled[0..., 0 ..< pooledDim]
+        } else if e < pooledDim {
+            let pad = MLXArray.zeros([1, pooledDim - e], dtype: encoderOut.dtype)
+            pooled = concatenated([pooled, pad], axis: 1)
+        }
+        return (seq, pooled)
+    }
+}
+
 // MARK: - RMS normalization
 //
 // vmlx-flux uses MLXNN's `RMSNorm(dimensions:eps:)` directly — it ships

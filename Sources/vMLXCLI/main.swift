@@ -67,6 +67,14 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Override tool-call parser. Empty = auto-detect from model. Names: hermes, qwen, llama, mistral, deepseek, kimi, granite, nemotron, step3p5, xlam, functionary, glm47, minimax, gemma4, native.")
     var toolCallParser: String = ""
 
+    // REVIEW LOW-18 — explicit MCP control for the CLI (the app already has
+    // full MCP CRUD; the CLI previously only auto-discovered mcp.json /
+    // $VMLX_MCP_CONFIG with no override).
+    @Option(name: .long, help: "Path to an MCP servers JSON config. Overrides ./mcp.json and $VMLX_MCP_CONFIG discovery. MCP tools are dispatched live in chat.")
+    var mcpConfig: String?
+    @Flag(name: .customLong("no-mcp"), help: "Disable MCP entirely, ignoring any auto-discovered mcp.json / $VMLX_MCP_CONFIG servers.")
+    var noMcp: Bool = false
+
     // Default sampling overrides (server-wide). Each one sets the
     // corresponding GlobalSettings field; per-request fields still
     // override these via the 4-tier resolver. Mirrors `cli.py`.
@@ -319,6 +327,25 @@ struct Serve: AsyncParsableCommand {
                 "[cli] L2 disk cache ON at \(g.diskCacheDir) (max \(diskCacheMaxGb) GB)\n".utf8))
         }
 
+        // REVIEW LOW-18 — MCP control. `--no-mcp` wins over `--mcp-config`.
+        if noMcp {
+            await engine.clearMCP()
+            FileHandle.standardError.write(Data(
+                "[cli] MCP disabled (--no-mcp)\n".utf8))
+        } else if let mcpPath = mcpConfig, !mcpPath.isEmpty {
+            var gm = await engine.settings.global()
+            gm.mcpConfigPath = mcpPath
+            await engine.settings.setGlobal(gm)
+            do {
+                try await engine.reloadMCPConfig(path: URL(fileURLWithPath: mcpPath))
+                FileHandle.standardError.write(Data(
+                    "[cli] MCP config loaded from \(mcpPath)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[cli] WARNING: failed to load MCP config \(mcpPath): \(error)\n".utf8))
+            }
+        }
+
         // Drain the AsyncThrowingStream to completion BEFORE starting the
         // HTTP listener. Prior bug: `try await engine.load(...)` returned
         // immediately because `load` returns a stream handle, not an async
@@ -545,13 +572,18 @@ struct Chat: AsyncParsableCommand {
     // + resultencoding + model re-tokenization of the result). Native
     // bash + a prompt-level boundary is the fast path: one tool schema,
     // one dispatch, same model state.
-    @Option(name: .long, help: "Read-only mode: model instructed not to modify files or spawn long-running processes")
+    // REVIEW LOW-15 (2026-07-01): these are ADVISORY — they add instructions
+    // to the model's system prompt but are NOT hard-enforced (BashTool runs
+    // commands via /bin/zsh with no sandbox; see BashTool.swift header). The
+    // help text says so explicitly so operators don't mistake them for a
+    // security boundary.
+    @Option(name: .long, help: "Advisory read-only: adds a system-prompt instruction not to modify files (NOT a hard sandbox).")
     var readOnly: Bool = false
-    @Option(name: .long, help: "No-network mode: model instructed not to make network requests")
+    @Option(name: .long, help: "Advisory no-network: adds a system-prompt instruction not to make network requests (NOT enforced).")
     var noNetwork: Bool = false
-    @Option(name: .long, help: "Forbid destructive commands (rm -rf, dd, mkfs, force-push, etc.)")
+    @Option(name: .long, help: "Advisory: instructs the model to avoid destructive commands (rm -rf, dd, mkfs, force-push). Prompt-level only, not enforced.")
     var noDestructive: Bool = true
-    @Option(name: .long, help: "Constrain the model's working directory to --cwd (no cd out of it)")
+    @Option(name: .long, help: "Advisory: instructs the model to stay in --cwd (no cd out). Prompt-level only, not a filesystem jail.")
     var sandboxCwd: Bool = false
 
     // §370 — verbose + reasoning surfaces. Modern agentic models

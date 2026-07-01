@@ -238,14 +238,26 @@ public struct GatewayServer {
             )
         }
 
-        // POST /v1/completions — legacy text completion. Same dispatch.
-        router.post("/v1/completions") { req, ctx -> Response in
-            return try await Self.handleOpenAIChat(
-                req: req, ctx: ctx,
-                resolver: resolver,
-                enumerate: enumerate,
-                defaultEngine: defaultEngine
-            )
+        // POST /v1/completions — legacy text completion.
+        //
+        // REVIEW MED-13 (2026-07-01): this previously reused
+        // `handleOpenAIChat`, which returns `object:"chat.completion"` with
+        // `choices[0].message.content` — the WRONG shape for the legacy
+        // completions API (which must return `object:"text_completion"` with
+        // `choices[0].text` + flat-array logprobs). A legacy SDK reading
+        // `choices[0].text` silently got nil. Rather than emit a
+        // subtly-wrong body, the gateway now returns a clear 501 and directs
+        // the caller to the per-session port, which serves the correct
+        // text-completion shape (OpenAIRoutes `/v1/completions`). This
+        // matches how the gateway already scopes Ollama/Anthropic/audio/mcp.
+        // Full gateway text-completion support is tracked as a follow-up
+        // (extract the per-session handler into a shared static function).
+        router.post("/v1/completions") { _, _ -> Response in
+            return Self.errorJSON(
+                .notImplemented,
+                "Gateway does not serve /v1/completions (legacy text-completion). "
+                + "Use the per-session port, which returns the correct "
+                + "text_completion shape. See GET /v1/_gateway/info.")
         }
 
         // POST /v1/embeddings — model-keyed but not streaming.
@@ -336,13 +348,13 @@ public struct GatewayServer {
                 "supported": [
                     "GET  /v1/models",
                     "POST /v1/chat/completions",
-                    "POST /v1/completions",
                     "POST /v1/embeddings",
                     "POST /v1/images/generations",
                     "POST /v1/images/edits (JSON + base64 only)",
                     "GET  /health",
                 ],
                 "unsupported_in_gateway": [
+                    "POST /v1/completions (legacy text-completion) — use the per-session port for the correct text_completion shape",
                     "POST /api/chat (Ollama) — use the per-session port",
                     "POST /api/generate (Ollama) — use the per-session port",
                     "POST /v1/messages (Anthropic) — use the per-session port",

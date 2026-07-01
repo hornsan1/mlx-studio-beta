@@ -249,10 +249,10 @@ struct SetupScreen: View {
                 .frame(width: 34, height: 34)
                 .foregroundStyle(Theme.Colors.textHigh)
             VStack(alignment: .leading, spacing: 2) {
-                Text("MLX Studio")
+                Text(AppCopy.productName)
                     .font(.system(size: 17, weight: .semibold, design: .default))
                     .foregroundStyle(Theme.Colors.textHigh)
-                Text("First run - step \(step + 1) of 3")
+                Text(L10n.Onboarding.firstRunStepFormat.render(AppLocalePreference.current, step + 1))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textLow)
             }
@@ -281,10 +281,10 @@ struct SetupScreen: View {
                     .foregroundStyle(Theme.Colors.accent)
 
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    Text("Local AI, ready to make something")
+                    Text(L10n.Onboarding.welcomeTitle.render(AppLocalePreference.current))
                         .font(Theme.Typography.display)
                         .foregroundStyle(Theme.Colors.textHigh)
-                    Text("Set up one useful path now. You can keep the studio simple, then open the advanced lab when you need server controls, diagnostics, or model inspection.")
+                    Text(L10n.Onboarding.welcomeBody.render(AppLocalePreference.current))
                         .font(Theme.Typography.body)
                         .foregroundStyle(Theme.Colors.textMid)
                         .lineSpacing(4)
@@ -305,10 +305,10 @@ struct SetupScreen: View {
     private var modeChoice: some View {
         VStack(spacing: Theme.Spacing.xl) {
             VStack(spacing: Theme.Spacing.sm) {
-                Text("Choose how much studio you want up front")
+                Text(L10n.Onboarding.modeChoiceTitle.render(AppLocalePreference.current))
                     .font(Theme.Typography.display)
                     .foregroundStyle(Theme.Colors.textHigh)
-                Text("Beginner keeps you in Chat, Create, Models, and Library. Advanced adds the server, diagnostics, and model lab surfaces.")
+                Text(L10n.Onboarding.modeChoiceBody.render(AppLocalePreference.current))
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.Colors.textMid)
                     .multilineTextAlignment(.center)
@@ -327,7 +327,7 @@ struct SetupScreen: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             HStack(alignment: .top, spacing: Theme.Spacing.lg) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    Text("Pick your first result")
+                    Text(L10n.Onboarding.pickResultTitle.render(AppLocalePreference.current))
                         .font(Theme.Typography.title)
                         .foregroundStyle(Theme.Colors.textHigh)
                     Text(useDescription)
@@ -345,7 +345,7 @@ struct SetupScreen: View {
             HStack(alignment: .top, spacing: Theme.Spacing.lg) {
                 if let starter = recommended.first {
                     VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                        Text("Recommended starter")
+                        Text(L10n.Onboarding.recommendedStarter.render(AppLocalePreference.current))
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.textLow)
                         ModelRecommendationCard(
@@ -359,7 +359,7 @@ struct SetupScreen: View {
                 }
 
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    Text("Already have models?")
+                    Text(L10n.Onboarding.alreadyHaveModels.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textLow)
 
@@ -374,7 +374,7 @@ struct SetupScreen: View {
                         SecureField("Hugging Face token (optional)", text: $hfToken)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 340)
-                            .accessibilityLabel("Onboarding Hugging Face token")
+                            .accessibilityLabel(L10n.Onboarding.a11yHFToken.render(AppLocalePreference.current))
 
                         Text(preparationState.folderTokenHelpText)
                             .font(Theme.Typography.caption)
@@ -399,11 +399,11 @@ struct SetupScreen: View {
     private var readyHandoffCard: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack(spacing: Theme.Spacing.sm) {
-                Label("Ready handoff", systemImage: "arrow.right.circle")
+                Label(L10n.Onboarding.a11yReadyHandoff.render(AppLocalePreference.current), systemImage: "arrow.right.circle")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.success)
                 Spacer(minLength: 0)
-                Text("Finish opens \(landingName)")
+                Text(L10n.Onboarding.finishOpensFormat.render(AppLocalePreference.current, landingName))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
             }
@@ -443,7 +443,7 @@ struct SetupScreen: View {
 
     private var firstResultRunway: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Label("First result path", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+            Label(L10n.Onboarding.a11yFirstResultPath.render(AppLocalePreference.current), systemImage: "point.topleft.down.curvedto.point.bottomright.up")
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textLow)
             HStack(spacing: Theme.Spacing.md) {
@@ -474,7 +474,7 @@ struct SetupScreen: View {
 
     private var goalRouteGrid: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Label("Goal routes", systemImage: "sparkles")
+            Label(L10n.Onboarding.a11yGoalRoutes.render(AppLocalePreference.current), systemImage: "sparkles")
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textLow)
             LazyVGrid(
@@ -513,7 +513,7 @@ struct SetupScreen: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
                     .lineLimit(2)
-                Text("Opens \(use.landingName)")
+                Text(L10n.Onboarding.opensFormat.render(AppLocalePreference.current, use.landingName))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(selected ? Theme.Colors.success : Theme.Colors.textLow)
             }
@@ -523,7 +523,7 @@ struct SetupScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("Onboarding \(use.rawValue) route")
-        .accessibilityLabel("Onboarding \(use.rawValue) route")
+        .accessibilityLabel(L10n.Onboarding.a11yOnboardingRouteFormat.render(AppLocalePreference.current, use.rawValue))
     }
 
     private func resultPathTile(
@@ -564,10 +564,10 @@ struct SetupScreen: View {
 
     private var advancedSetup: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
-            Text("Advanced Setup")
+            Text(L10n.Onboarding.advancedSetupTitle.render(AppLocalePreference.current))
                 .font(Theme.Typography.title)
                 .foregroundStyle(Theme.Colors.textHigh)
-            Text("Point MLX Studio at your existing model folders, add authentication for gated repos, and decide whether to expose the local API immediately.")
+            Text(L10n.Onboarding.advancedSetupBody.render(AppLocalePreference.current))
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.textMid)
                 .frame(maxWidth: 560, alignment: .leading)
@@ -583,7 +583,7 @@ struct SetupScreen: View {
             SecureField("Hugging Face token", text: $hfToken)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 420)
-                .accessibilityLabel("Onboarding Hugging Face token")
+                .accessibilityLabel(L10n.Onboarding.a11yHFToken.render(AppLocalePreference.current))
             Text(advancedPreparationState.handoffText)
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textHigh)
@@ -605,7 +605,7 @@ struct SetupScreen: View {
                         .foregroundStyle(mode == .advanced ? Theme.Colors.accent : Theme.Colors.success)
                     Spacer()
                     if selectedMode == mode {
-                        Label("Selected", systemImage: "checkmark.circle.fill")
+                        Label(L10n.Onboarding.selected.render(AppLocalePreference.current), systemImage: "checkmark.circle.fill")
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.success)
                     }

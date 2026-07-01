@@ -59,7 +59,7 @@ find "$SWIFT_DIR/release" -maxdepth 1 -type d \( -name '*.xcarchive' -o -name 'e
 #      export plist was correct, there's nothing to export.
 #   3. The SwiftPM build we already run for `swift test` + CI produces
 #      a working release executable at
-#      `.build/arm64-apple-macosx/release/vMLX`. Copying that into a
+#      `.build/arm64-apple-macosx/release/MLXStudio`. Copying that into a
 #      minimal .app bundle with Info.plist + metallib + bundled
 #      resource bundles + Developer ID signature yields the exact
 #      same shippable artifact Xcode archive would, with zero
@@ -75,9 +75,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 xcodegen generate --spec project.yml --project .
 
-echo "==> [2/5] SwiftPM release build (vMLX executable)"
-swift build -c release --product vMLX
-SWIFT_BIN="$SWIFT_DIR/.build/arm64-apple-macosx/release/vMLX"
+echo "==> [2/5] SwiftPM release build (MLXStudio executable)"
+# REVIEW HIGH-4: the app ships as "MLX Studio"; the SwiftPM product is
+# `MLXStudio` (the duplicate `vMLX` app product was removed). The vMLX name
+# lives on as the baked-in runtime/engine + `vmlxctl` CLI.
+swift build -c release --product MLXStudio
+SWIFT_BIN="$SWIFT_DIR/.build/arm64-apple-macosx/release/MLXStudio"
 if [[ ! -f "$SWIFT_BIN" ]]; then
     echo "ERROR: SwiftPM build did not produce $SWIFT_BIN" >&2
     exit 1

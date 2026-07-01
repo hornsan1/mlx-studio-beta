@@ -2,6 +2,13 @@
 //
 // §443 — Per-family sampling defaults map.
 //
+// ⚠️ REVIEW LOW-19 ORPHAN (2026-07-01): this type is NOT yet wired into the
+// sampling-resolution path. `grep -rn FamilySamplingDefaults Sources/` finds
+// zero call sites outside this file — Stream.swift's sampling merge does not
+// consult it. The per-family corrections described below therefore have no
+// runtime effect yet. Wiring it into `buildGenerateParameters` is the
+// follow-up; until then this is reference/dead code.
+//
 // Rationale (audit finding #10): the existing 3-tier sampling
 // resolution in Stream.swift (request → loadedModelDefaults from
 // generation_config.json → resolved.settings) doesn't include

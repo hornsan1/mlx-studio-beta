@@ -198,7 +198,7 @@ struct StudioChatScreen: View {
                 Button {
                     newSession()
                 } label: {
-                    Label("New", systemImage: "plus.bubble")
+                    Label(L10n.Studio.new.render(AppLocalePreference.current), systemImage: "plus.bubble")
                 }
                 .disabled(isStreaming)
                 Button {
@@ -265,7 +265,7 @@ struct StudioChatScreen: View {
             Button {
                 newSession()
             } label: {
-                Label("New Chat", systemImage: "plus.bubble")
+                Label(L10n.Studio.newChat.render(AppLocalePreference.current), systemImage: "plus.bubble")
             }
             .disabled(isStreaming)
 
@@ -331,11 +331,11 @@ struct StudioChatScreen: View {
                     conversationRunway
 
                     HStack {
-                        Label("Transcript", systemImage: "bubble.left.and.bubble.right")
+                        Label(L10n.Studio.transcript.render(AppLocalePreference.current), systemImage: "bubble.left.and.bubble.right")
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.textLow)
                         Spacer()
-                        Text("\(turns.count) turns")
+                        Text(L10n.Studio.turnsCountFormat.render(AppLocalePreference.current, turns.count))
                             .font(Theme.Typography.monoCaption)
                             .foregroundStyle(Theme.Colors.textLow)
                     }
@@ -368,7 +368,7 @@ struct StudioChatScreen: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .top, spacing: Theme.Spacing.lg) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                    Label("Conversation runway", systemImage: "sparkles")
+                    Label(L10n.Studio.conversationRunway.render(AppLocalePreference.current), systemImage: "sparkles")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.accent)
                     Text(draftSessionTitle)
@@ -413,7 +413,7 @@ struct StudioChatScreen: View {
             }
 
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                Text("Follow-up prompts")
+                Text(L10n.Studio.followUpPrompts.render(AppLocalePreference.current))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textLow)
                 HStack(spacing: Theme.Spacing.sm) {
@@ -435,7 +435,7 @@ struct StudioChatScreen: View {
     private var sessionTrail: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .center, spacing: Theme.Spacing.sm) {
-                Label("Session trail", systemImage: "point.3.connected.trianglepath.dotted")
+                Label(L10n.Studio.sessionTrail.render(AppLocalePreference.current), systemImage: "point.3.connected.trianglepath.dotted")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
                 Spacer(minLength: Theme.Spacing.sm)
@@ -630,7 +630,7 @@ struct StudioChatScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    Label("Session context", systemImage: activeSession?.isPinned == true ? "pin.fill" : "sidebar.trailing")
+                    Label(L10n.Studio.sessionContext.render(AppLocalePreference.current), systemImage: activeSession?.isPinned == true ? "pin.fill" : "sidebar.trailing")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.accent)
                     Text(draftSessionTitle)
@@ -663,7 +663,7 @@ struct StudioChatScreen: View {
                 }
 
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    Text("Next move")
+                    Text(L10n.Studio.nextMove.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textLow)
                     if failedTurnCount > 0 {
@@ -682,7 +682,7 @@ struct StudioChatScreen: View {
 
     private var sessionBriefPanel: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Label("Session brief", systemImage: "doc.text")
+            Label(L10n.Studio.sessionBrief.render(AppLocalePreference.current), systemImage: "doc.text")
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textMid)
 
@@ -908,19 +908,19 @@ struct StudioChatScreen: View {
         .popover(isPresented: $isModelPickerPresented, arrowEdge: .bottom) {
             modelPickerPopover
         }
-        .accessibilityLabel("Chat Model Picker")
+        .accessibilityLabel(L10n.Studio.chatModelPicker.render(AppLocalePreference.current))
         .accessibilityValue(selectedModel?.ref.displayName ?? "No model selected")
         .accessibilityIdentifier("Chat Model Picker")
     }
 
     private var modelPickerPopover: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text("Chat model")
+            Text(L10n.Studio.chatModel.render(AppLocalePreference.current))
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textMid)
 
             if chatCapableModels.isEmpty {
-                Label("No chat-capable models", systemImage: "exclamationmark.triangle")
+                Label(L10n.Studio.noChatCapableModels.render(AppLocalePreference.current), systemImage: "exclamationmark.triangle")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
             } else {
@@ -1019,7 +1019,7 @@ struct StudioChatScreen: View {
 
                 if chatCapableModels.isEmpty {
                     VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                        Text("Choose a starter model")
+                        Text(L10n.Studio.chooseStarterModel.render(AppLocalePreference.current))
                             .font(Theme.Typography.title)
                             .foregroundStyle(Theme.Colors.textHigh)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: Theme.Spacing.md)], spacing: Theme.Spacing.md) {
@@ -1030,7 +1030,7 @@ struct StudioChatScreen: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                        Text("Try a useful first prompt")
+                        Text(L10n.Studio.tryFirstPrompt.render(AppLocalePreference.current))
                             .font(Theme.Typography.title)
                             .foregroundStyle(Theme.Colors.textHigh)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: Theme.Spacing.md)], spacing: Theme.Spacing.md) {
@@ -1043,7 +1043,7 @@ struct StudioChatScreen: View {
 
                 if !sessions.isEmpty {
                     VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                        Text("Recent sessions")
+                        Text(L10n.Studio.recentSessions.render(AppLocalePreference.current))
                             .font(Theme.Typography.title)
                             .foregroundStyle(Theme.Colors.textHigh)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: Theme.Spacing.md)], spacing: Theme.Spacing.md) {
@@ -1152,7 +1152,7 @@ struct StudioChatScreen: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
                     .lineLimit(2)
-                Text("\(session.turnCount) turns")
+                Text(L10n.Studio.turnsCountFormat.render(AppLocalePreference.current, session.turnCount))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
             }
@@ -1175,7 +1175,7 @@ struct StudioChatScreen: View {
                     .lineLimit(1...5)
                     .font(Theme.Typography.body)
                     .accessibilityIdentifier("Chat composer")
-                    .accessibilityLabel("Chat composer")
+                    .accessibilityLabel(L10n.Studio.chatComposer.render(AppLocalePreference.current))
                     .padding(Theme.Spacing.md)
                     .background(
                         RoundedRectangle(cornerRadius: Theme.Radius.lg)
@@ -1202,7 +1202,7 @@ struct StudioChatScreen: View {
     private var composerPromptDock: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: 3) {
-                Label("Keep moving", systemImage: "arrow.turn.up.right")
+                Label(L10n.Studio.keepMoving.render(AppLocalePreference.current), systemImage: "arrow.turn.up.right")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
                 Text(draftSessionTitle)
@@ -1884,12 +1884,12 @@ struct StudioModelsScreen: View {
                     Button {
                         addDirectory()
                     } label: {
-                        Label("Add Folder", systemImage: "folder.badge.plus")
+                        Label(L10n.Studio.addFolder.render(AppLocalePreference.current), systemImage: "folder.badge.plus")
                     }
                     Button {
                         Task { await refresh(force: true) }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Label(L10n.Studio.refresh.render(AppLocalePreference.current), systemImage: "arrow.clockwise")
                     }
                 }
                 Divider().background(Theme.Colors.border)
@@ -2046,7 +2046,7 @@ struct StudioModelsScreen: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             HStack(alignment: .top, spacing: Theme.Spacing.md) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                    Label("Best ready action", systemImage: "scope")
+                    Label(L10n.Studio.bestReadyAction.render(AppLocalePreference.current), systemImage: "scope")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.accent)
                     Text(modelDecisionTitle)
@@ -2130,7 +2130,7 @@ struct StudioModelsScreen: View {
                         Button {
                             Task { await chat(model) }
                         } label: {
-                            Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                            Label(L10n.Studio.chat.render(AppLocalePreference.current), systemImage: "bubble.left.and.bubble.right")
                         }
                         .buttonStyle(.borderedProminent)
                         .accessibilityLabel(routeActionTitle)
@@ -2142,11 +2142,11 @@ struct StudioModelsScreen: View {
                     Button {
                         addDirectory()
                     } label: {
-                        Label("Add Folder", systemImage: "folder.badge.plus")
+                        Label(L10n.Studio.addFolder.render(AppLocalePreference.current), systemImage: "folder.badge.plus")
                     }
                     .buttonStyle(.borderedProminent)
 
-                    Text("Or choose a recommended starter below.")
+                    Text(L10n.Studio.orChooseStarterBelow.render(AppLocalePreference.current))
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textLow)
                 }
@@ -2320,14 +2320,14 @@ struct StudioModelsScreen: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     HStack(spacing: Theme.Spacing.sm) {
                         sectionTitle("Compatible Hub")
-                        Label("vMLX runtime", systemImage: "checkmark.seal")
+                        Label(L10n.Studio.vmlxRuntime.render(AppLocalePreference.current), systemImage: "checkmark.seal")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.textMid)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(Theme.Colors.surfaceHi)
                             .clipShape(Capsule())
-                        Text("MLX/JANG/HF")
+                        Text(L10n.Studio.mlxJangHf.render(AppLocalePreference.current))
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.textLow)
                             .padding(.horizontal, 7)
@@ -2346,7 +2346,7 @@ struct StudioModelsScreen: View {
                             TextField("Search Hugging Face", text: $hubQuery)
                                 .textFieldStyle(.plain)
                                 .font(Theme.Typography.body)
-                                .accessibilityLabel("Search Hugging Face")
+                                .accessibilityLabel(L10n.Studio.searchHuggingFace.render(AppLocalePreference.current))
                                 .onSubmit { searchHub() }
                             if !hubQuery.isEmpty {
                                 Button {
@@ -2375,11 +2375,11 @@ struct StudioModelsScreen: View {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
-                                Label("Search", systemImage: "sparkle.magnifyingglass")
+                                Label(L10n.Studio.search.render(AppLocalePreference.current), systemImage: "sparkle.magnifyingglass")
                             }
                         }
                         .buttonStyle(.borderedProminent)
-                        .accessibilityLabel("Run Hub Search")
+                        .accessibilityLabel(L10n.Studio.runHubSearch.render(AppLocalePreference.current))
                         .disabled(isSearchingHub || hubQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
@@ -2401,7 +2401,7 @@ struct StudioModelsScreen: View {
 
             if !hubModels.isEmpty {
                 HStack(spacing: Theme.Spacing.sm) {
-                    Label("\(hubModels.count) compatible result\(hubModels.count == 1 ? "" : "s")", systemImage: "list.bullet.rectangle")
+                    Label(L10n.Studio.compatibleResultsFormat.render(AppLocalePreference.current, hubModels.count), systemImage: "list.bullet.rectangle")
                     Spacer()
                     Text(hubModels.first?.updatedHint ?? "")
                 }
@@ -2413,7 +2413,7 @@ struct StudioModelsScreen: View {
                 HStack(spacing: Theme.Spacing.sm) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Checking vMLX runtime compatibility")
+                    Text(L10n.Studio.checkingRuntimeCompat.render(AppLocalePreference.current))
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textMid)
                     Spacer()
@@ -2450,7 +2450,7 @@ struct StudioModelsScreen: View {
     private var hubAuthStatusRow: some View {
         let status = gateStatus
         return HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-            Label("HF auth", systemImage: hubAuthIcon(for: status.level))
+            Label(L10n.Studio.hfAuth.render(AppLocalePreference.current), systemImage: hubAuthIcon(for: status.level))
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(hubAuthTint(for: status.level))
                 .lineLimit(1)
@@ -2765,17 +2765,21 @@ struct StudioLibraryScreen: View {
                 for: session,
                 summaryExportExists: session.summaryExportFileExists
             )
-            return matchesSearch([
-                session.title,
-                session.modelName ?? "",
-                session.preview,
-                session.turns.map(\.content).joined(separator: " "),
-                session.isPinned ? "pinned favorite" : "",
-            ]
-            + status.searchTokens
-            + Self.searchDateFields(for: session.createdAt)
-            + Self.searchDateFields(for: session.updatedAt)
-            + session.turns.flatMap { Self.searchDateFields(for: $0.createdAt) })
+            // Built imperatively rather than as one large concatenated
+            // literal: the Swift type-checker times out on an expression
+            // this size mixing ternaries, joins, and flatMap. Appending
+            // is trivially typed.
+            var tokens: [String] = []
+            tokens.append(session.title)
+            tokens.append(session.modelName ?? "")
+            tokens.append(session.preview)
+            tokens.append(session.turns.map(\.content).joined(separator: " "))
+            tokens.append(session.isPinned ? "pinned favorite" : "")
+            tokens.append(contentsOf: status.searchTokens)
+            tokens.append(contentsOf: Self.searchDateFields(for: session.createdAt))
+            tokens.append(contentsOf: Self.searchDateFields(for: session.updatedAt))
+            tokens.append(contentsOf: session.turns.flatMap { Self.searchDateFields(for: $0.createdAt) })
+            return matchesSearch(tokens)
         }
     }
 
@@ -2841,7 +2845,7 @@ struct StudioLibraryScreen: View {
                         TextField("Search Library", text: $searchText)
                             .textFieldStyle(.plain)
                             .font(Theme.Typography.caption)
-                            .accessibilityLabel("Search Library")
+                            .accessibilityLabel(L10n.Studio.searchLibrary.render(AppLocalePreference.current))
                         if !searchText.isEmpty {
                             Button {
                                 searchText = ""
@@ -2861,7 +2865,7 @@ struct StudioLibraryScreen: View {
                     Button {
                         Task { await reloadLibrary() }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Label(L10n.Studio.refresh.render(AppLocalePreference.current), systemImage: "arrow.clockwise")
                     }
                 }
                 Divider().background(Theme.Colors.border)
@@ -2970,7 +2974,7 @@ struct StudioLibraryScreen: View {
                 }
 
             VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                Label("Delete image artifact?", systemImage: "exclamationmark.triangle.fill")
+                Label(L10n.Studio.deleteImageArtifactQ.render(AppLocalePreference.current), systemImage: "exclamationmark.triangle.fill")
                     .font(Theme.Typography.title)
                     .foregroundStyle(Theme.Colors.danger)
 
@@ -2979,7 +2983,7 @@ struct StudioLibraryScreen: View {
                         .font(Theme.Typography.body)
                         .foregroundStyle(Theme.Colors.textMid)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Models, chats, and other image outputs are not deleted.")
+                    Text(L10n.Studio.modelsChatsNotDeleted.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.warning)
                 }
@@ -2995,7 +2999,7 @@ struct StudioLibraryScreen: View {
                         pendingDeleteImageRecord = nil
                         deleteImageRecord(record)
                     } label: {
-                        Label("Delete image", systemImage: "trash")
+                        Label(L10n.Studio.deleteImage.render(AppLocalePreference.current), systemImage: "trash")
                             .lineLimit(1)
                     }
                     .buttonStyle(.borderedProminent)
@@ -3029,7 +3033,7 @@ struct StudioLibraryScreen: View {
                 }
 
             VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                Label("Delete chat session?", systemImage: "exclamationmark.triangle.fill")
+                Label(L10n.Studio.deleteChatSessionQ.render(AppLocalePreference.current), systemImage: "exclamationmark.triangle.fill")
                     .font(Theme.Typography.title)
                     .foregroundStyle(Theme.Colors.danger)
 
@@ -3038,7 +3042,7 @@ struct StudioLibraryScreen: View {
                         .font(Theme.Typography.body)
                         .foregroundStyle(Theme.Colors.textMid)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Model files and image outputs are not deleted.")
+                    Text(L10n.Studio.modelFilesNotDeleted.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.warning)
                 }
@@ -3054,7 +3058,7 @@ struct StudioLibraryScreen: View {
                         pendingDeleteChatSession = nil
                         deleteChatSession(session)
                     } label: {
-                        Label("Delete chat", systemImage: "trash")
+                        Label(L10n.Studio.deleteChat.render(AppLocalePreference.current), systemImage: "trash")
                             .lineLimit(1)
                     }
                     .buttonStyle(.borderedProminent)
@@ -3238,7 +3242,7 @@ struct StudioLibraryScreen: View {
 
         return HStack(alignment: .top, spacing: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                Label("Reuse lane", systemImage: "arrow.triangle.2.circlepath")
+                Label(L10n.Studio.reuseLane.render(AppLocalePreference.current), systemImage: "arrow.triangle.2.circlepath")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.creative)
                 Text(record?.prompt ?? "Create an image and its reusable prompt will appear here.")
@@ -3281,7 +3285,7 @@ struct StudioLibraryScreen: View {
                         reuseImageRecord(record, settings: settings)
                     }
                 } label: {
-                    Label("Reuse latest prompt", systemImage: "arrow.triangle.2.circlepath")
+                    Label(L10n.Studio.reuseLatestPrompt.render(AppLocalePreference.current), systemImage: "arrow.triangle.2.circlepath")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -3296,7 +3300,7 @@ struct StudioLibraryScreen: View {
                         app.mode = .create
                     }
                 } label: {
-                    Label("Open canvas", systemImage: "wand.and.stars")
+                    Label(L10n.Studio.openCanvas.render(AppLocalePreference.current), systemImage: "wand.and.stars")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -3394,15 +3398,15 @@ struct StudioLibraryScreen: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Label("Studio memory", systemImage: "sparkles")
+                    Label(L10n.Studio.studioMemory.render(AppLocalePreference.current), systemImage: "sparkles")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.creative)
-                    Text("Recent work")
+                    Text(L10n.Studio.recentWork.render(AppLocalePreference.current))
                         .font(Theme.Typography.title)
                         .foregroundStyle(Theme.Colors.textHigh)
                 }
                 Spacer()
-                Text("Searchable studio memory for images, chats, models, and pinned sessions")
+                Text(L10n.Studio.studioMemoryA11y.render(AppLocalePreference.current))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
                     .lineLimit(1)
@@ -3431,10 +3435,10 @@ struct StudioLibraryScreen: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                 if let record = latestImageRecord {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                        Label("Image provenance", systemImage: "sparkles")
+                        Label(L10n.Studio.imageProvenance.render(AppLocalePreference.current), systemImage: "sparkles")
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.creative)
-                        Text("Latest image")
+                        Text(L10n.Studio.latestImage.render(AppLocalePreference.current))
                             .font(.system(size: 24, weight: .semibold, design: .default))
                             .foregroundStyle(Theme.Colors.textHigh)
                         Text(record.prompt)
@@ -3476,7 +3480,7 @@ struct StudioLibraryScreen: View {
                                 reuseImageRecord(record, settings: settings)
                             }
                         } label: {
-                            Label("Reuse Latest", systemImage: "arrow.triangle.2.circlepath")
+                            Label(L10n.Studio.reuseLatest.render(AppLocalePreference.current), systemImage: "arrow.triangle.2.circlepath")
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(decodeImageSettings(record) == nil)
@@ -3490,7 +3494,7 @@ struct StudioLibraryScreen: View {
                                 app.mode = .create
                             }
                         } label: {
-                            Label("Open Create", systemImage: "wand.and.stars")
+                            Label(L10n.Studio.openCreate.render(AppLocalePreference.current), systemImage: "wand.and.stars")
                         }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier(imageReuseLaneActionTitle("Open latest image in Create", record: record))
@@ -3498,13 +3502,13 @@ struct StudioLibraryScreen: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                        Label("Image provenance", systemImage: "sparkles")
+                        Label(L10n.Studio.imageProvenance.render(AppLocalePreference.current), systemImage: "sparkles")
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.creative)
-                        Text("Latest image")
+                        Text(L10n.Studio.latestImage.render(AppLocalePreference.current))
                             .font(.system(size: 24, weight: .semibold, design: .default))
                             .foregroundStyle(Theme.Colors.textHigh)
-                        Text("Create your first visual result and it will live here with its prompt, model, settings, and file.")
+                        Text(L10n.Studio.createFirstVisualHint.render(AppLocalePreference.current))
                             .font(Theme.Typography.body)
                             .foregroundStyle(Theme.Colors.textMid)
                             .lineLimit(3)
@@ -3514,7 +3518,7 @@ struct StudioLibraryScreen: View {
                     Button {
                         app.mode = .create
                     } label: {
-                        Label("Open Create", systemImage: "wand.and.stars")
+                        Label(L10n.Studio.openCreate.render(AppLocalePreference.current), systemImage: "wand.and.stars")
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -3533,7 +3537,7 @@ struct StudioLibraryScreen: View {
                     .foregroundStyle(resumeChatSession?.isPinned == true ? Theme.Colors.warning : Theme.Colors.accent)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Resume session")
+                    Text(L10n.Studio.resumeSession.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textLow)
                     Text(resumeChatSession?.title ?? emptyChatMemoryTitle)
@@ -3622,7 +3626,7 @@ struct StudioLibraryScreen: View {
                     .foregroundStyle(Theme.Colors.success)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Model archive")
+                    Text(L10n.Studio.modelArchive.render(AppLocalePreference.current))
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textLow)
                     Text(spotlightModel?.ref.displayName ?? emptyModelMemoryTitle)
@@ -3650,7 +3654,7 @@ struct StudioLibraryScreen: View {
                 }
                 app.mode = .models
             } label: {
-                Label("Browse Models", systemImage: "arrow.up.right")
+                Label(L10n.Studio.browseModels.render(AppLocalePreference.current), systemImage: "arrow.up.right")
             }
             .buttonStyle(.borderless)
             .accessibilityIdentifier(modelArchiveActionTitle)
@@ -3739,7 +3743,7 @@ struct StudioLibraryScreen: View {
         VStack(spacing: Theme.Spacing.sm) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 30, weight: .semibold))
-            Text("No image yet")
+            Text(L10n.Studio.noImageYet.render(AppLocalePreference.current))
                 .font(Theme.Typography.captionHi)
         }
         .foregroundStyle(Theme.Colors.textLow)
@@ -4315,19 +4319,19 @@ private struct StudioLibraryModelCard: View {
             Spacer()
             HStack(spacing: Theme.Spacing.sm) {
                 Button(action: open) {
-                    Label("Open", systemImage: "arrow.up.right")
+                    Label(L10n.Studio.open.render(AppLocalePreference.current), systemImage: "arrow.up.right")
                 }
                 .buttonStyle(.bordered)
                 .disabled(!hasLocalPath)
                 .accessibilityIdentifier("Open model \(model.ref.displayName) in Models")
-                .accessibilityLabel("Open model \(model.ref.displayName) in Models")
+                .accessibilityLabel(L10n.Studio.a11yOpenModelInModels.render(AppLocalePreference.current, model.ref.displayName))
                 Button(action: reveal) {
-                    Label("Reveal", systemImage: "folder")
+                    Label(L10n.Studio.reveal.render(AppLocalePreference.current), systemImage: "folder")
                 }
                 .buttonStyle(.plain)
                 .disabled(!hasLocalPath)
                 .accessibilityIdentifier("Reveal model \(model.ref.displayName)")
-                .accessibilityLabel("Reveal model \(model.ref.displayName)")
+                .accessibilityLabel(L10n.Studio.a11yRevealModel.render(AppLocalePreference.current, model.ref.displayName))
                 Button(action: copyPath) {
                     Image(systemName: "doc.on.doc")
                 }
@@ -4335,13 +4339,13 @@ private struct StudioLibraryModelCard: View {
                 .help("Copy model path")
                 .disabled(!hasLocalPath)
                 .accessibilityIdentifier("Copy model path \(model.ref.displayName)")
-                .accessibilityLabel("Copy model path \(model.ref.displayName)")
+                .accessibilityLabel(L10n.Studio.a11yCopyModelPath.render(AppLocalePreference.current, model.ref.displayName))
                 Button(action: exportReport) {
-                    Label("Export Report", systemImage: "square.and.arrow.down")
+                    Label(L10n.Studio.exportReport.render(AppLocalePreference.current), systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("Export model report \(model.ref.displayName)")
-                .accessibilityLabel("Export model report \(model.ref.displayName)")
+                .accessibilityLabel(L10n.Studio.a11yExportModelReport.render(AppLocalePreference.current, model.ref.displayName))
             }
             .font(Theme.Typography.caption)
         }
@@ -4397,7 +4401,7 @@ private struct StudioChatSessionCard: View {
                     Spacer()
                         .frame(width: 28)
                     if session.isPinned {
-                        Label("Pinned", systemImage: "pin.fill")
+                        Label(L10n.Studio.pinned.render(AppLocalePreference.current), systemImage: "pin.fill")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.success)
                             .padding(.horizontal, 7)
@@ -4442,7 +4446,7 @@ private struct StudioChatSessionCard: View {
                     .foregroundStyle(Theme.Colors.textLow)
                 Spacer()
                 Button(action: open) {
-                    Label("Open Chat", systemImage: "arrow.up.right.square")
+                    Label(L10n.Studio.openChat.render(AppLocalePreference.current), systemImage: "arrow.up.right.square")
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(openAccessibilityTitle)
@@ -4558,15 +4562,15 @@ struct StudioServerScreen: View {
                     Button {
                         Task { await refresh() }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Label(L10n.Studio.refresh.render(AppLocalePreference.current), systemImage: "arrow.clockwise")
                     }
                     Button {
                         copyEndpoint()
                     } label: {
-                        Label("Copy Endpoint", systemImage: "doc.on.doc")
+                        Label(L10n.Studio.copyEndpoint.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                     }
                     .accessibilityIdentifier("Server toolbar Copy Endpoint")
-                    .accessibilityLabel("Server toolbar Copy Endpoint")
+                    .accessibilityLabel(L10n.Studio.serverToolbarCopy.render(AppLocalePreference.current))
                 }
 
                 serverOverview
@@ -4895,7 +4899,7 @@ struct StudioServerScreen: View {
 
     private var endpointStrip: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            Label("Endpoint", systemImage: "link")
+            Label(L10n.Studio.endpoint.render(AppLocalePreference.current), systemImage: "link")
                 .font(Theme.Typography.captionHi)
                 .foregroundStyle(Theme.Colors.textLow)
             Text(operatorEndpoint)
@@ -4911,7 +4915,7 @@ struct StudioServerScreen: View {
             .buttonStyle(.borderless)
             .help("Copy endpoint")
             .accessibilityIdentifier("Server endpoint strip Copy Endpoint")
-            .accessibilityLabel("Server endpoint strip Copy Endpoint")
+            .accessibilityLabel(L10n.Studio.serverEndpointStripCopy.render(AppLocalePreference.current))
         }
         .padding(.horizontal, Theme.Spacing.md)
         .padding(.vertical, 8)
@@ -4935,7 +4939,7 @@ struct StudioServerScreen: View {
                         Text(verbatim: String(config.port))
                             .font(Theme.Typography.monoCaption)
                     }
-                    .accessibilityLabel("Server Port")
+                    .accessibilityLabel(L10n.Studio.serverPort.render(AppLocalePreference.current))
                 }
                 serverField("API Key", systemImage: config.apiKey.isEmpty ? "lock.open" : "lock.fill") {
                     SecureField("Optional", text: $config.apiKey)
@@ -4948,7 +4952,7 @@ struct StudioServerScreen: View {
                 Button {
                     Task { await start() }
                 } label: {
-                    Label("Start Server", systemImage: "play.fill")
+                    Label(L10n.Studio.startServer.render(AppLocalePreference.current), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(serverStartDisabledReason != nil)
@@ -4959,7 +4963,7 @@ struct StudioServerScreen: View {
                 Button {
                     Task { await stop() }
                 } label: {
-                    Label("Stop", systemImage: "stop.fill")
+                    Label(L10n.Studio.stop.render(AppLocalePreference.current), systemImage: "stop.fill")
                 }
                 .disabled(serverStopDisabledReason != nil)
                 .accessibilityIdentifier("Server Stop")
@@ -4970,7 +4974,7 @@ struct StudioServerScreen: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: Theme.Spacing.sm) {
-                    Label("Operator Checklist", systemImage: "checkmark.seal")
+                    Label(L10n.Studio.operatorChecklist.render(AppLocalePreference.current), systemImage: "checkmark.seal")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textHigh)
                     Spacer(minLength: 0)
@@ -5025,13 +5029,13 @@ struct StudioServerScreen: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .top, spacing: Theme.Spacing.md) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Runtime Contract", systemImage: "checklist.checked")
+                    Label(L10n.Studio.runtimeContract.render(AppLocalePreference.current), systemImage: "checklist.checked")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.accent)
-                    Text("OpenAI-compatible loopback service")
+                    Text(L10n.Studio.openAILoopbackService.render(AppLocalePreference.current))
                         .font(Theme.Typography.bodyHi)
                         .foregroundStyle(Theme.Colors.textHigh)
-                    Text("The values clients need before sending traffic to this local server.")
+                    Text(L10n.Studio.valuesClientsNeed.render(AppLocalePreference.current))
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textMid)
                         .lineLimit(2)
@@ -5040,11 +5044,11 @@ struct StudioServerScreen: View {
                 Button {
                     copyEndpoint()
                 } label: {
-                    Label("Copy Endpoint", systemImage: "doc.on.doc")
+                    Label(L10n.Studio.copyEndpoint.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("Server runtime Copy Endpoint")
-                .accessibilityLabel("Server runtime Copy Endpoint")
+                .accessibilityLabel(L10n.Studio.serverRuntimeCopy.render(AppLocalePreference.current))
             }
 
             clientHandshakePanel
@@ -5096,14 +5100,14 @@ struct StudioServerScreen: View {
     private var clientHandshakePanel: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack(alignment: .center, spacing: Theme.Spacing.sm) {
-                Label("Client Handshake", systemImage: "bolt.horizontal.circle")
+                Label(L10n.Studio.clientHandshake.render(AppLocalePreference.current), systemImage: "bolt.horizontal.circle")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
                 Spacer(minLength: Theme.Spacing.sm)
                 Button {
                     copyHealthProbe()
                 } label: {
-                    Label("Copy Health", systemImage: "heart.text.square")
+                    Label(L10n.Studio.copyHealth.render(AppLocalePreference.current), systemImage: "heart.text.square")
                         .font(Theme.Typography.captionHi)
                 }
                 .buttonStyle(.borderless)
@@ -5118,7 +5122,7 @@ struct StudioServerScreen: View {
                 Button {
                     copyClientProbe()
                 } label: {
-                    Label("Copy cURL", systemImage: "terminal")
+                    Label(L10n.Studio.copyCurl.render(AppLocalePreference.current), systemImage: "terminal")
                         .font(Theme.Typography.captionHi)
                 }
                 .buttonStyle(.borderless)
@@ -5398,7 +5402,7 @@ struct StudioServerScreen: View {
                         .background(Theme.Colors.surface.opacity(0.6))
                         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
                     if route.streams {
-                        Label("Streaming", systemImage: "dot.radiowaves.left.and.right")
+                        Label(L10n.Studio.streaming.render(AppLocalePreference.current), systemImage: "dot.radiowaves.left.and.right")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.success)
                     }
@@ -5571,7 +5575,7 @@ struct StudioAdvancedModelsScreen: View {
                     Button {
                         Task { await refresh() }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Label(L10n.Studio.refresh.render(AppLocalePreference.current), systemImage: "arrow.clockwise")
                     }
                 }
 
@@ -5764,17 +5768,17 @@ struct StudioAdvancedModelsScreen: View {
             Button {
                 Task { await inspect() }
             } label: {
-                Label("Run Inspect", systemImage: "doc.text.magnifyingglass")
+                Label(L10n.Studio.runInspect.render(AppLocalePreference.current), systemImage: "doc.text.magnifyingglass")
             }
             .buttonStyle(.borderedProminent)
             .disabled(selected == nil)
             .accessibilityIdentifier("Advanced Models Run Inspect")
-            .accessibilityLabel("Advanced Models Run Inspect")
+            .accessibilityLabel(L10n.Studio.advModelsRunInspect.render(AppLocalePreference.current))
 
             Button {
                 Task { await validate() }
             } label: {
-                Label("Validate", systemImage: "checkmark.shield")
+                Label(L10n.Studio.validate.render(AppLocalePreference.current), systemImage: "checkmark.shield")
             }
             .disabled(validationUnavailableReason != nil)
             .help(validationUnavailableReason ?? "Run tokenizer-backed validation for the selected model")
@@ -5784,7 +5788,7 @@ struct StudioAdvancedModelsScreen: View {
             Button {
                 Task { await benchmark() }
             } label: {
-                Label("Benchmark", systemImage: "speedometer")
+                Label(L10n.Studio.benchmark.render(AppLocalePreference.current), systemImage: "speedometer")
             }
             .disabled(benchmarkUnavailableReason != nil)
             .help(benchmarkUnavailableReason ?? "Run a local benchmark for the selected loaded text model")
@@ -5794,7 +5798,7 @@ struct StudioAdvancedModelsScreen: View {
             Button {
                 Task { await package() }
             } label: {
-                Label("Export Report", systemImage: "square.and.arrow.down")
+                Label(L10n.Studio.exportReport.render(AppLocalePreference.current), systemImage: "square.and.arrow.down")
             }
             .disabled(reportUnavailableReason != nil)
             .help(reportUnavailableReason ?? "Export inspection report")
@@ -5806,11 +5810,11 @@ struct StudioAdvancedModelsScreen: View {
             Button {
                 copySelectedPath()
             } label: {
-                Label("Copy Path", systemImage: "doc.on.doc")
+                Label(L10n.Studio.copyPath.render(AppLocalePreference.current), systemImage: "doc.on.doc")
             }
             .disabled(selected?.ref.localURL == nil)
             .accessibilityIdentifier("Advanced Models Copy Path")
-            .accessibilityLabel("Advanced Models Copy Path")
+            .accessibilityLabel(L10n.Studio.advModelsCopyPath.render(AppLocalePreference.current))
         }
     }
 
@@ -5854,7 +5858,7 @@ struct StudioAdvancedModelsScreen: View {
             } else {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     HStack(spacing: Theme.Spacing.sm) {
-                        Label("Operator sequence", systemImage: "arrow.triangle.branch")
+                        Label(L10n.Studio.operatorSequence.render(AppLocalePreference.current), systemImage: "arrow.triangle.branch")
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.textHigh)
                         Spacer(minLength: Theme.Spacing.sm)
@@ -5947,13 +5951,13 @@ struct StudioAdvancedModelsScreen: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     HStack(alignment: .top, spacing: Theme.Spacing.md) {
                         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                            Label("Preflight inspector", systemImage: "checklist.checked")
+                            Label(L10n.Studio.preflightInspector.render(AppLocalePreference.current), systemImage: "checklist.checked")
                                 .font(Theme.Typography.captionHi)
                                 .foregroundStyle(Theme.Colors.accent)
-                            Text("Local artifacts before a deep inspect")
+                            Text(L10n.Studio.localArtifactsBeforeInspect.render(AppLocalePreference.current))
                                 .font(Theme.Typography.bodyHi)
                                 .foregroundStyle(Theme.Colors.textHigh)
-                            Text("These checks read the selected folder directly so the operator can see whether the model is ready for validation, benchmark, or report export.")
+                            Text(L10n.Studio.checksReadFolderHint.render(AppLocalePreference.current))
                                 .font(Theme.Typography.caption)
                                 .foregroundStyle(Theme.Colors.textMid)
                                 .lineLimit(2)
@@ -5975,15 +5979,15 @@ struct StudioAdvancedModelsScreen: View {
     private func readinessArtifactLedger(weightSummary: String, hasWeights: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Theme.Spacing.md) {
-                Label("Artifact Ledger", systemImage: "tablecells")
+                Label(L10n.Studio.artifactLedger.render(AppLocalePreference.current), systemImage: "tablecells")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
                     .frame(width: 174, alignment: .leading)
-                Text("Evidence")
+                Text(L10n.Studio.evidence.render(AppLocalePreference.current))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textLow)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Operator signal")
+                Text(L10n.Studio.operatorSignal.render(AppLocalePreference.current))
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textLow)
                     .frame(width: 164, alignment: .leading)
@@ -6098,7 +6102,7 @@ struct StudioAdvancedModelsScreen: View {
 
                     if !inspection.configKeys.isEmpty {
                         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                            Text("Config Keys")
+                            Text(L10n.Studio.configKeys.render(AppLocalePreference.current))
                                 .font(Theme.Typography.captionHi)
                                 .foregroundStyle(Theme.Colors.textLow)
                             LazyVGrid(
@@ -6295,7 +6299,7 @@ struct StudioAdvancedModelsScreen: View {
                         Button {
                             copyJobOutputPath(output, for: job)
                         } label: {
-                            Label("Copy Output", systemImage: "doc.on.doc")
+                            Label(L10n.Studio.copyOutput.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -6564,12 +6568,12 @@ struct StudioDiagnosticsScreen: View {
                     Button {
                         Task { await refreshDiagnosticsSnapshot() }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Label(L10n.Studio.refresh.render(AppLocalePreference.current), systemImage: "arrow.clockwise")
                     }
                     Button {
                         clearIssues()
                     } label: {
-                        Label("Clear Issues", systemImage: "checkmark.circle")
+                        Label(L10n.Studio.clearIssues.render(AppLocalePreference.current), systemImage: "checkmark.circle")
                     }
                     .disabled(issues.isEmpty)
                     .help(issues.isEmpty ? "No diagnostic issues to clear" : "Clear \(issues.count) open diagnostic issue\(issues.count == 1 ? "" : "s")")
@@ -6861,7 +6865,7 @@ struct StudioDiagnosticsScreen: View {
             issueCountPill("Warnings", issueWarningCount, tint: Theme.Colors.warning)
             issueCountPill("Info", issueInfoCount, tint: Theme.Colors.accent)
             Spacer(minLength: Theme.Spacing.md)
-            Text("Newest first")
+            Text(L10n.Studio.newestFirst.render(AppLocalePreference.current))
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.textLow)
         }
@@ -6893,7 +6897,7 @@ struct StudioDiagnosticsScreen: View {
                     .foregroundStyle(color(for: issue.severity))
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 3) {
-                    Label("Incident Brief", systemImage: "cross.case")
+                    Label(L10n.Studio.incidentBrief.render(AppLocalePreference.current), systemImage: "cross.case")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.accent)
                     Text(issue.redactedTitle)
@@ -6910,7 +6914,7 @@ struct StudioDiagnosticsScreen: View {
                     Button {
                         copyIncidentBrief(issue)
                     } label: {
-                        Label("Copy Brief", systemImage: "doc.on.doc")
+                        Label(L10n.Studio.copyBrief.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                             .font(Theme.Typography.captionHi)
                     }
                     .buttonStyle(.borderless)
@@ -6984,17 +6988,17 @@ struct StudioDiagnosticsScreen: View {
     private func incidentRecoveryPath(_ issue: StudioDiagnosticIssue) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack {
-                Label("Recovery Path", systemImage: "arrow.triangle.branch")
+                Label(L10n.Studio.recoveryPath.render(AppLocalePreference.current), systemImage: "arrow.triangle.branch")
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(Theme.Colors.textHigh)
                 Spacer(minLength: Theme.Spacing.sm)
-                Text("Operator lane")
+                Text(L10n.Studio.operatorLane.render(AppLocalePreference.current))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
                 Button {
                     copyRecoveryPath(issue)
                 } label: {
-                    Label("Copy Path", systemImage: "doc.on.doc")
+                    Label(L10n.Studio.copyPath.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                         .font(Theme.Typography.captionHi)
                 }
                 .buttonStyle(.borderless)
@@ -7175,7 +7179,7 @@ struct StudioDiagnosticsScreen: View {
                     Button {
                         copyIncidentBrief(issue)
                     } label: {
-                        Label("Copy Brief", systemImage: "doc.on.doc")
+                        Label(L10n.Studio.copyBrief.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                             .font(Theme.Typography.captionHi)
                     }
                     .buttonStyle(.borderless)
@@ -7190,7 +7194,7 @@ struct StudioDiagnosticsScreen: View {
                     Button {
                         copyRecoveryPath(issue)
                     } label: {
-                        Label("Copy Path", systemImage: "arrow.triangle.branch")
+                        Label(L10n.Studio.copyPath.render(AppLocalePreference.current), systemImage: "arrow.triangle.branch")
                             .font(Theme.Typography.captionHi)
                     }
                     .buttonStyle(.borderless)
@@ -7273,13 +7277,13 @@ struct StudioDiagnosticsScreen: View {
 
     private var logTableHeader: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            Text("Time")
+            Text(L10n.Studio.time.render(AppLocalePreference.current))
                 .frame(width: 60, alignment: .leading)
-            Text("Level")
+            Text(L10n.Studio.level.render(AppLocalePreference.current))
                 .frame(width: 48, alignment: .leading)
-            Text("Category")
+            Text(L10n.Studio.category.render(AppLocalePreference.current))
                 .frame(width: 112, alignment: .leading)
-            Text("Message")
+            Text(L10n.Studio.message.render(AppLocalePreference.current))
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.captionHi)
@@ -7471,7 +7475,7 @@ private struct ChatTurnBubble: View {
 
             HStack(spacing: Theme.Spacing.sm) {
                 Button(action: copy) {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label(L10n.Studio.copy.render(AppLocalePreference.current), systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.plain)
                 .disabled(content.isEmpty)
@@ -7603,7 +7607,7 @@ struct ModelRecommendationCard: View {
                 Button {
                     queue()
                 } label: {
-                    Label("Queue", systemImage: "tray.and.arrow.down")
+                    Label(L10n.Studio.queue.render(AppLocalePreference.current), systemImage: "tray.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
                 .disabled(active)
@@ -7684,7 +7688,7 @@ struct HubModelCandidateCard: View {
                 Label(Self.humanCount(model.downloads), systemImage: "arrow.down.circle")
                 Label("\(model.likes)", systemImage: "heart")
                 if model.gated {
-                    Label("Gated", systemImage: "lock")
+                    Label(L10n.Studio.gated.render(AppLocalePreference.current), systemImage: "lock")
                         .foregroundStyle(Theme.Colors.warning)
                 }
                 Spacer(minLength: Theme.Spacing.sm)
@@ -7742,18 +7746,18 @@ struct HubModelCandidateCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .accessibilityLabel("Download and Chat \(accessibilityName)")
+                .accessibilityLabel(L10n.Studio.a11yDownloadAndChat.render(AppLocalePreference.current, accessibilityName))
                 .accessibilityIdentifier("Hub Download and Chat \(accessibilityName)")
                 .disabled(installing || gatedDownloadBlocked)
 
                 Button {
                     queue()
                 } label: {
-                    Label("Queue", systemImage: "tray.and.arrow.down")
+                    Label(L10n.Studio.queue.render(AppLocalePreference.current), systemImage: "tray.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .accessibilityLabel("Queue Download \(accessibilityName)")
+                .accessibilityLabel(L10n.Studio.a11yQueueDownload.render(AppLocalePreference.current, accessibilityName))
                 .accessibilityIdentifier("Hub Queue Download \(accessibilityName)")
                 .disabled(installing || gatedDownloadBlocked)
             }
@@ -7971,7 +7975,7 @@ private struct ModelRow: View {
                     Button {
                         chat()
                     } label: {
-                        Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                        Label(L10n.Studio.chat.render(AppLocalePreference.current), systemImage: "bubble.left.and.bubble.right")
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityLabel(routeAccessibilityTitle)
@@ -8166,7 +8170,7 @@ private struct AdvancedLabCard<Content: View>: View {
                         .foregroundStyle(Theme.Colors.textLow)
                 }
                 Spacer()
-                Text("Advanced")
+                Text(L10n.Studio.advanced.render(AppLocalePreference.current))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
                     .padding(.horizontal, Theme.Spacing.sm)
@@ -8220,7 +8224,7 @@ struct DeAlignMascotMark: View {
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()
-                .accessibilityLabel("DeAlign mascot")
+                .accessibilityLabel(L10n.Studio.deAlignMascot.render(AppLocalePreference.current))
         } else {
             fallback
         }

@@ -1,5 +1,10 @@
 # vMLX — Swift
 
+> **Naming:** **MLX Studio** is the user-facing product (the shipped macOS
+> app). **vMLX** is the baked-in inference runtime/engine that powers it —
+> the SwiftPM package, the `vMLX*` modules, and the `vmlxctl` CLI. They are
+> not separate apps; "vMLX" throughout this document refers to the runtime.
+
 **The entire MLX inference stack, from Metal kernels to SwiftUI, in a
 single SwiftPM package.** No external `path:` dependencies. No upstream
 drift risk. We control every layer — kernel compile flags, quant
@@ -9,7 +14,7 @@ routes, desktop UI.
 **Canonical home:** `./`
 **Build:** `swift build` → `.build/release/vmlx` CLI · `xcodegen` for the macOS app
 (4 unrelated Jinja-parser repros skip)
-**Binaries:** `vmlxctl` (CLI), `vMLX` (SwiftUI app)
+**Binaries:** `vmlxctl` (CLI), `MLXStudio` (the MLX Studio SwiftUI app)
 
 ---
 
@@ -198,7 +203,7 @@ open vMLX.xcodeproj
 **Binaries after build:**
 
 ```
-.build/arm64-apple-macosx/debug/vMLX       # SwiftUI app
+.build/arm64-apple-macosx/debug/MLXStudio  # MLX Studio SwiftUI app
 .build/arm64-apple-macosx/debug/vmlxctl    # CLI
 ```
 
@@ -292,9 +297,13 @@ directories. Add custom dirs from Server tab → Model Directories panel.
   accepts `{model}` override.
 - MCP: `/v1/mcp/{tools, servers, execute}`, `/mcp/:server/:method`
   (raw JSON-RPC 2.0 passthrough — body `{params:{...}}` or raw params
-  dict, e.g. `resources/list`, `prompts/get`).
+  dict, e.g. `resources/list`, `prompts/get`). **MCP tools are dispatched
+  live inside the chat agentic loop** (both HTTP serve and CLI `chat`) —
+  connected MCP server tools are merged into the model-visible tool set in
+  `Stream.swift` and executed via `ToolDispatcher`. (The old "MCP Phase 2
+  pending" note was stale; corrected 2026-07-01.)
 
-**SwiftUI app (`vMLX`)**
+**SwiftUI app (`MLXStudio` — "MLX Studio")**
 - 5 modes: Chat, Server, Image, Terminal, API
 - Per-chat model picker, sessions sidebar, message bubbles with
   streaming + reasoning + tool-call cards + MetricsStrip
@@ -347,12 +356,22 @@ REAL/STUB/MISSING inventory with file:line anchors. Quick summary:
 
 Prioritized list in `PROGRESS.md`. Headline items:
 
-- **Image gen `.generate()` bodies** — Flux/Qwen/Z/SeedVR2/FIBO DiT
-  forward passes. Biggest user-visible gap. (FluxBackend.editImage
-  wire-up landed 2026-04-14 — still needs model-side `.generate()`.)
+- **Image generation — two backends (this was under-documented; see
+  REVIEW-2026-07-01.md MED-6):**
+  - **Default = external Python `mflux`.** `MFluxImageBackend` shells out
+    to `mflux-generate*` for every offered model (Flux Schnell/Dev/Klein,
+    Z-Image, Qwen-Image). If the `mflux` venv is installed, generation is
+    REAL diffusion; if not, the Image tab shows a clear error (never a
+    fake image — output PNGs are variance-checked). This is the path a
+    normal user hits.
+  - **In-tree Swift DiT** (only when `MLX_STUDIO_IMAGE_BACKEND=swift`):
+    Flux1/Flux2 have real forward passes but **RoPE is still a TODO** in
+    `FluxDiT` (degraded quality); Z-Image/Qwen-Image run a structural
+    placeholder (prompt-independent, honestly flagged `isPlaceholder`);
+    edits (Kontext/Fill/Qwen-Edit) + Bria/FIBO/SeedVR2 are stub/`.notImplemented`.
+    Completing these Swift `.generate()` bodies is the remaining work.
 - **vision_embedding_cache.py port** — per-image cache for VLM
   continuous batching.
-- **MCP Phase 2** — wire MCP tools into `Stream.swift` tool dispatch.
 - **Flash MoE Phase 2b** — per-model protocol conformance landed for
   OlmoE, LFM2MoE, GLM4MoE, BailingMoe, PhiMoE, NemotronH SwitchMLP,
   Gemma4 sibling layout, MiniMax, Mistral3 SwitchGLU (2026-04-14).

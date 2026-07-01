@@ -109,10 +109,10 @@ public enum L10n {
             zh: "语言与设置…"
         )
         public static let openVMLX = L10nEntry(
-            en: "Open vMLX",
-            ja: "vMLX を開く",
-            ko: "vMLX 열기",
-            zh: "打开 vMLX"
+            en: "Open MLX Studio",
+            ja: "MLX Studio を開く",
+            ko: "MLX Studio 열기",
+            zh: "打开 MLX Studio"
         )
         public static let quit = L10nEntry(
             en: "Quit",
@@ -138,10 +138,10 @@ public enum L10n {
             zh: "停止"
         )
         public static let placeholder = L10nEntry(
-            en: "Message vMLX…",
-            ja: "vMLX にメッセージを送る…",
-            ko: "vMLX에 메시지 보내기…",
-            zh: "向 vMLX 发送消息…"
+            en: "Message MLX Studio…",
+            ja: "MLX Studio にメッセージを送る…",
+            ko: "MLX Studio에 메시지 보내기…",
+            zh: "向 MLX Studio 发送消息…"
         )
         public static let attachFile = L10nEntry(
             en: "Attach file",
@@ -953,10 +953,10 @@ public enum L10n {
             zh: "磁盘上不存在 — 文件夹可能已被删除或驱动器未挂载"
         )
         public static let stopScanningHelp = L10nEntry(
-            en: "vMLX will stop scanning this folder for models. The folder and any files inside it stay on disk untouched.",
-            ja: "vMLX はこのフォルダのモデルスキャンを停止します。フォルダとその中のファイルはディスク上にそのまま残ります。",
-            ko: "vMLX는 이 폴더의 모델 스캔을 중지합니다. 폴더와 내부 파일은 디스크에 그대로 남습니다.",
-            zh: "vMLX 将停止扫描此文件夹中的模型。文件夹及其内部的所有文件保留在磁盘上不变。"
+            en: "MLX Studio will stop scanning this folder for models. The folder and any files inside it stay on disk untouched.",
+            ja: "MLX Studio はこのフォルダのモデルスキャンを停止します。フォルダとその中のファイルはディスク上にそのまま残ります。",
+            ko: "MLX Studio는 이 폴더의 모델 스캔을 중지합니다. 폴더와 내부 파일은 디스크에 그대로 남습니다.",
+            zh: "MLX Studio 将停止扫描此文件夹中的模型。文件夹及其内部的所有文件保留在磁盘上不变。"
         )
     }
 
@@ -1247,10 +1247,10 @@ public enum L10n {
 
     public enum Setup {
         public static let welcome = L10nEntry(
-            en: "Welcome to vMLX",
-            ja: "vMLX へようこそ",
-            ko: "vMLX에 오신 것을 환영합니다",
-            zh: "欢迎使用 vMLX"
+            en: "Welcome to MLX Studio",
+            ja: "MLX Studio へようこそ",
+            ko: "MLX Studio에 오신 것을 환영합니다",
+            zh: "欢迎使用 MLX Studio"
         )
         public static let stepOfFormat = L10nEntry(
             en: "Step %lld of 3",
@@ -1265,10 +1265,10 @@ public enum L10n {
             zh: "在 Apple Silicon 上运行最先进的 LLM"
         )
         public static let runSOTABlurb = L10nEntry(
-            en: "vMLX serves chat, embeddings, images, and tool calls over OpenAI / Anthropic / Ollama APIs — 100% on-device.",
-            ja: "vMLX は OpenAI / Anthropic / Ollama 互換APIで、チャット・埋め込み・画像・ツール呼び出しを提供 — 完全オンデバイス。",
-            ko: "vMLX는 OpenAI / Anthropic / Ollama API로 채팅, 임베딩, 이미지, 도구 호출을 제공 — 100% 온디바이스.",
-            zh: "vMLX 通过兼容 OpenAI / Anthropic / Ollama 的 API 提供聊天、嵌入、图像和工具调用 — 100% 在本地运行。"
+            en: "MLX Studio serves chat, embeddings, images, and tool calls over OpenAI / Anthropic / Ollama APIs — 100% on-device.",
+            ja: "MLX Studio は OpenAI / Anthropic / Ollama 互換APIで、チャット・埋め込み・画像・ツール呼び出しを提供 — 完全オンデバイス。",
+            ko: "MLX Studio는 OpenAI / Anthropic / Ollama API로 채팅, 임베딩, 이미지, 도구 호출을 제공 — 100% 온디바이스.",
+            zh: "MLX Studio 通过兼容 OpenAI / Anthropic / Ollama 的 API 提供聊天、嵌入、图像和工具调用 — 100% 在本地运行。"
         )
         public static let scanningCache = L10nEntry(
             en: "Scanning Hugging Face cache…",

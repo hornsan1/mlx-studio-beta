@@ -271,7 +271,13 @@ let package = Package(
         // APFS case-insensitive filesystems collide `vmlx` and `vMLX` on
         // the `.build/debug/` slot. Name the CLI `vmlxctl` to break the tie.
         .executable(name: "vmlxctl", targets: ["vMLXCLI"]),
-        .executable(name: "vMLX",    targets: ["vMLXApp"]),
+        // XCTest-free regression harness (see the RegressionCheck target).
+        .executable(name: "regression-check", targets: ["RegressionCheck"]),
+        // REVIEW HIGH-4 (2026-07-01): "MLX Studio" is the single user-facing
+        // app product; "vMLX" is the baked-in runtime/engine + CLI name, not
+        // a separate app. The former duplicate `.executable(name: "vMLX",
+        // targets: ["vMLXApp"])` was removed so one target no longer ships
+        // under two identities. Build the app with `--product MLXStudio`.
         .executable(name: "MLXStudio", targets: ["vMLXApp"]),
     ],
     dependencies: [
@@ -292,13 +298,10 @@ let package = Package(
         // template + tokenizer behavior changes land directly here without
         // a remote fetch. Patches: see Vendor/SwiftTransformers/Sources/.
         .package(path: "Vendor/SwiftTransformers"),
-        // Jinja template engine — used both by SwiftTransformers (chat
-        // templates) and by vMLX engine code directly. Vendored at
-        // Vendor/Jinja from johnmai-dev/Jinja @ 1.3.0. The vendored
-        // SwiftTransformers manifest depends on `path: ../Jinja` so we
-        // run a single Jinja implementation across the whole tree.
+        // Jinja (Vendor/Jinja, johnmai-dev/Jinja @ 1.3.0) is pulled in by
+        // Vendor/SwiftTransformers via its own `path: ../Jinja` dependency —
+        // no root target imports it directly, so it is not declared here.
         // Patch details in Vendor/Jinja/Sources/Utilities.swift.
-        .package(path: "Vendor/Jinja"),
     ],
     targets: [
 
@@ -520,6 +523,25 @@ let package = Package(
             path: "Sources/vMLXCLI"
         ),
 
+        // MARK: - XCTest-free regression harness → `regression-check`
+        // Runs via `swift run regression-check`. Exists because some CI /
+        // dev environments have CommandLineTools only (no Xcode.app), where
+        // `XCTest` / `swift test` cannot run. This harness asserts the
+        // engine-logic invariants that the XCTest suites also cover, using
+        // plain `precondition`-style checks so it runs anywhere `swift build`
+        // works. See REVIEW-2026-07-01.md §0.
+        .executableTarget(
+            name: "RegressionCheck",
+            dependencies: [
+                "vMLXEngine",
+                "vMLXServer",
+                "vMLXTheme",
+                "vMLXFluxKit",
+                "MLX",
+            ],
+            path: "Sources/RegressionCheck"
+        ),
+
         // MARK: - SwiftUI app executable → `vMLX`
         .executableTarget(
             name: "vMLXApp",
@@ -574,6 +596,7 @@ let package = Package(
                 "ImageModelInstallVerifierTests.swift",
                 "ImageRuntimeProofStoreTests.swift",
                 "LatentSpaceSmokeTests.swift",
+                "LoadOptionsCacheResolutionTests.swift",
                 "MFluxImageBackendTests.swift",
                 "ModelInstallReadinessVerifierTests.swift",
                 "ModelLibraryImageLayoutTests.swift",
