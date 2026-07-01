@@ -163,10 +163,12 @@ struct HuggingFaceTokenCard: View {
             Label("Signed in as @\(username)", systemImage: "checkmark.seal.fill")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.success)
+                .textSelection(.enabled)
         case .invalid(let reason):
             Label(reason, systemImage: "exclamationmark.triangle.fill")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.danger)
+                .textSelection(.enabled)
         }
     }
 

@@ -275,8 +275,21 @@ struct Serve: AsyncParsableCommand {
             // leaves the existing settings value alone. Disable flags win
             // over enable flags when both are somehow set (shouldn't happen
             // but guards against accidental both-flagged).
-            if disableTurboQuant { g.enableTurboQuant = false; dirty = true }
-            else if enableTurboQuant { g.enableTurboQuant = true; dirty = true }
+            // 2026-07-01: these flags MUST also write `kvCacheQuantization`
+            // — the settings resolver (SettingsStore.swift `resolved()`)
+            // derives `enableTurboQuant` from that string as the canonical
+            // source of truth (audit 2026-04-16 UX #3), so writing only the
+            // Bool made both flags silent no-ops. An explicit
+            // `--kv-cache-quantization` below still wins (applied after).
+            if disableTurboQuant {
+                g.enableTurboQuant = false
+                g.kvCacheQuantization = "none"
+                dirty = true
+            } else if enableTurboQuant {
+                g.enableTurboQuant = true
+                g.kvCacheQuantization = "turboquant"
+                dirty = true
+            }
             if let bits = turboQuantBits { g.turboQuantBits = bits; dirty = true }
             if let q = kvCacheQuantization, !q.isEmpty { g.kvCacheQuantization = q; dirty = true }
             if let gs = kvCacheGroupSize { g.kvCacheGroupSize = gs; dirty = true }

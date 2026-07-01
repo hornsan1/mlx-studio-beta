@@ -263,6 +263,7 @@ struct ModelDirectoriesPanel: View {
                     .foregroundStyle(isMissing ? Theme.Colors.warning : Theme.Colors.textHigh)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .textSelection(.enabled)
                 if isDefault {
                     Text(L10n.ModelDirs.hfCacheDefault.render(appLocale))
                         .font(Theme.Typography.caption)

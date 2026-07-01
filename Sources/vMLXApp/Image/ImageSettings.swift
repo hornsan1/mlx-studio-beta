@@ -192,6 +192,7 @@ struct ImageSettingsInlinePanel: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warning)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         .padding(Theme.Spacing.sm)
@@ -314,6 +315,7 @@ struct ImageSettingsDrawer: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warning)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         .padding(Theme.Spacing.sm)

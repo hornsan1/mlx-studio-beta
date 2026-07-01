@@ -171,6 +171,7 @@ struct BenchmarkPanel: View {
             Text(err)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.textMid)
+                .textSelection(.enabled)
             Spacer()
         }
         .padding(Theme.Spacing.sm)

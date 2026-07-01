@@ -366,7 +366,6 @@ public struct LogprobsCollector: LogitProcessor {
             lp = lp.asType(.float32)
         }
         let logProbs = logSoftmax(lp)
-        let sampledLogprob = logProbs[0..., sampledToken].item(Float.self)
 
         let tokenStr = tokenizer.decode(tokenIds: [sampledToken])
         // §163.B1: OpenAI `bytes` field is the UTF-8 byte array of the
@@ -374,6 +373,16 @@ public struct LogprobsCollector: LogitProcessor {
         // is a straight copy.
         let tokenBytes = Array(tokenStr.utf8).map { Int($0) }
 
+        // GPU-sync discipline: materialize the logprob row AT MOST once per
+        // token. The former path performed TWO host syncs — a standalone
+        // `.item(Float.self)` for the sampled logprob plus the `asArray`
+        // copy for the top-N scan — each forcing a separate command-buffer
+        // round-trip against the current decode step. When top_logprobs are
+        // requested, read the sampled token's logprob out of the same host
+        // buffer used by the scan (identical fp32 element — batch=1 per the
+        // precondition above, so flat index == vocab index). When only the
+        // sampled logprob is needed, the single `.item` sync remains.
+        let sampledLogprob: Float
         var topAlts: [TopTokenLogprob] = []
         if topLogprobs > 0 {
             let vocabSize = logProbs.dim(-1)
@@ -385,6 +394,7 @@ public struct LogprobsCollector: LogitProcessor {
             // Single GPU→CPU copy + in-place top-N scan keeps the sort
             // cost bounded by N (~20) per element rather than log V.
             let flatHost = flatLogProbs.asArray(Float.self)
+            sampledLogprob = flatHost[sampledToken]
             var topValues: [Float] = Array(repeating: -.infinity, count: n)
             var topIndicesArr: [Int] = Array(repeating: 0, count: n)
             for i in 0..<flatHost.count {
@@ -407,6 +417,8 @@ public struct LogprobsCollector: LogitProcessor {
                 let tokBytes = Array(tokStr.utf8).map { Int($0) }
                 topAlts.append(TopTokenLogprob(token: tokStr, logprob: lpVal, bytes: tokBytes))
             }
+        } else {
+            sampledLogprob = logProbs[0..., sampledToken].item(Float.self)
         }
 
         collectedLogprobs.append(TokenLogprob(
@@ -1114,8 +1126,29 @@ public struct TokenIterator: TokenIteratorProtocol {
     // Whether cache quantization is needed (skip the function call entirely when not)
     var needsCacheQuantization: Bool { kvBits != nil || kvMode != .none }
 
+    /// Keep TurboQuant's encode/decode phase off the first-token critical path.
+    ///
+    /// `next()` returns the previous sampled token after it primes the next
+    /// decode step. If we compress during that first priming step, TTFT pays
+    /// the full TQ encode/decode cost before the caller can see token 1.
+    /// Delaying TQ by one surfaced token preserves the sustained decode
+    /// memory/throughput benefit while avoiding the misleading TTFT penalty.
+    /// Ported from reference vmlx-swift-lm (98fbb3a).
+    var shouldQuantizeAfterStep: Bool {
+        guard needsCacheQuantization else { return false }
+        if case .turboQuant = kvMode {
+            return tokenCount > 0
+        }
+        return true
+    }
+
     mutating func setupCompiledDecode(maxCacheLength: Int) throws {
         guard HardwareInfo.isCompiledDecodeSupported else { return }
+        // Runtime KV quantization swaps cache objects after prefill. The
+        // single-stream compiled closure captures the original cache array,
+        // so keep compile disabled when KV compression/quantization is active.
+        // Ported from reference vmlx-swift-lm (98fbb3a).
+        guard !needsCacheQuantization else { return }
         // Compiled decode requires no auxiliary state — models with state (e.g. vision
         // encoder cross-attention) use the uncompiled path.
         guard state == nil else { return }
@@ -1157,7 +1190,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 
             if result.count > 0 {
                 self.state = nil
-                if needsCacheQuantization {
+                if shouldQuantizeAfterStep {
                     maybeQuantizeKVCache(
                         cache: &cache, kvBits: kvBits,
                         kvGroupSize: kvGroupSize, quantizedKVStart: quantizedKVStart,
@@ -1178,7 +1211,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             stepInput, cache: cache.isEmpty ? nil : cache, state: state)
         self.state = result.state
 
-        if needsCacheQuantization {
+        if shouldQuantizeAfterStep {
             maybeQuantizeKVCache(
                 cache: &cache,
                 kvBits: kvBits,

@@ -4298,6 +4298,7 @@ private struct StudioLibraryModelCard: View {
                         .font(Theme.Typography.bodyHi)
                         .foregroundStyle(Theme.Colors.textHigh)
                         .lineLimit(1)
+                        .textSelection(.enabled)
                     Label(
                         searchSummary.loadStateLabel,
                         systemImage: model.isLoaded ? "checkmark.circle.fill" : "circle.dashed"
@@ -4314,6 +4315,7 @@ private struct StudioLibraryModelCard: View {
                         .foregroundStyle(Theme.Colors.textLow)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
                 }
             }
             Spacer()
@@ -5293,6 +5295,7 @@ struct StudioServerScreen: View {
                     .foregroundStyle(Theme.Colors.textHigh)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
+                    .textSelection(.enabled)
                 Text(caption)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
@@ -6311,6 +6314,7 @@ struct StudioAdvancedModelsScreen: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
                     .lineLimit(2)
+                    .textSelection(.enabled)
                 if let progress = job.progress, job.status == .running {
                     ProgressView(value: progress)
                         .controlSize(.small)
@@ -7062,6 +7066,7 @@ struct StudioDiagnosticsScreen: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .minimumScaleFactor(0.78)
+                    .textSelection(.enabled)
                 Text(caption)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
@@ -7099,6 +7104,7 @@ struct StudioDiagnosticsScreen: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .minimumScaleFactor(0.75)
+                    .textSelection(.enabled)
                 Text(caption)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
@@ -7310,6 +7316,7 @@ struct StudioDiagnosticsScreen: View {
                 .font(Theme.Typography.monoCaption)
                 .foregroundStyle(Theme.Colors.textMid)
                 .lineLimit(2)
+                .textSelection(.enabled)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Theme.Spacing.md)
@@ -7658,6 +7665,7 @@ struct HubModelCandidateCard: View {
                         .foregroundStyle(Theme.Colors.textHigh)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
                     Text("\(model.libraryName) - \(model.pipeline)")
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textLow)
@@ -7723,6 +7731,7 @@ struct HubModelCandidateCard: View {
                             .font(Theme.Typography.caption)
                             .foregroundStyle(installState.phase == .failed ? Theme.Colors.danger : Theme.Colors.textMid)
                             .lineLimit(2)
+                            .textSelection(.enabled)
                     }
                     if let progress = installState.progress, installing {
                         ProgressView(value: progress)
@@ -7734,6 +7743,7 @@ struct HubModelCandidateCard: View {
                             .foregroundStyle(Theme.Colors.textLow)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .textSelection(.enabled)
                     }
                 }
             }

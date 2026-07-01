@@ -153,41 +153,53 @@ public enum AnthropicRoutes {
         // POST /v1/messages/count_tokens — token-count preflight used
         // by Anthropic SDKs for budget planning before a real send.
         //
-        // iter-108 §186: returns a labeled 501 rather than a hand-
-        // rolled tokenizer count. The honest reason is that building
-        // a count that MATCHES the prompt_tokens from a subsequent
-        // /v1/messages call requires re-running the same chat-template
-        // + image-marker + tool-spec path that Engine.stream sets up
-        // inside its container actor. Exposing a public entry point
-        // that reaches the loaded tokenizer without breaking actor
-        // isolation needs a dedicated Engine method — not a shortcut
-        // here at the wrapper layer. A wrong count would silently
-        // poison every budget decision the client makes (they'd over-
-        // or under-cap max_tokens based on bad info), which is worse
-        // than an honest 501.
+        // iter-108 §186 RESOLVED 2026-07-01: real count via
+        // `Engine.countChatTokens` (EngineTokenize.swift), which runs
+        // the SAME buildChatMessages → buildTemplateExtras →
+        // processor.prepare path as `Engine.stream`, so the returned
+        // `input_tokens` matches the `prompt_tokens`/`input_tokens` a
+        // subsequent /v1/messages call reports. Requires a loaded
+        // model (the count is template- and tokenizer-specific); when
+        // none is loaded we keep the labeled 501 so SDKs can detect
+        // and fall back rather than budget on a wrong number.
         //
-        // FIXME(iter-108 §186): wire a real count via an Engine-
-        // public method that:
-        //   1. Acquires the llm container (same path as Stream.swift)
-        //   2. Applies the chat template through `tokenizer.applyChat
-        //      Template(messages:tools:additionalContext:)`
-        //   3. Returns token count (no generation).
-        // Until then, clients that call count_tokens should fall back
-        // to their own tiktoken-based estimate or just send the real
-        // /v1/messages call and read prompt_tokens from usage. The
-        // status:"not-implemented" field lets SDKs detect this.
-        router.post("/v1/messages/count_tokens") { _, _ -> Response in
-            return OpenAIRoutes.json(
-                [
-                    "type": "error",
-                    "status": "not-implemented",
-                    "error": [
-                        "type": "not_implemented_error",
-                        "message": "vMLX does not yet implement /v1/messages/count_tokens — wiring the real count through the loaded tokenizer + chat template is tracked by iter-108 §186 FIXME in AnthropicRoutes.swift. Send a real /v1/messages call and read usage.input_tokens from the response for an exact count, or use a tiktoken-based client-side estimate for planning.",
-                    ] as [String: Any],
-                ],
-                status: .notImplemented
-            )
+        // Known divergence (documented in EngineTokenize.swift):
+        // MCP-merged tools are injected during stream() and are not
+        // included here — count_tokens callers supply tools explicitly
+        // per the Anthropic contract.
+        router.post("/v1/messages/count_tokens") { req, _ -> Response in
+            var req = req
+            let body = try await req.collectBody(upTo: 32 * 1024 * 1024)
+            let data = Data(buffer: body)
+            guard let anthropicBody = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return OpenAIRoutes.errorJSON(.badRequest, "invalid JSON")
+            }
+            // max_tokens is NOT required on count_tokens (it counts the
+            // prompt, not the generation budget) — spec parity with
+            // api.anthropic.com, which accepts count_tokens bodies
+            // without max_tokens.
+            let chatReq = Self.anthropicToChatRequest(anthropicBody)
+            do {
+                let count = try await engine.countChatTokens(request: chatReq)
+                return OpenAIRoutes.json(["input_tokens": count])
+            } catch let err as EngineError {
+                if case .notImplemented = err {
+                    return OpenAIRoutes.json(
+                        [
+                            "type": "error",
+                            "status": "not-implemented",
+                            "error": [
+                                "type": "not_implemented_error",
+                                "message": "count_tokens requires a loaded model (the count is chat-template- and tokenizer-specific): \(err). Load a model, or send the real /v1/messages call and read usage.input_tokens.",
+                            ] as [String: Any],
+                        ],
+                        status: .notImplemented
+                    )
+                }
+                return OpenAIRoutes.errorJSON(.internalServerError, "count_tokens failed: \(err)")
+            } catch {
+                return OpenAIRoutes.errorJSON(.internalServerError, "count_tokens failed: \(error)")
+            }
         }
     }
 

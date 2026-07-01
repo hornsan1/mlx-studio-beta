@@ -220,6 +220,7 @@ struct DownloadsWindow: View {
             Text("~/.cache/huggingface/hub/models--<org>--<repo>/snapshots/main/")
                 .font(Theme.Typography.mono)
                 .foregroundStyle(Theme.Colors.textMid)
+                .textSelection(.enabled)
                 .padding(Theme.Spacing.sm)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.Colors.surfaceHi)
@@ -264,6 +265,7 @@ private struct DownloadRow: View {
                     .foregroundStyle(Theme.Colors.textLow)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .textSelection(.enabled)
 
                 ProgressLine(fraction: job.fraction)
 
@@ -284,6 +286,7 @@ private struct DownloadRow: View {
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.danger)
                         .lineLimit(2)
+                        .textSelection(.enabled)
                 }
                 // O7 §293 — targeted HF auth CTA. When the sibling
                 // fetch returned 401/403, show a Fix button that

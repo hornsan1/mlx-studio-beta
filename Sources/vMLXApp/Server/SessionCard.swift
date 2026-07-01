@@ -299,10 +299,12 @@ struct SessionCard: View {
                     .foregroundStyle(Theme.Colors.textMid)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .textSelection(.enabled)
             } else {
                 Text("\(session.host):\(session.port)")
                     .font(Theme.Typography.mono)
                     .foregroundStyle(Theme.Colors.textMid)
+                    .textSelection(.enabled)
                 if let pid = session.pid {
                     Text(L10n.Misc.pidFormat2.format(locale: appLocale, Int64(pid)))
                         .font(Theme.Typography.caption)

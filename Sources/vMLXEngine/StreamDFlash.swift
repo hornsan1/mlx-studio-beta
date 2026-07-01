@@ -59,21 +59,33 @@ extension Engine {
         }
 
         // -- Tokenize prompt via the tokenizer's chat template --
+        let effectiveThinking = request.enableThinking
+            ?? resolved.enableThinking
+            ?? false
         let chatMessages = await Engine.buildChatMessages(
             from: request,
-            effectiveThinking: request.enableThinking
-                ?? resolved.enableThinking
-                ?? false,
+            effectiveThinking: effectiveThinking,
             modelStampsThink: self.modelCapabilities?.thinkInTemplate ?? false,
             responseFormatInstruction: Engine.responseFormatInstruction(
                 from: request.responseFormat))
+
+        // Same template extras as the standard path — without these the
+        // DFlash render silently dropped `enable_thinking` /
+        // `reasoning_effort` / the session template override, so
+        // template-switching families (MiniMax — a DFlash-eligible
+        // target!) stamped reasoning even in reasoning-off mode.
+        let templateExtras = Engine.buildTemplateExtras(
+            request: request, resolved: resolved,
+            effectiveThinking: effectiveThinking)
 
         struct TokenizeResult: Sendable {
             let promptIDs: [Int]
             let eosIDs: Set<Int>
         }
         let tokenized: TokenizeResult = try await container.perform { ctx in
-            let userInput = UserInput(chat: chatMessages, tools: nil)
+            let userInput = UserInput(
+                chat: chatMessages, tools: nil,
+                additionalContext: templateExtras)
             let prepared = try await ctx.processor.prepare(input: userInput)
             let ids = prepared.text.tokens.asArray(Int.self)
             var eos: Set<Int> = []
@@ -126,7 +138,8 @@ extension Engine {
         // lifecycle 1-for-1.
         let coordinator = self.cacheCoordinator
         let genPromptLen = await Self.computeGenPromptLen(
-            container: container, chatMessages: chatMessages)
+            container: container, chatMessages: chatMessages,
+            templateExtras: templateExtras)
 
         struct RunResult {
             var outcomes: [JangDFlashBlockOutcome]
@@ -292,23 +305,45 @@ extension Engine {
     /// Mirror of the `gen_prompt_len` computation in `Stream.swift`.
     /// Renders the chat template with and without the generation-prompt
     /// suffix and returns the length delta. Shared cache-coordinator
-    /// stripping requires both paths to agree on the number.
+    /// stripping requires both paths to agree on the number, so this
+    /// mirrors BOTH the iter-122 §197 reasoning-off stub strip AND the
+    /// template-extras threading — a bare-context render here would
+    /// measure a different suffix than the standard path and break
+    /// cross-path prefix cache reuse.
     fileprivate static func computeGenPromptLen(
         container: vMLXLMCommon.ModelContainer,
-        chatMessages: [Chat.Message]
+        chatMessages: [Chat.Message],
+        templateExtras: [String: any Sendable]
     ) async -> Int {
         let n = await container.perform { ctx -> Int in
             do {
-                let userInput = UserInput(chat: chatMessages, tools: nil)
+                let userInput = UserInput(
+                    chat: chatMessages, tools: nil,
+                    additionalContext: templateExtras)
                 let rawMsgs = DefaultMessageGenerator().generate(from: userInput)
+                var gpExtrasOn = templateExtras
+                gpExtrasOn["add_generation_prompt"] = true
                 let withGP = try ctx.tokenizer.applyChatTemplate(
                     messages: rawMsgs,
                     tools: nil,
-                    additionalContext: ["add_generation_prompt": true as any Sendable])
+                    additionalContext: gpExtrasOn)
+                // iter-122 §197 parity: strip the trailing reasoning-off
+                // stub before the cache-stable render, exactly like the
+                // standard path, so both paths hash identical prefixes.
+                var rawMsgsClosed = rawMsgs
+                if let last = rawMsgsClosed.last,
+                   (last["role"] as? String) == "assistant",
+                   let lastContent = last["content"] as? String,
+                   Engine.reasoningOffStubContents.contains(lastContent)
+                {
+                    rawMsgsClosed.removeLast()
+                }
+                var gpExtrasOff = templateExtras
+                gpExtrasOff["add_generation_prompt"] = false
                 let withoutGP = try ctx.tokenizer.applyChatTemplate(
-                    messages: rawMsgs,
+                    messages: rawMsgsClosed,
                     tools: nil,
-                    additionalContext: ["add_generation_prompt": false as any Sendable])
+                    additionalContext: gpExtrasOff)
                 return max(0, withGP.count - withoutGP.count)
             } catch {
                 return 0

@@ -226,10 +226,12 @@ struct APIScreen: View {
                 Text(L10n.APIUI.portRangeError.render(appLocale))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.danger)
+                    .textSelection(.enabled)
             } else if portInUse {
                 Text(L10n.APIUI.portInUseFormat.format(locale: appLocale, Int64(portBinding)))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warning)
+                    .textSelection(.enabled)
             }
 
             Toggle(L10n.APIUI.requireBearer.render(appLocale), isOn: $bearerRequired)
@@ -285,6 +287,7 @@ struct APIScreen: View {
                         Text("\(s.host):\(s.port)")
                             .font(Theme.Typography.mono)
                             .foregroundStyle(Theme.Colors.textMid)
+                            .textSelection(.enabled)
                         Spacer()
                         Text(stateLabel(s.state))
                             .font(Theme.Typography.caption)

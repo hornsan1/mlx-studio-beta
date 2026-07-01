@@ -49,6 +49,24 @@ func rmsNormNoScale(_ x: MLXArray, eps: Float = 1e-6) -> MLXArray {
     return x * rsqrt(variance + eps)
 }
 
+/// Graph-visible cache offset, when the cache exposes one.
+///
+/// Reference exposes `graphOffsetArray(for:)` from MLXLMCommon
+/// (RoPEApplication.swift); vMLXLMCommon doesn't have it yet, so keep a
+/// file-private copy covering the cache types Gemma4 can receive. Reading
+/// `CompilableKVCache.offset` performs `offsetArray[0].item(Int.self)` — a
+/// synchronous GPU readback per layer per token — so hot paths must prefer
+/// the MLXArray form and only fall back to the scalar `offset`.
+private func graphOffsetArray(for cache: KVCache?) -> MLXArray? {
+    if let compilable = cache as? CompilableKVCache {
+        return compilable.offsetArray
+    }
+    if let batchCache = cache as? BatchKVCache {
+        return batchCache.offsetArray
+    }
+    return nil
+}
+
 // MARK: - Configuration
 
 public struct Gemma4TextConfiguration: Codable, Sendable {
@@ -154,10 +172,27 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
         attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
         attentionKEqV = try container.decodeIfPresent(Bool.self, forKey: .attentionKEqV) ?? false
 
-        hiddenSizePerLayerInput =
+        let decodedHiddenSizePerLayerInput =
             try container.decodeIfPresent(Int.self, forKey: .hiddenSizePerLayerInput) ?? 0
-        vocabSizePerLayerInput =
+        var decodedVocabSizePerLayerInput =
             try container.decodeIfPresent(Int.self, forKey: .vocabSizePerLayerInput) ?? 0
+        // PLE coherence: hidden_size_per_layer_input and vocab_size_per_layer_input are paired.
+        // `hidden_size_per_layer_input == 0` is the authoritative PLE-off signal
+        // for full Gemma4 rows (26B/31B). Some shipped configs still carry the
+        // ordinary vocab size in `vocab_size_per_layer_input`; tolerate that by
+        // normalizing the pair to PLE off. The opposite shape (hidden>0, vocab=0)
+        // is still invalid because it would build a zero-row PLE embedding.
+        if decodedHiddenSizePerLayerInput == 0 {
+            decodedVocabSizePerLayerInput = 0
+        } else if decodedVocabSizePerLayerInput == 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .hiddenSizePerLayerInput, in: container,
+                debugDescription:
+                    "Gemma4 PLE config incoherent: hidden_size_per_layer_input=\(decodedHiddenSizePerLayerInput) "
+                    + "and vocab_size_per_layer_input=\(decodedVocabSizePerLayerInput); vocab must be positive when PLE hidden size is positive.")
+        }
+        hiddenSizePerLayerInput = decodedHiddenSizePerLayerInput
+        vocabSizePerLayerInput = decodedVocabSizePerLayerInput
         numKvSharedLayers =
             try container.decodeIfPresent(Int.self, forKey: .numKvSharedLayers) ?? 0
         useDoubleWideMlp =
@@ -283,7 +318,12 @@ class Gemma4Attention: Module {
             cachedValues = sharedKV.values
         } else {
             // Normal path: project K/V, apply RoPE, update cache
-            usedOffset = cache?.offset ?? 0
+            // Avoid host-reading `cache.offset` after compiled-cache
+            // promotion. Shared-KV consumers receive `offsetArray`
+            // below and use that graph value for RoPE; scalar
+            // `usedOffset` is only needed for non-compiled caches.
+            let normalOffsetArray = graphOffsetArray(for: cache)
+            usedOffset = normalOffsetArray == nil ? (cache?.offset ?? 0) : 0
 
             var keys = keyProj(x).reshaped(B, L, nKVHeads, headDim)
 
@@ -437,27 +477,27 @@ class Gemma4Router: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> (indices: MLXArray, weights: MLXArray) {
-        // Pre-norm (RMSNormNoScale — no learnable weight)
-        var h = rmsNormNoScale(x, eps: eps)
-        h = h * rootSize
-        h = h * routerScale
-
-        let expertScores = proj(h)
-        // softmax already computes in float32 internally — no explicit cast needed
-        let routerProbs = softmax(expertScores, axis: -1)
-
-        // Top-K via argPartition on negated scores (get highest scores).
+        // Python parity (ported from reference 98fbb3a/88fc352): fused
+        // pre-norm with scale, then top-k on raw scores, then softmax over
+        // selected experts only. Folding rootSize + routerScale into the
+        // rmsNorm weight replaces 3 elementwise ops (norm, *rootSize,
+        // *routerScale) with one fused MLXFast.rmsNorm dispatch, and the
+        // 128-expert softmax + takeAlong + renormalize triplet collapses
+        // to a softmax over just the top-k logits — numerically identical
+        // (the renormalization cancels the full-softmax denominator).
         // Unary `-` keeps the dtype; the scalar-subtract form would insert
         // an extra AsType + broadcast per step. See §27.
+        let scaledWeight = routerScale * rootSize
+        let h = MLXFast.rmsNorm(x, weight: scaledWeight, eps: eps)
+
+        let expertScores = proj(h)
+
         let topKIndices = argPartition(
-            -expertScores,
-            kth: topK - 1, axis: -1
+            -expertScores, kth: topK - 1, axis: -1
         )[.ellipsis, ..<topK]
 
-        var topKWeights = takeAlong(routerProbs, topKIndices, axis: -1)
-        // Renormalize
-        topKWeights = topKWeights / topKWeights.sum(axis: -1, keepDims: true)
-        // Per-expert scale indexed by selected experts
+        let topKLogits = takeAlong(expertScores, topKIndices, axis: -1)
+        var topKWeights = softmax(topKLogits, axis: -1, precise: true)
         topKWeights = topKWeights * perExpertScale[topKIndices]
 
         return (indices: topKIndices, weights: topKWeights)
@@ -825,7 +865,7 @@ public class Gemma4Model: Module {
                 sharedOffsetArray: sharedOffsetArray)
 
             h = result.h
-            let layerOffsetArray = (layerCacheEntry as? BatchKVCache)?.offsetArray
+            let layerOffsetArray = graphOffsetArray(for: layerCacheEntry)
             intermediates[i] = (keys: result.keys, values: result.values, offset: result.offset, offsetArray: layerOffsetArray)
         }
 

@@ -45,6 +45,70 @@ import vMLXLMCommon
 
 extension Engine {
 
+    /// The exact reasoning-off stub literals `buildChatMessages` appends as
+    /// a trailing assistant message, per family. Used by the
+    /// `gen_prompt_len` measurement (standard AND DFlash paths — iter-122
+    /// §197) to strip the stub from the cache-stable render so prefix
+    /// cache keys line up across turns. Any future family that stamps a
+    /// different stub shape goes here.
+    internal static let reasoningOffStubContents: Set<String> = [
+        "<think>\n</think>\n\n",  // Qwen3.5 family
+        "<think></think>",        // Nemotron-H / Cascade
+        // §388 — DSV4 Flash/Pro chat mode closes the empty reasoning with
+        // a bare `</think>` (the open `<think>` is already consumed as
+        // part of the `<｜Assistant｜></think>` prompt tail per the
+        // built-in template). Without this entry, chat-mode DSV4
+        // multi-turn would skip the gen_prompt_len strip → prefix cache
+        // miss every turn.
+        "</think>",
+    ]
+
+    /// Build the `additionalContext` dictionary threaded into every chat
+    /// template render for a request.
+    ///
+    /// Wires `enable_thinking` + `reasoning_effort` + `thinking_budget`
+    /// into the chat template — the Jinja extension some templates
+    /// (MiniMax M1/M2/M2.5, Mistral 4, Qwen3.5) read to decide whether to
+    /// stamp `<think>` blocks and how much effort to allocate. The Python
+    /// engine threads these through `_ct_kwargs`; without this wiring the
+    /// Swift server silently dropped them, wasting tokens on reasoning
+    /// even in "reasoning off" mode. Deep audit 2026-04-14 #1 (HIGH).
+    ///
+    /// Also merges OpenAI `chat_template_kwargs` (caller-provided
+    /// per-request template variables, merged after engine-set extras so
+    /// callers can override intentionally) and the iter-60
+    /// `__chat_template_override__` reserved key (session/CLI
+    /// `--chat-template` override the TokenizerBridge picks out of
+    /// additionalContext).
+    ///
+    /// Shared by the standard stream path and the DFlash speculative path
+    /// so prompt renders and `gen_prompt_len` measurements always use the
+    /// same template configuration.
+    internal static func buildTemplateExtras(
+        request: ChatRequest,
+        resolved: ResolvedSettings,
+        effectiveThinking: Bool
+    ) -> [String: any Sendable] {
+        var templateExtras: [String: any Sendable] = [:]
+        templateExtras["enable_thinking"] = effectiveThinking
+        if let effort = request.reasoningEffort {
+            templateExtras["reasoning_effort"] = effort
+        }
+        if let budget = request.thinkingBudget, budget > 0 {
+            templateExtras["thinking_budget"] = budget
+        }
+        if let kwargs = request.chatTemplateKwargs {
+            for (key, value) in kwargs {
+                templateExtras[key] = jsonValueToSendable(value)
+            }
+        }
+        let chatTemplateOverride = resolved.settings.chatTemplate
+        if !chatTemplateOverride.isEmpty {
+            templateExtras["__chat_template_override__"] = chatTemplateOverride
+        }
+        return templateExtras
+    }
+
     /// Replace the notImplemented stub with a real generation loop.
     /// Call site is still `engine.stream(request:)` — same signature.
     ///
@@ -799,37 +863,12 @@ extension Engine {
         // the Swift server silently dropped them, wasting tokens on
         // reasoning even in "reasoning off" mode and producing output
         // different from Python. Deep audit 2026-04-14 #1 (HIGH).
-        var templateExtras: [String: any Sendable] = [:]
-        templateExtras["enable_thinking"] = effectiveThinking
-        if let effort = request.reasoningEffort {
-            templateExtras["reasoning_effort"] = effort
-        }
-        if let budget = request.thinkingBudget, budget > 0 {
-            templateExtras["thinking_budget"] = budget
-        }
-        // OpenAI `chat_template_kwargs` — caller-provided per-request
-        // template variables (e.g. assistant_prefix, enable_tools). Merged
-        // **last** so callers can override engine-set extras intentionally.
-        if let kwargs = request.chatTemplateKwargs {
-            for (key, value) in kwargs {
-                templateExtras[key] = jsonValueToSendable(value)
-            }
-        }
-        // iter-60: wire `settings.chatTemplate` through as a template
-        // override. The `--chat-template path.jinja` CLI flag resolves
-        // the file content into `g.chatTemplate`; sessions can override
-        // per-session. The TokenizerBridge picks the reserved
-        // `__chat_template_override__` key out of additionalContext
-        // and delegates to swift-transformers'
-        // `applyChatTemplate(messages:chatTemplate:.literal(...))`
-        // overload. Non-empty string = override wins; empty = falls
-        // through to the upstream tokenizer's built-in template.
-        // Replaces the §88 per-request warning — the override now
-        // actually does what the flag promised.
-        let chatTemplateOverride = resolved.settings.chatTemplate
-        if !chatTemplateOverride.isEmpty {
-            templateExtras["__chat_template_override__"] = chatTemplateOverride
-        }
+        // Shared with the DFlash speculative path so both render prompts
+        // (and measure `gen_prompt_len`) with an identical template
+        // configuration — see `Engine.buildTemplateExtras`.
+        let templateExtras = Self.buildTemplateExtras(
+            request: request, resolved: resolved,
+            effectiveThinking: effectiveThinking)
         let userInput = UserInput(
             chat: chatMessages, tools: toolSpecs,
             additionalContext: templateExtras)
@@ -1128,10 +1167,19 @@ extension Engine {
                 var genPromptLen = 0
                 do {
                     let rawMsgsFull = DefaultMessageGenerator().generate(from: userInput)
+                    // Render with the SAME template extras as the real
+                    // prompt (enable_thinking, reasoning_effort, template
+                    // override, …) — measuring the gp suffix under a
+                    // different template configuration than the prompt
+                    // actually used yields a wrong genPromptLen and
+                    // corrupts prefix-cache keys (e.g. session template
+                    // override + default template here).
+                    var gpExtrasOn = userInput.additionalContext ?? [:]
+                    gpExtrasOn["add_generation_prompt"] = true
                     let withGP = try ctx.tokenizer.applyChatTemplate(
                         messages: rawMsgsFull,
                         tools: nil,
-                        additionalContext: ["add_generation_prompt": true as any Sendable]
+                        additionalContext: gpExtrasOn
                     )
 
                     // Strip the trailing reasoning-off stub from the
@@ -1150,19 +1198,7 @@ extension Engine {
                     // Nemotron missed the prefix cache (§226 B harness
                     // live-confirmed). Recognize both shapes. Any future
                     // family that adds another variant goes here.
-                    let stubContents: Set<String> = [
-                        "<think>\n</think>\n\n",  // Qwen3.5 family
-                        "<think></think>",        // Nemotron-H / Cascade
-                        // §388 — DSV4 Flash/Pro chat mode closes the
-                        // empty reasoning with a bare `</think>`
-                        // (the open `<think>` is already consumed as
-                        // part of the `<｜Assistant｜></think>` prompt
-                        // tail per the built-in template). Without
-                        // this entry, chat-mode DSV4 multi-turn would
-                        // skip the gen_prompt_len strip → prefix
-                        // cache miss every turn.
-                        "</think>",
-                    ]
+                    let stubContents = Engine.reasoningOffStubContents
                     var rawMsgsClosed = rawMsgsFull
                     if let last = rawMsgsClosed.last,
                        (last["role"] as? String) == "assistant",
@@ -1171,10 +1207,12 @@ extension Engine {
                     {
                         rawMsgsClosed.removeLast()
                     }
+                    var gpExtrasOff = userInput.additionalContext ?? [:]
+                    gpExtrasOff["add_generation_prompt"] = false
                     let withoutGPClosed = try ctx.tokenizer.applyChatTemplate(
                         messages: rawMsgsClosed,
                         tools: nil,
-                        additionalContext: ["add_generation_prompt": false as any Sendable]
+                        additionalContext: gpExtrasOff
                     )
                     if withGP.count > withoutGPClosed.count {
                         genPromptLen = withGP.count - withoutGPClosed.count
@@ -2500,7 +2538,10 @@ extension Engine {
     /// primitives are all Sendable (String/Int/Double/Bool/NSNumber), but
     /// `JSONSerialization.jsonObject` returns `Any`, so we round-trip via
     /// NSDictionary to satisfy the Sendable marker protocol.
-    private func buildToolSpecs(from tools: [ChatRequest.Tool]) -> [ToolSpec] {
+    // internal (not private): also used by `Engine.countChatTokens`
+    // (EngineTokenize.swift) so token counts include the same tool specs
+    // the template render sees.
+    internal func buildToolSpecs(from tools: [ChatRequest.Tool]) -> [ToolSpec] {
         tools.map { t in
             var fn: [String: any Sendable] = [
                 "name": t.function.name,
@@ -2621,11 +2662,13 @@ extension Engine {
             params.enableCompiledDecode = true
         }
 
-        // TurboQuant KV-cache compression. Default on for every model
-        // (MLX + JANG alike) per user directive. `enableTurboQuant`
-        // in GlobalSettings defaults to true, and `turboQuantBits`
-        // defaults to 4 (≈3.6x compression, sweet spot from the TQ
-        // paper). Hybrid-SSM models are safe because
+        // TurboQuant KV-cache compression. Default OFF as of 2026-07-01
+        // (measured ≈40% decode cost at long context on M4 Pro — see
+        // GlobalSettings.kvCacheQuantization history); opt-in via the
+        // settings picker / `--kv-cache-quantization turboquant`, and
+        // JANG-calibrated models auto-activate below regardless.
+        // `turboQuantBits` defaults to 4 (≈3.6x compression, sweet spot
+        // from the TQ paper). Hybrid-SSM models are safe because
         // `maybeQuantizeKVCache` only compresses `KVCacheSimple`
         // layers and skips Mamba/Rotating/CacheList — see
         // `KVCache.swift:1666-1685`.

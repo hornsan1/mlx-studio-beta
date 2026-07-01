@@ -261,6 +261,7 @@ struct CachePanel: View {
                         .foregroundStyle(Theme.Colors.textLow)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
                         .padding(.top, 2)
                 }
             }
@@ -311,6 +312,7 @@ struct CachePanel: View {
                 Text(status)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
+                    .textSelection(.enabled)
             }
             Spacer()
 

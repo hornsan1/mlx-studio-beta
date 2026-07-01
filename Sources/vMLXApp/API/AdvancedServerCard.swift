@@ -216,12 +216,14 @@ struct AdvancedServerCard: View {
                 Text(L10n.Advanced.tlsBothRequired.render(appLocale))
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Colors.warning)
+                    .textSelection(.enabled)
             } else if bothSet && (!keyOK || !certOK) {
                 Image(systemName: "exclamationmark.circle")
                     .foregroundStyle(Theme.Colors.danger)
                 Text(L10n.Advanced.tlsFileMissing.render(appLocale))
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Colors.danger)
+                    .textSelection(.enabled)
             } else if bothSet && keyOK && certOK {
                 Image(systemName: "checkmark.circle")
                     .foregroundStyle(Theme.Colors.success)
@@ -248,6 +250,7 @@ struct AdvancedServerCard: View {
                     .foregroundStyle(lastApplyMessage.hasPrefix("✓")
                                      ? Theme.Colors.success
                                      : Theme.Colors.warning)
+                    .textSelection(.enabled)
             }
             Spacer()
         }

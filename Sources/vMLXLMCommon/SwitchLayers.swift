@@ -167,6 +167,20 @@ public class SwitchGLU: Module {
               g.bits == u.bits,
               g.mode == u.mode
         else { return }
+
+        // Memory cap (ported from reference vmlx-swift-lm 98fbb3a): keep the
+        // decode micro-fusion for normal-sized MoE layers, but do not let it
+        // duplicate giant routed expert banks. `nbytes` is metadata-only, so
+        // this check does not force evaluation.
+        let fusedBytes =
+            g.weight.nbytes + u.weight.nbytes
+            + g.scales.nbytes + u.scales.nbytes
+            + (g.biases?.nbytes ?? 0) + (u.biases?.nbytes ?? 0)
+        let cacheLimit = Self.fusedGateUpCacheByteLimit()
+        if cacheLimit >= 0 && fusedBytes > cacheLimit {
+            return
+        }
+
         let fusedW = concatenated([g.weight, u.weight], axis: -2)
         let fusedS = concatenated([g.scales, u.scales], axis: -2)
         var fusedB: MLXArray? = nil
@@ -186,6 +200,27 @@ public class SwitchGLU: Module {
         self.fusedGroupSize = g.groupSize
         self.fusedBits = g.bits
         self.fusedMode = g.mode
+    }
+
+    /// Byte budget for the fused gate+up weight duplicate. `-1` disables the
+    /// cap. Default 512 MiB: comfortably admits standard 4-bit MoE layers
+    /// (tens of MB fused) while refusing to double giant routed expert banks
+    /// (Ling MXFP4's fused gate+up is ~1 GiB per layer, which doubled the
+    /// production footprint without being required for correctness).
+    /// Ported from reference vmlx-swift-lm (98fbb3a).
+    private static func fusedGateUpCacheByteLimit() -> Int {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["VMLX_FUSED_GATE_UP_CACHE_LIMIT_BYTES"],
+            let bytes = Int(raw)
+        {
+            return bytes
+        }
+        if let raw = env["VMLX_FUSED_GATE_UP_CACHE_LIMIT_MB"],
+            let mb = Int(raw)
+        {
+            return mb < 0 ? -1 : mb * 1024 * 1024
+        }
+        return 512 * 1024 * 1024
     }
 
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
