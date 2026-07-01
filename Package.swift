@@ -298,13 +298,10 @@ let package = Package(
         // template + tokenizer behavior changes land directly here without
         // a remote fetch. Patches: see Vendor/SwiftTransformers/Sources/.
         .package(path: "Vendor/SwiftTransformers"),
-        // Jinja template engine — used both by SwiftTransformers (chat
-        // templates) and by vMLX engine code directly. Vendored at
-        // Vendor/Jinja from johnmai-dev/Jinja @ 1.3.0. The vendored
-        // SwiftTransformers manifest depends on `path: ../Jinja` so we
-        // run a single Jinja implementation across the whole tree.
+        // Jinja (Vendor/Jinja, johnmai-dev/Jinja @ 1.3.0) is pulled in by
+        // Vendor/SwiftTransformers via its own `path: ../Jinja` dependency —
+        // no root target imports it directly, so it is not declared here.
         // Patch details in Vendor/Jinja/Sources/Utilities.swift.
-        .package(path: "Vendor/Jinja"),
     ],
     targets: [
 

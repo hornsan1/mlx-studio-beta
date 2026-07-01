@@ -12,7 +12,7 @@
 // Exit code 0 = all checks passed; non-zero = at least one failed.
 
 import Foundation
-@testable import vMLXEngine
+import vMLXEngine
 import vMLXServer
 import vMLXTheme
 import vMLXFluxKit
