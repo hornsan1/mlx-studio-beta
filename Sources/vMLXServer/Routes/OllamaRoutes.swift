@@ -546,10 +546,15 @@ public enum OllamaRoutes {
             // Non-streaming: collect into a single JSON blob.
             var content = ""
             var usage: StreamChunk.Usage? = nil
+            // REVIEW LOW-16 (2026-07-01): capture the real finish reason so
+            // `length` truncation isn't misreported as `stop`. Previously
+            // hardcoded to "stop"; /api/chat already does this correctly.
+            var finishReason: String? = nil
             do {
                 for try await chunk in upstream {
                     if let c = chunk.content { content += c }
                     if let u = chunk.usage { usage = u }
+                    if let fr = chunk.finishReason { finishReason = fr }
                 }
             } catch let err as EngineError {
                 return OpenAIRoutes.mapEngineError(err)
@@ -561,7 +566,7 @@ public enum OllamaRoutes {
                 "created_at": ISO8601DateFormatter().string(from: Date()),
                 "response": content,
                 "done": true,
-                "done_reason": "stop",
+                "done_reason": finishReason ?? "stop",
             ]
             // iter-64: share the timing-envelope helper with the NDJSON
             // streaming encoders so non-stream + stream emit identical

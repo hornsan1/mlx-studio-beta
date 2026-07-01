@@ -329,12 +329,13 @@ struct ChatSettingsPopover: View {
                     set: { draft.maxToolIterations = $0; writeBack() }
                 ), range: 1...32, traceKey: "maxToolIterations",
                    fallback: { 8 })
-                toggleRow("Built-in Tools Enabled",
+                toggleRow(AppCopy.allowToolCallingLabel,
                           value: Binding(
                             get: { draft.builtinToolsEnabled },
                             set: { draft.builtinToolsEnabled = $0; writeBack() }
                           ),
-                          traceKey: "builtinToolsEnabled")
+                          traceKey: "builtinToolsEnabled",
+                          footnote: AppCopy.allowToolCallingFootnote)
                 toggleRow("Hide Tool Status",
                           value: Binding(
                             get: { draft.hideToolStatus },
@@ -531,7 +532,8 @@ struct ChatSettingsPopover: View {
 
     private func toggleRow(_ title: String,
                            value: Binding<Bool?>,
-                           traceKey: String) -> some View {
+                           traceKey: String,
+                           footnote: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(title).font(Theme.Typography.body)
@@ -553,6 +555,14 @@ struct ChatSettingsPopover: View {
                 .pickerStyle(.segmented)
                 .frame(width: 180)
                 .labelsHidden()
+            }
+            // Optional clarifying caption (REVIEW MED-10) — used to explain
+            // toggles whose effect depends on other settings.
+            if let footnote {
+                Text(footnote)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.textLow)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             tierChipRow(traceKey: traceKey,
                         isChatSet: value.wrappedValue != nil) {

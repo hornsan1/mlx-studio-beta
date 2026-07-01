@@ -26,7 +26,7 @@ LOG="$REPORTS/run-ui-$TS.log"
 mode=${1:-all}
 panel_app=/Applications/vMLX.app
 swift_app=/Applications/vMLX-Swift.app
-swift_bin="$REPO_ROOT/.build/arm64-apple-macosx/release/vMLX"
+swift_bin="$REPO_ROOT/.build/arm64-apple-macosx/release/MLXStudio"
 ax="$HERE/swift-axdriver/.build/release/vmlx-axdriver"
 
 note() { echo "[run-ui $(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
@@ -68,11 +68,11 @@ test_panel() {
 test_swift() {
     note "swift: ensure clean state"
     pkill -9 -f "vMLX-Swift" 2>/dev/null || true
-    pkill -9 -x "vMLX" 2>/dev/null || true
+    pkill -9 -x "MLXStudio" 2>/dev/null || true
     sleep 1
 
     if [ ! -x "$swift_bin" ]; then
-        note "swift: building (.build/release/vMLX missing)"
+        note "swift: building (.build/release/MLXStudio missing)"
         (cd "$REPO_ROOT" && swift build -c release 2>&1 | tail -3) | tee -a "$LOG"
     fi
 
@@ -106,7 +106,7 @@ test_swift() {
     note "swift: stop"
     kill -TERM "$SWIFT_PID" 2>/dev/null || true
     sleep 1
-    pkill -9 -x "vMLX" 2>/dev/null || true
+    pkill -9 -x "MLXStudio" 2>/dev/null || true
 }
 
 # ── Run ──────────────────────────────────────────────────────────────────────

@@ -58,7 +58,7 @@
 //     everything else requires stop+start on the session. Examples:
 //       defaultHost, defaultPort, defaultLAN (per-global default),
 //       SessionSettings.host/port/lan, rateLimitPerMinute (live-swap TBD),
-//       allowedOrigins / corsOrigins (live-swap TBD), tlsKeyPath /
+//       corsOrigins (live-swap TBD), tlsKeyPath /
 //       tlsCertPath, gatewayEnabled / gatewayPort / gatewayLAN.
 //
 // Any new field added to these structs MUST be placed in the correct
@@ -107,7 +107,16 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     public var defaultPort: Int = 8000             // cli.py --port
     public var defaultLAN: Bool = false            // convenience toggle: true → 0.0.0.0
     public var defaultLogLevel: String = "info"    // cli.py --log-level
-    public var allowedOrigins: [String] = ["*"]    // cli.py --allowed-origins / CORS
+    // NOTE (REVIEW HIGH-5, 2026-07-01): the former `allowedOrigins` field
+    // was removed here. It was a dead duplicate of `corsOrigins` (below) —
+    // no consumer ever read `GlobalSettings.allowedOrigins`; every CORS
+    // binding site (Server/GatewayServer/HTTPServerActor) reads
+    // `corsOrigins` and passes it as the server API's `allowedOrigins:`
+    // parameter. Keeping both invited a security footgun: a user editing
+    // `allowedOrigins` in a settings blob saw no effect. `corsOrigins` is
+    // the single source of truth. Old persisted blobs that still carry an
+    // `allowedOrigins` key decode fine — synthesized Decodable ignores
+    // unknown keys.
 
     // MARK: Gateway (multi-engine multiplexer, UI-9)
     /// When true, vMLX binds an additional Hummingbird listener that
@@ -207,7 +216,11 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     // created session lands on TurboQuant without the picker silently
     // mapping "none" → "q8".
     public var kvCacheQuantization: String = "turboquant"  // cli.py --kv-cache-quantization: q4|q8|turboquant
-    public var kvCacheGroupSize: Int = 64            // cli.py --kv-cache-group-size
+    // REVIEW LOW-19 ORPHAN (2026-07-01): settable (CLI --kv-cache-group-size,
+    // forwarded into LoadOptions) but no Swift consumer reads it — the KV
+    // quantizer does not currently parameterize its group size from this
+    // field. Verified no reader outside the settings/LoadOptions plumbing.
+    public var kvCacheGroupSize: Int = 64            // cli.py --kv-cache-group-size (ORPHAN)
 
     // Disk caches.
     //
@@ -382,7 +395,11 @@ public struct GlobalSettings: Codable, Sendable, Equatable {
     // Speculative / PLD
     public var enableJit: Bool = false            // cli.py --enable-jit
     public var speculativeModel: String = ""      // cli.py --speculative-model
-    public var numDraftTokens: Int = 3            // cli.py --num-draft-tokens default=3
+    // REVIEW LOW-19 ORPHAN (2026-07-01): no Swift consumer reads this global.
+    // Speculative decoding in the Swift engine is driven by the `dflash*`
+    // settings (JANG-DFlash), not this Python-parity field. Verified no
+    // `.numDraftTokens` read in vMLXEngine.
+    public var numDraftTokens: Int = 3            // cli.py --num-draft-tokens default=3 (ORPHAN)
     public var enablePld: Bool = false            // cli.py --enable-pld
     public var pldSummaryInterval: Int = 487      // cli.py --pld-summary-interval default=487
 

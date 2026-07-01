@@ -807,6 +807,17 @@ public final class Flux1Schnell: ImageGenerator, @unchecked Sendable {
 
         let total = scheduler.stepCount
         let startedAt = Date()
+        // REVIEW MED-8: build the Flux axial RoPE once (it's step-invariant)
+        // from the patch grid + text length, and thread it into the DiT.
+        let headDim = transformer.config.dim / transformer.config.numHeads
+        let ropeGridH = request.height / (8 * transformer.config.patchSize)
+        let ropeGridW = request.width / (8 * transformer.config.patchSize)
+        let rope = FluxRoPE(
+            headDim: headDim,
+            textLen: t5Embed.dim(1),
+            latentH: ropeGridH,
+            latentW: ropeGridW
+        )
         for step in 0..<total {
             if Task.isCancelled { continuation.yield(.cancelled); return }
             let imgPatched = patchify(
@@ -821,7 +832,7 @@ public final class Flux1Schnell: ImageGenerator, @unchecked Sendable {
                 pooledClip: pooledClip,
                 timestep: timestep,
                 guidance: nil,
-                rope: nil
+                rope: rope
             )
             let velocity = unpatchify(
                 velocityPatched,
@@ -992,6 +1003,13 @@ public final class Flux1Dev: ImageGenerator, @unchecked Sendable {
 
         let total = scheduler.stepCount
         let startedAt = Date()
+        // REVIEW MED-8: Flux axial RoPE (step-invariant), built from the grid.
+        let devHeadDim = transformer.config.dim / transformer.config.numHeads
+        let devRope = FluxRoPE(
+            headDim: devHeadDim,
+            textLen: t5Embed.dim(1),
+            latentH: request.height / (8 * transformer.config.patchSize),
+            latentW: request.width / (8 * transformer.config.patchSize))
         for step in 0..<total {
             if Task.isCancelled { continuation.yield(.cancelled); return }
             let imgPatched = patchify(
@@ -1006,7 +1024,7 @@ public final class Flux1Dev: ImageGenerator, @unchecked Sendable {
                 pooledClip: pooledClip,
                 timestep: timestep,
                 guidance: guidance,
-                rope: nil
+                rope: devRope
             )
             let velocity = unpatchify(
                 velocityPatched,

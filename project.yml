@@ -47,18 +47,23 @@ targets:
     info:
       path: vMLX/Info.plist
       properties:
-        CFBundleName: vMLX
-        CFBundleDisplayName: vMLX
+        # REVIEW HIGH-4 (2026-07-01): the user-facing product is "MLX Studio".
+        # PRODUCT_NAME / bundle id / DEVELOPMENT_TEAM stay on the vMLX/Jang
+        # signing identity (working notarization pipeline; vMLX is the
+        # baked-in runtime) — only the user-visible name + copyright converge
+        # on the MLX Studio product identity.
+        CFBundleName: MLX Studio
+        CFBundleDisplayName: MLX Studio
         CFBundleIdentifier: ai.jangq.vmlx
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.developer-tools
-        NSHumanReadableCopyright: "© 2026 Jinho Jang"
+        NSHumanReadableCopyright: "© 2026 DeAlign"
         # TCC usage descriptions — without these, macOS 14+ silently
         # denies access to the corresponding resource. Audit 2026-04-15.
-        NSLocalNetworkUsageDescription: "vMLX serves OpenAI/Ollama/Anthropic-compatible HTTP endpoints. Allow Local Network access so other devices on your Wi-Fi can reach the API server when LAN binding is enabled in Server settings."
-        NSAppleEventsUsageDescription: "vMLX uses Apple Events to reveal files in Finder and to coordinate with the system terminal when you run shell commands from Terminal mode."
-        NSMicrophoneUsageDescription: "vMLX needs microphone access if you record voice prompts for transcription via Whisper."
-        NSDownloadsFolderUsageDescription: "vMLX may save generated images and exported chats to your Downloads folder."
+        NSLocalNetworkUsageDescription: "MLX Studio serves OpenAI/Ollama/Anthropic-compatible HTTP endpoints. Allow Local Network access so other devices on your Wi-Fi can reach the API server when LAN binding is enabled in Server settings."
+        NSAppleEventsUsageDescription: "MLX Studio uses Apple Events to reveal files in Finder and to coordinate with the system terminal when you run shell commands from Terminal mode."
+        NSMicrophoneUsageDescription: "MLX Studio needs microphone access if you record voice prompts for transcription via Whisper."
+        NSDownloadsFolderUsageDescription: "MLX Studio may save generated images and exported chats to your Downloads folder."
         # Bonjour service browsing — used to discover other vMLX
         # instances on the local network for inference forwarding.
         NSBonjourServices:

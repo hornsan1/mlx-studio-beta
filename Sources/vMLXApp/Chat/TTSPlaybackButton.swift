@@ -11,7 +11,13 @@
 //
 // Flow:
 //   1. Tap → POST /v1/audio/speech with the assistant message text.
-//   2. Server returns wav bytes (Kokoro TTS via vMLX-side EngineTTS).
+//   2. Server returns wav bytes from EngineTTS. NOTE: the neural Kokoro
+//      backend is not live yet — the server currently ships
+//      `PlaceholderSynth`, which returns deterministic tone bursts, and
+//      advertises this via the `X-vMLX-TTS-Backend: placeholder-tone`
+//      response header. We read that header and reflect the real backend
+//      in the button's help text so the UI never claims "speech" when the
+//      user is actually hearing a placeholder tone (REVIEW HIGH-3).
 //   3. AVAudioPlayer plays the buffer; tap again to stop early.
 //
 // Defaults match the panel: model = "kokoro", voice = "af_heart",
@@ -28,6 +34,11 @@ final class TTSPlaybackController: NSObject, ObservableObject, AVAudioPlayerDele
     @Published var isPlaying = false
     @Published var isFetching = false
     @Published var lastError: String?
+    /// The backend the server actually used, from `X-vMLX-TTS-Backend`.
+    /// nil until the first successful request. Values: "kokoro" (real
+    /// neural speech) or "placeholder-tone…" (deterministic tone, NOT
+    /// speech). Drives honest help text (REVIEW HIGH-3).
+    @Published var backend: String?
 
     private var player: AVAudioPlayer?
     private var task: Task<Void, Never>?
@@ -75,6 +86,9 @@ final class TTSPlaybackController: NSObject, ObservableObject, AVAudioPlayerDele
                         self.lastError = "TTS HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1): \(snippet)"
                         return
                     }
+                    // Record the real backend so the UI can be honest about
+                    // whether the user is hearing speech or a placeholder tone.
+                    self.backend = http.value(forHTTPHeaderField: "X-vMLX-TTS-Backend")
                     do {
                         let p = try AVAudioPlayer(data: data)
                         p.delegate = self
@@ -142,9 +156,29 @@ struct TTSPlaybackButton: View {
         return controller.isPlaying ? "stop.circle" : "speaker.wave.2"
     }
 
+    private var isPlaceholderBackend: Bool {
+        (controller.backend ?? "").hasPrefix("placeholder")
+    }
+
     private var helpText: String {
         if let err = controller.lastError { return err }
-        if controller.isFetching { return "Generating speech…" }
-        return controller.isPlaying ? "Stop playback" : "Read aloud (Kokoro TTS)"
+        // Honest labeling (REVIEW HIGH-3): the neural Kokoro backend is not
+        // live yet. Only claim "speech" once the server reports a real
+        // backend; otherwise say it's a placeholder tone.
+        if controller.isFetching {
+            return isPlaceholderBackend ? "Generating placeholder tone…" : "Generating audio…"
+        }
+        if controller.isPlaying {
+            return isPlaceholderBackend ? "Stop (placeholder tone — not speech yet)" : "Stop playback"
+        }
+        switch controller.backend {
+        case .some(let b) where b.hasPrefix("placeholder"):
+            return "Play placeholder tone (neural TTS not available yet)"
+        case .some("kokoro"):
+            return "Read aloud (Kokoro TTS)"
+        default:
+            // Backend unknown until first request — don't over-promise.
+            return "Read aloud"
+        }
     }
 }

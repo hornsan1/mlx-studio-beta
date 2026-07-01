@@ -167,15 +167,25 @@ public final class ZImage: ImageGenerator, @unchecked Sendable {
         let promptIds = tokenizer.encode(request.prompt)
         let idsArray = MLXArray(promptIds.map { Int32($0) }).reshaped([1, promptIds.count])
         let encoderOut = textEncoder(inputIds: idsArray, attentionMask: nil)
-        // Truncate / pad to the placeholder DiT's expected (1, nTxt, textDim)
-        // so the unchanged FluxDiT forward signature still works.
+        // REVIEW MED-7: actually CONSUME the encoded prompt. Previously
+        // `txtEmb`/`pooledClip` were hardcoded to zeros, so the prompt had no
+        // effect (prompt-independent output). Adapt the real encoder features
+        // into the DiT's expected shapes so the conditioning is prompt-
+        // dependent. (Full Z-Image DiT quality still needs its native weights;
+        // this fixes the ignored-prompt defect.)
         let nTxt = 256
         let textDim = transformer.config.textDim
-        let txtEmb = MLXArray.zeros([1, nTxt, textDim])
-        _ = encoderOut  // wired but not yet consumed by the placeholder DiT
-        let pooledClip = MLXArray.zeros([1, 768])
+        let (txtEmb, pooledClip) = TextConditioningAdapter.adapt(
+            encoderOut: encoderOut, nTxt: nTxt, textDim: textDim, pooledDim: 768)
 
         // 4. Sampling loop — real FluxDiT forward pass per step.
+        // REVIEW MED-8: build the Flux axial RoPE once from the patch grid.
+        let zHeadDim = transformer.config.dim / transformer.config.numHeads
+        let zRope = FluxRoPE(
+            headDim: zHeadDim,
+            textLen: nTxt,
+            latentH: request.height / (8 * transformer.config.patchSize),
+            latentW: request.width / (8 * transformer.config.patchSize))
         let total = scheduler.stepCount
         let startedAt = Date()
         for step in 0..<total {
@@ -197,7 +207,7 @@ public final class ZImage: ImageGenerator, @unchecked Sendable {
                 pooledClip: pooledClip,
                 timestep: timestep,
                 guidance: nil,
-                rope: nil
+                rope: zRope
             )
             // Unpatchify back to spatial (B, 16, H/8, W/8).
             let velocity = unpatchify(

@@ -1256,10 +1256,17 @@ public enum OpenAIRoutes {
                 let sttTotalMs = Date().timeIntervalSince(sttStart) * 1000
                 let totalMsHeader = String(format: "%.2f", sttTotalMs)
                 let text = (result["text"] as? String) ?? ""
+                // REVIEW MED-12: surface 30s truncation to the caller. The
+                // JSON formats carry `truncated` in the body (verbose_json
+                // via result passthrough, default json explicitly); the
+                // plain-text formats (text/srt/vtt) carry it via the
+                // `X-vMLX-Whisper-Truncated` header.
+                let truncated = (result["truncated"] as? Bool) ?? false
                 switch responseFormat.lowercased() {
                 case "text":
                     var headers: HTTPFields = [.contentType: "text/plain; charset=utf-8"]
                     headers[HTTPField.Name("X-vMLX-Whisper-TotalMs")!] = totalMsHeader
+                    if truncated { headers[HTTPField.Name("X-vMLX-Whisper-Truncated")!] = "true" }
                     return Response(
                         status: .ok,
                         headers: headers,
@@ -1269,6 +1276,7 @@ public enum OpenAIRoutes {
                     let body = Self.singleCueSRT(text: text, duration: dur)
                     var headers: HTTPFields = [.contentType: "application/x-subrip"]
                     headers[HTTPField.Name("X-vMLX-Whisper-TotalMs")!] = totalMsHeader
+                    if truncated { headers[HTTPField.Name("X-vMLX-Whisper-Truncated")!] = "true" }
                     return Response(
                         status: .ok,
                         headers: headers,
@@ -1278,6 +1286,7 @@ public enum OpenAIRoutes {
                     let body = Self.singleCueVTT(text: text, duration: dur)
                     var headers: HTTPFields = [.contentType: "text/vtt"]
                     headers[HTTPField.Name("X-vMLX-Whisper-TotalMs")!] = totalMsHeader
+                    if truncated { headers[HTTPField.Name("X-vMLX-Whisper-Truncated")!] = "true" }
                     return Response(
                         status: .ok,
                         headers: headers,
@@ -1318,6 +1327,8 @@ public enum OpenAIRoutes {
                         "text": text,
                         // iter-136 §211 — body field parity.
                         "total_ms": sttTotalMs,
+                        // REVIEW MED-12 — surface 30s truncation to callers.
+                        "truncated": truncated,
                     ])
                 }
             } catch let err as EngineError {

@@ -916,10 +916,15 @@ final class ChatViewModel {
             // applyChunk renders them as InlineToolCallCard UI.
             //
             // Default is OFF: users opt in via ChatSettingsPopover →
-            // "Tools". Enabling "Shell tool" turns on bash specifically;
-            // enabling "Builtin tools" is the umbrella flag that also
-            // pulls in MCP / file / search tools when the engine wires
-            // them up.
+            // "Tools". Enabling "Shell tool" adds the bash tool schema.
+            // "Allow tool calling" (builtinToolsEnabled) is the master
+            // switch: it flips tool_choice to .auto so the model MAY call
+            // tools, which lets Stream.swift merge in connected MCP server
+            // tools. It does not itself add a tool schema — the tools come
+            // from Shell (bash) and/or MCP. With shell off and no MCP
+            // servers there is nothing to offer, which is expected; the
+            // toggle's footnote in ChatSettingsPopover states this
+            // (REVIEW MED-10).
             let shellOn = chatOverrides?.shellEnabled ?? false
             let builtinOn = chatOverrides?.builtinToolsEnabled ?? false
             let toolsEnabled = shellOn || builtinOn
@@ -985,6 +990,18 @@ final class ChatViewModel {
                 return [sys] + reqMessages
             }()
 
+            // NOTE (sampling precedence): `r` is the 4-tier RESOLVED
+            // snapshot — `SettingsStore.resolved` already folds
+            // chat → session → global for temperature/topP/topK/minP/
+            // repetitionPenalty/maxTokens (see SettingsStore.swift
+            // "Inference overrides (request > chat > session > global)").
+            // So `r.defaultTemperature` et al. ALREADY carry the per-chat
+            // ChatSettingsPopover slider value; reading them here is
+            // correct and the sliders are live. Do NOT "fix" this to
+            // `chatOverrides?.temperature ?? r.default…` — that is
+            // redundant. Only reasoningEffort/stopSequences (below) are
+            // read from `chatOverrides` directly because the resolver
+            // does not fold those two fields.
             var req = ChatRequest(
                 model: modelField,
                 messages: effectiveMessages,

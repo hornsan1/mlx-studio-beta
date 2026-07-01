@@ -84,6 +84,57 @@ final class SamplingFallbackPriorityTests: XCTestCase {
         XCTAssertEqual(r.resolutionTrace["defaultTemperature"], .request)
     }
 
+    /// CHAT-tier fold (REVIEW-2026-07-01 HIGH-1 guard). The in-app chat
+    /// path (ChatViewModel.send) reads `resolved.settings.default*` for
+    /// sampling rather than the raw chat override, relying on the resolver
+    /// to fold the chat tier. This proves that fold happens so the
+    /// per-chat ChatSettingsPopover sliders are NOT inert. If this ever
+    /// regresses, the sliders silently stop affecting generation.
+    func testTraceSaysChatWhenChatOverrides() async throws {
+        let url = tempDBPath()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SettingsStore(database: SettingsDB(customPath: url))
+
+        let chatId = UUID()
+        var c = ChatSettings()
+        c.temperature = 1.7
+        c.topP = 0.42
+        c.topK = 11
+        c.maxTokens = 4242
+        await store.setChat(chatId, c)
+
+        let r = await store.resolved(sessionId: nil, chatId: chatId, request: nil)
+        XCTAssertEqual(r.temperature, 1.7, accuracy: 1e-9,
+                       "Chat temperature must surface through resolved.temperature")
+        XCTAssertEqual(r.settings.defaultTopP, 0.42, accuracy: 1e-9)
+        XCTAssertEqual(r.settings.defaultTopK, 11)
+        XCTAssertEqual(r.settings.defaultMaxTokens, 4242)
+        XCTAssertEqual(r.resolutionTrace["defaultTemperature"], .chat,
+                       "Chat-sourced temperature must trace to .chat")
+    }
+
+    /// chat > session priority: chat tier beats session for the same field.
+    func testChatOverridesSessionPriority() async throws {
+        let url = tempDBPath()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SettingsStore(database: SettingsDB(customPath: url))
+
+        let sid = UUID()
+        var s = SessionSettings(modelPath: URL(fileURLWithPath: "/dev/null"))
+        s.defaultTemperature = 0.6
+        await store.setSession(sid, s)
+
+        let chatId = UUID()
+        var c = ChatSettings()
+        c.temperature = 1.25
+        await store.setChat(chatId, c)
+
+        let r = await store.resolved(sessionId: sid, chatId: chatId, request: nil)
+        XCTAssertEqual(r.temperature, 1.25, accuracy: 1e-9,
+                       "Chat must beat session in cascade")
+        XCTAssertEqual(r.resolutionTrace["defaultTemperature"], .chat)
+    }
+
     /// request > session priority: if BOTH set, request wins and trace
     /// records `.request`.
     func testRequestOverridesSessionPriority() async throws {

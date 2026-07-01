@@ -351,7 +351,7 @@ struct SessionConfigForm: View {
         // — memory-frugal mode for long-running summarization on small
         // RAM. Models without sliding_window in their config ignore
         // this setting (no RotatingKVCache to swap).
-        Picker("Sliding window", selection: Binding(
+        Picker(AppCopy.slidingWindowSessionLabel, selection: Binding(
             get: { s.slidingWindowMode ?? globalDefaults.slidingWindowMode },
             set: { s.slidingWindowMode = $0; commit() }
         )) {
@@ -366,9 +366,15 @@ struct SessionConfigForm: View {
                                              default: globalDefaults.slidingWindowSize),
                            range: 256...262144, step: 256)
         }
-        Text("Auto: trust the model's training distribution. " +
-             "Long: ignore the model's window (helps thinking models " +
-             "drifting past 128 tokens). Bounded: hard cap memory.")
+        // REVIEW MED-9 (2026-07-01): honest labeling. The Swift engine does
+        // NOT yet consume slidingWindowMode/slidingWindowSize — no cache or
+        // model code reads the resolved LoadOptions value; models always use
+        // their own `config.json::sliding_window` ("Auto" behavior). The
+        // setting persists + resolves through all four tiers, so wiring it
+        // is a drop-in follow-up, but until then Long/Bounded have no effect.
+        // (Same honesty convention as the "Smelt mode (Python engine only)"
+        // label.)
+        Text(AppCopy.slidingWindowCaption)
             .font(.caption)
             .foregroundStyle(.secondary)
     }

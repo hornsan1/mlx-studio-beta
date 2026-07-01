@@ -178,7 +178,7 @@ public final class FluxDoubleStreamBlock: Module {
     ///   - vec: (B, D) pooled conditioning vector (time + pooled CLIP + guidance).
     ///   - rope: optional rotary embedding applied to Q and K for BOTH streams.
     public func callAsFunction(
-        img: MLXArray, txt: MLXArray, vec: MLXArray, rope: RoPE2D?
+        img: MLXArray, txt: MLXArray, vec: MLXArray, rope: FluxRoPE?
     ) -> (img: MLXArray, txt: MLXArray) {
         let imgMods = imgMod(vec)   // 2 triples: attn, mlp
         let txtMods = txtMod(vec)
@@ -200,15 +200,16 @@ public final class FluxDoubleStreamBlock: Module {
         // Joint attention: concat text + image tokens along seq axis,
         // run attention, split back. RoPE applies to image tokens only.
         // Shape: (B, H, N_txt + N_img, D_head)
-        let q = concatenated([txtQn, imgQn], axis: 2)
-        let k = concatenated([txtKn, imgKn], axis: 2)
+        var q = concatenated([txtQn, imgQn], axis: 2)
+        var k = concatenated([txtKn, imgKn], axis: 2)
         let v = concatenated([txtV, imgV], axis: 2)
 
-        // Apply RoPE only to the image slice. Here we simplify by
-        // skipping RoPE on text tokens (they get their own positional
-        // bands in the full Flux impl — adding that is a ~30-line extension
-        // when we wire per-model hyperparameters).
-        _ = rope  // TODO: split q/k, rope image half, reassemble
+        // REVIEW MED-8: apply Flux axial RoPE to the full concatenated
+        // [text, image] Q/K (text tokens sit at position 0 → identity).
+        if let rope {
+            q = rope.apply(q)
+            k = rope.apply(k)
+        }
 
         let attnOut = scaledDotProductAttention(q: q, k: k, v: v, rope: nil)
         // (B, H, N_total, D_head) → (B, N_total, D)
@@ -275,7 +276,7 @@ public final class FluxSingleStreamBlock: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, vec: MLXArray, rope: RoPE2D?
+        _ x: MLXArray, vec: MLXArray, rope: FluxRoPE?
     ) -> MLXArray {
         let mods = mod(vec)
         let triple = mods[0]
@@ -288,9 +289,13 @@ public final class FluxSingleStreamBlock: Module {
         let mlpIn = out[.ellipsis, (dim * 3) ..< (dim * 3 + mlpDim)]
 
         let (q, k, v) = splitQKV(qkv, numHeads: numHeads)
-        let (qn, kn) = qkNorm(q: q, k: k)
+        var (qn, kn) = qkNorm(q: q, k: k)
 
-        _ = rope  // TODO: apply to qn/kn when per-model RoPE config lands
+        // REVIEW MED-8: apply Flux axial RoPE to the merged-sequence Q/K.
+        if let rope {
+            qn = rope.apply(qn)
+            kn = rope.apply(kn)
+        }
         let attn = scaledDotProductAttention(q: qn, k: kn, v: v, rope: nil)
         // (B, H, N, D_head) → (B, N, D)
         let attnMerged = attn.transposed(0, 2, 1, 3).reshaped([
@@ -527,7 +532,7 @@ public final class FluxDiTModel: Module {
         pooledClip: MLXArray,
         timestep: MLXArray,
         guidance: MLXArray? = nil,
-        rope: RoPE2D? = nil
+        rope: FluxRoPE? = nil
     ) -> MLXArray {
         // 1. Project image patches to model dim.
         var img = imgIn(imgPatched)

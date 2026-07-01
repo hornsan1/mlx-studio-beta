@@ -37,6 +37,15 @@ public actor Engine {
         public var maxNumSeqs: Int = 5
         public var prefillStepSize: Int = 1024
         public var maxCacheBlocks: Int = 500
+        // Paged-cache config — added 2026-07-01 (REVIEW HIGH-2). Previously
+        // `setupCacheCoordinator` read these from `settings.global()`, which
+        // dropped per-session overrides (SessionConfigForm writes them to the
+        // session tier). Forwarding through LoadOptions(from: resolved) lets
+        // the coordinator honor the resolved per-session snapshot. Defaults
+        // mirror GlobalSettings so bare `LoadOptions(modelPath:)` construction
+        // (CLI chat/embedding subcommands) preserves prior behavior.
+        public var usePagedCache: Bool = true
+        public var pagedCacheBlockSize: Int = 64
         // TurboQuant KV compression: default-OFF (perf audit 2026-04-16).
         // Measured impact of flipping to default-off: Nemotron-Cascade-2-30B
         // A3B 2.4 → 59.8 tok/s (25× speedup), Gemma-4-26B-A4B 34.9 → 49.0
@@ -61,6 +70,11 @@ public actor Engine {
         // Cache stack — added 2026-04-15: silently ignored before because
         // SettingsStore.LoadOptions(from:) didn't forward these.
         public var enableMemoryCache: Bool = true
+        // Memory-cache tuning — added 2026-07-01 (REVIEW HIGH-2), same
+        // per-session-drop rationale as usePagedCache above. Defaults mirror
+        // GlobalSettings (0.20 / 0).
+        public var memoryCachePercent: Double = 0.20
+        public var memoryCacheTTLMinutes: Double = 0
         public var enableDiskCache: Bool = true
         public var diskCacheDir: String = ""
         public var diskCacheMaxGB: Double = 10.0
@@ -735,6 +749,15 @@ public actor Engine {
         // happens automatically via `executeTool`.
         await mcp.stopAll()
         await mcp.setConfig(cfg)
+    }
+
+    /// Disable MCP entirely: stop any running servers and install an empty
+    /// config so no tools are discovered or dispatched. Used by the CLI
+    /// `--no-mcp` flag (REVIEW LOW-18) to override auto-discovered
+    /// `mcp.json` / `VMLX_MCP_CONFIG` servers.
+    public func clearMCP() async {
+        await mcp.stopAll()
+        await mcp.setConfig(MCPConfig())
     }
 
     /// Apply a new global settings snapshot. Updates the idle timer config
@@ -1794,16 +1817,21 @@ public actor Engine {
     /// max blocks, disk cache toggle + dir + size. Passes through to
     /// `vMLXLMCommon.generate(..., cacheCoordinator:)` on every stream.
     private func setupCacheCoordinator(opts: LoadOptions) async {
-        let g = await settings.global()
+        // REVIEW HIGH-2 (2026-07-01): read cache config from `opts` — which
+        // the caller built via `LoadOptions(from: resolved)` — NOT from
+        // `settings.global()`. The old global read silently dropped
+        // per-session cache overrides set in SessionConfigForm (block count,
+        // paged/memory/disk sizing, TTL), because those live on the session
+        // tier and the resolver folds them into the snapshot `opts` carries.
         var cfg = CacheCoordinatorConfig()
-        cfg.usePagedCache = g.usePagedCache && g.enablePrefixCache
-        cfg.pagedBlockSize = g.pagedCacheBlockSize
-        cfg.maxCacheBlocks = g.maxCacheBlocks
+        cfg.usePagedCache = opts.usePagedCache && opts.enablePrefixCache
+        cfg.pagedBlockSize = opts.pagedCacheBlockSize
+        cfg.maxCacheBlocks = opts.maxCacheBlocks
         // PROMPT-LEVEL L2 disk cache — keyed by token sequence hash,
         // stores per-prompt KV arrays via `DiskCache`. Reads from
-        // `g.enableDiskCache` / `g.diskCacheDir` / `g.diskCacheMaxGB`
-        // which is what the CLI `--enable-disk-cache` flag and the
-        // SwiftUI API tab toggle both write to.
+        // `opts.enableDiskCache` / `opts.diskCacheDir` / `opts.diskCacheMaxGB`
+        // (resolved per-session), which is what the CLI `--enable-disk-cache`
+        // flag and the SwiftUI API tab toggle both write to.
         //
         // PRIOR BUG: this used to read `g.enableBlockDiskCache` +
         // `g.blockDiskCache{Dir,MaxGB}` — fields that exist for
@@ -1839,7 +1867,7 @@ public actor Engine {
         // can decide BEFORE constructing CacheCoordinator. Same source
         // (CapabilityDetector → ModelCapabilities.cacheType).
         let isHybridForDisk = self.modelCapabilities?.cacheType == "hybrid"
-        let userWantsDisk = g.enableDiskCache
+        let userWantsDisk = opts.enableDiskCache
         // L2 disk cache: ALL model classes supported (verified live
         // 2026-04-13 PM). The v2 unified format from vmlx-swift-lm@14457d1
         // handles plain LLM (KVCacheSimple), hybrid SSM (Mamba per-layer
@@ -1871,13 +1899,13 @@ public actor Engine {
         // KVCacheSimple): T1 store, T2 restart, **19/19 prompt tokens
         // restored from disk**, coherent generation.
         cfg.enableDiskCache = userWantsDisk
-        cfg.diskCacheMaxGB = Float(g.diskCacheMaxGB)
-        if !g.diskCacheDir.isEmpty {
-            cfg.diskCacheDir = URL(fileURLWithPath: g.diskCacheDir)
+        cfg.diskCacheMaxGB = Float(opts.diskCacheMaxGB)
+        if !opts.diskCacheDir.isEmpty {
+            cfg.diskCacheDir = URL(fileURLWithPath: opts.diskCacheDir)
         }
-        cfg.enableMemoryCache = g.enableMemoryCache
-        cfg.memoryCachePercent = g.memoryCachePercent
-        cfg.memoryCacheTTLMinutes = g.memoryCacheTTLMinutes
+        cfg.enableMemoryCache = opts.enableMemoryCache
+        cfg.memoryCachePercent = opts.memoryCachePercent
+        cfg.memoryCacheTTLMinutes = opts.memoryCacheTTLMinutes
         // Surface the locals in the log so we can still see model class.
         _ = isVL
         _ = isHybridForDisk
@@ -1908,7 +1936,7 @@ public actor Engine {
         //     the user's choice — they might be debugging or avoiding
         //     the companion for a specific reason).
         //   • non-hybrid model → always off (nothing to gate).
-        let companionOn = isHybrid && g.enableSSMCompanion
+        let companionOn = isHybrid && opts.enableSSMCompanion
         if companionOn {
             coord.setHybrid(true)
         } else if isHybrid {
@@ -1923,7 +1951,7 @@ public actor Engine {
         // actual gate happens in `Stream.buildGenerateParameters` so
         // every request inherits the exclusion regardless of how the
         // setting flips at runtime.
-        if self.modelCapabilities?.cacheType == "mla" && g.enableTurboQuant {
+        if self.modelCapabilities?.cacheType == "mla" && opts.enableTurboQuant {
             await logs.append(
                 .info, category: "cache",
                 "MLA model detected — TurboQuant disabled for this load (MLA uses native latent KV; TQ would silently no-op).")

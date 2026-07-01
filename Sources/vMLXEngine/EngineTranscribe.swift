@@ -151,12 +151,27 @@ extension Engine {
             .info, category: "whisper",
             "transcribed \(String(format: "%.1f", result.durationSeconds))s → \(result.tokens.count) tokens")
 
+        // REVIEW MED-12 (2026-07-01): the decoder only processes the first
+        // 30s and drops the tail. Previously this was signalled only by a
+        // stderr `print` inside WhisperDecoder — invisible to API callers
+        // and to the in-app log. Surface it: (a) a structured WARNING log
+        // (LogsPanel / RequestLog), and (b) `truncated` + `input_duration`
+        // fields on the response dict so the route can set the
+        // `X-vMLX-Whisper-Truncated` header and callers can detect data loss.
+        if result.truncatedToThirtySeconds {
+            await logs.append(
+                .warn, category: "whisper",
+                "input audio is \(String(format: "%.1f", result.durationSeconds))s but only the first 30s was transcribed; the tail was dropped (chunked decoding not yet implemented)")
+        }
+
         return [
             "text": result.text,
             "language": result.language,
             "duration": result.durationSeconds,
             "task": task,
             "model": loaded.modelDir.lastPathComponent,
+            "truncated": result.truncatedToThirtySeconds,
+            "input_duration": result.durationSeconds,
         ]
     }
 }

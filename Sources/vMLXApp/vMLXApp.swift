@@ -150,7 +150,7 @@ struct MLXStudioApp: App {
         // groups — the default `.menu` style is limited to buttons +
         // submenus. ADDITIVE scene — does not affect the main WindowGroup.
         // Icon tracks `appState.engineState` live.
-        MenuBarExtra("MLX Studio", systemImage: TrayItem.icon(for: appState.engineState)) {
+        MenuBarExtra(AppCopy.productName, systemImage: TrayItem.icon(for: appState.engineState)) {
             TrayItem()
                 .environment(appState)
                 .environment(\.appLocale, uiLocale)

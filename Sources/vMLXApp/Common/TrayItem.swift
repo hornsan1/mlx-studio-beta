@@ -604,11 +604,12 @@ struct TrayItem: View {
                     }
                 }
             }
-            // §403 — sliding-window override picker. Auto = honor model
-            // config; Long = force full-context (escape hatch for
-            // thinking models that drift past their trained window);
-            // Bounded = hard cap of `slidingWindowSize` for memory.
-            LabeledField("Sliding window") {
+            // §403 — sliding-window override picker.
+            // REVIEW MED-9 (2026-07-01): NOT yet wired in the Swift engine —
+            // no cache/model code reads the resolved slidingWindowMode; the
+            // model's own config window is always used (Auto behavior).
+            // Labeled honestly until the runtime consumes it.
+            LabeledField(AppCopy.slidingWindowTrayLabel) {
                 Picker("", selection: Binding(
                     get: { draft.slidingWindowMode },
                     set: { draft.slidingWindowMode = $0; schedulePush() })) {
