@@ -100,21 +100,28 @@ struct MarkdownView: View {
             case .prose(let text, _):
                 return .prose(text)
             case .heading(let level, let text, _):
-                return .prose(String(repeating: "#", count: level) + " " + text)
+                return .prose(MarkdownStructuralPlainText.heading(level: level, text: text))
             case .listItem(let ordered, let index, let indentLevel, let text, _):
-                let indent = String(repeating: "  ", count: indentLevel)
-                if ordered {
-                    return .prose(indent + "\(index ?? 1). " + text)
-                }
-                return .prose(indent + "- " + text)
+                return .prose(
+                    MarkdownStructuralPlainText.listItem(
+                        ordered: ordered,
+                        index: index,
+                        indentLevel: indentLevel,
+                        text: text
+                    )
+                )
             case .taskItem(let checked, let indentLevel, let text, _):
-                let indent = String(repeating: "  ", count: indentLevel)
-                let box = checked ? "[x]" : "[ ]"
-                return .prose(indent + "- \(box) " + text)
+                return .prose(
+                    MarkdownStructuralPlainText.taskItem(
+                        checked: checked,
+                        indentLevel: indentLevel,
+                        text: text
+                    )
+                )
             case .blockquote(let text, _, _):
-                return .prose(text)
+                return .prose(MarkdownStructuralPlainText.blockquote(text))
             case .thematicBreak:
-                return .prose("---")
+                return .prose(MarkdownStructuralPlainText.thematicBreak())
             case .table(let headers, let alignments, let rows, _):
                 return .table(
                     headers: headers,

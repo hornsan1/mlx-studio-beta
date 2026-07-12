@@ -11,7 +11,6 @@
         "blockKinds": [
           "prose",
           "table",
-          "prose",
           "code"
         ],
         "table": {
@@ -105,7 +104,6 @@
       "expect": {
         "blockKinds": [
           "code",
-          "prose",
           "table"
         ],
         "code": {
@@ -452,6 +450,133 @@
             "index": 2,
             "indentLevel": 0,
             "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-paren-marker",
+      "source": "1) a\n2) b",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "a"
+          },
+          {
+            "ordered": true,
+            "index": 2,
+            "indentLevel": 0,
+            "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "task-list-star-marker",
+      "source": "* [ ] todo\n* [x] done",
+      "expect": {
+        "blockKinds": [
+          "taskItem",
+          "taskItem"
+        ],
+        "taskItems": [
+          {
+            "checked": false,
+            "indentLevel": 0,
+            "text": "todo"
+          },
+          {
+            "checked": true,
+            "indentLevel": 0,
+            "text": "done"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-after-heading",
+      "source": "# H\n",
+      "expect": {
+        "blockKinds": [
+          "heading"
+        ],
+        "headings": [
+          {
+            "level": 1,
+            "text": "H"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-between-headings",
+      "source": "# A\n\n# B",
+      "expect": {
+        "blockKinds": [
+          "heading",
+          "heading"
+        ],
+        "headings": [
+          {
+            "level": 1,
+            "text": "A"
+          },
+          {
+            "level": 1,
+            "text": "B"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-trailing-list",
+      "source": "- a\n- b\n",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "a"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-start-at-0",
+      "source": "0. zero\n1. one",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 0,
+            "indentLevel": 0,
+            "text": "zero"
+          },
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "one"
           }
         ]
       }

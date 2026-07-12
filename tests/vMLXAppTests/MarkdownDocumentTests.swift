@@ -264,6 +264,33 @@ final class MarkdownDocumentTests: XCTestCase {
         XCTAssertEqual(i1, 2)
     }
 
+    func testDoesNotEmitWhitespaceOnlyProse() {
+        XCTAssertEqual(parser.parse("# H\n").blocks.map(\.kind), [.heading])
+        XCTAssertEqual(parser.parse("# A\n\n# B").blocks.map(\.kind), [.heading, .heading])
+        XCTAssertEqual(parser.parse("- a\n- b\n").blocks.map(\.kind), [.listItem, .listItem])
+        // Real multi-paragraph prose still keeps internal blank as one block.
+        let multi = parser.parse("para one\n\npara two")
+        XCTAssertEqual(multi.blocks.map(\.kind), [.prose])
+        guard case let .prose(text, _) = multi.blocks[0] else {
+            return XCTFail("expected prose")
+        }
+        XCTAssertTrue(text.contains("para one"))
+        XCTAssertTrue(text.contains("para two"))
+    }
+
+    func testOrderedListHonorsSourceStartZero() {
+        let document = parser.parse("0. zero\n1. one")
+        guard case let .listItem(_, i0, _, t0, _) = document.blocks[0],
+              case let .listItem(_, i1, _, t1, _) = document.blocks[1]
+        else {
+            return XCTFail("expected ordered list items")
+        }
+        XCTAssertEqual(i0, 0)
+        XCTAssertEqual(t0, "zero")
+        XCTAssertEqual(i1, 1)
+        XCTAssertEqual(t1, "one")
+    }
+
     private func goldenCorpusURL() -> URL {
         // tests/vMLXAppTests → tests/e2e/fixtures/markdown-golden.json
         let thisFile = URL(fileURLWithPath: #filePath)

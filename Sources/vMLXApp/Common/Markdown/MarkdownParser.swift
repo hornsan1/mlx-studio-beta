@@ -143,8 +143,9 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         var proseBufferStart: String.Index?
         var proseBufferEnd: String.Index?
         var index = 0
-        // Per-indentLevel ordered counters; 0 means "unset after reset".
-        var orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
+        // Per-indentLevel ordered counters; -1 means "unset after reset".
+        // (0 is a valid source start index for `0.` items.)
+        var orderedCounters = Array(repeating: -1, count: maxListIndentLevel + 1)
 
         func lineEndIndex(at lineIndex: Int) -> String.Index {
             if lineIndex + 1 < lines.count {
@@ -160,22 +161,27 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                 return
             }
             let value = String(text[s..<e])
-            if !value.isEmpty {
-                output.append(
-                    .prose(
-                        text: value,
-                        range: MarkdownSourceIndex.range(in: text, from: s, to: e)
-                    )
-                )
-                // Non-list interruption → reset ordered counters.
-                orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
-            }
             proseBufferStart = nil
             proseBufferEnd = nil
+            // Never emit whitespace-only prose (trailing `\n` after headings/
+            // lists, blank gaps between structural blocks, etc.).
+            if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Gap still interrupts ordered-list sequences.
+                orderedCounters = Array(repeating: -1, count: maxListIndentLevel + 1)
+                return
+            }
+            output.append(
+                .prose(
+                    text: value,
+                    range: MarkdownSourceIndex.range(in: text, from: s, to: e)
+                )
+            )
+            // Non-list interruption → reset ordered counters.
+            orderedCounters = Array(repeating: -1, count: maxListIndentLevel + 1)
         }
 
         func resetOrderedCounters() {
-            orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
+            orderedCounters = Array(repeating: -1, count: maxListIndentLevel + 1)
         }
 
         func emitStructural(_ block: MarkdownBlock) {
@@ -197,8 +203,11 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         while index < lines.count {
             let line = lines[index]
 
-            // Blank line: keep ordered counters when the next non-blank line is
-            // still a list/task item (loose lists). Otherwise fold into prose.
+            // Blank line handling:
+            // - Loose lists: blanks between list/task items are skipped (no reset).
+            // - Standalone blanks (not mid-prose) are skipped — no whitespace-only
+            //   prose blocks between headings/structural runs or trailing `\n`.
+            // - Blanks mid-prose are kept so multi-paragraph prose stays one block.
             if line.trimmingCharacters(in: .whitespaces).isEmpty {
                 if let next = nextNonBlankIndex(from: index + 1),
                    parseListOrTaskLine(lines[next]) != nil
@@ -206,12 +215,9 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                     index += 1
                     continue
                 }
-                let lineStart = lineStarts[index]
-                let lineEnd = lineEndIndex(at: index)
-                if proseBufferStart == nil {
-                    proseBufferStart = lineStart
+                if proseBufferStart != nil {
+                    proseBufferEnd = lineEndIndex(at: index)
                 }
-                proseBufferEnd = lineEnd
                 index += 1
                 continue
             }
@@ -339,7 +345,7 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                 // Child levels restart when returning to a shallower sibling.
                 if level < maxListIndentLevel {
                     for i in (level + 1)...maxListIndentLevel {
-                        orderedCounters[i] = 0
+                        orderedCounters[i] = -1
                     }
                 }
 
@@ -364,9 +370,11 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                         )
                     )
                 case .ordered(let sourceIndex):
+                    // First item after reset uses the source integer as-is
+                    // (including `0.`); subsequent items at this level +1.
                     let assigned: Int
-                    if orderedCounters[level] == 0 {
-                        assigned = max(sourceIndex, 1)
+                    if orderedCounters[level] < 0 {
+                        assigned = sourceIndex
                     } else {
                         assigned = orderedCounters[level] + 1
                     }

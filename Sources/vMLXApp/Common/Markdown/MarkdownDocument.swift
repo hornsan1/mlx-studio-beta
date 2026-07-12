@@ -288,6 +288,40 @@ struct MarkdownDocument: Hashable, Sendable {
     }
 }
 
+// MARK: - Temporary plain reconstruction (compat Segment + interim views)
+
+/// Shared plain-text reconstruction for structural blocks until PR2b ships
+/// native heading/list/task chrome. Used by `MarkdownView.parse` and
+/// `MarkdownBlockView` so marker formatting cannot drift.
+enum MarkdownStructuralPlainText {
+    static func heading(level: Int, text: String) -> String {
+        String(repeating: "#", count: max(level, 1)) + " " + text
+    }
+
+    static func listItem(
+        ordered: Bool,
+        index: Int?,
+        indentLevel: Int,
+        text: String
+    ) -> String {
+        let indent = String(repeating: "  ", count: max(indentLevel, 0))
+        if ordered {
+            return indent + "\(index ?? 1). " + text
+        }
+        return indent + "- " + text
+    }
+
+    static func taskItem(checked: Bool, indentLevel: Int, text: String) -> String {
+        let indent = String(repeating: "  ", count: max(indentLevel, 0))
+        let box = checked ? "[x]" : "[ ]"
+        return indent + "- \(box) " + text
+    }
+
+    static func blockquote(_ text: String) -> String { text }
+
+    static func thematicBreak() -> String { "---" }
+}
+
 // MARK: - UTF-16 helpers
 
 enum MarkdownSourceIndex {

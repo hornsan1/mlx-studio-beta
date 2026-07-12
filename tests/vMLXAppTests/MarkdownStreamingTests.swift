@@ -167,6 +167,75 @@ final class MarkdownStreamingTests: XCTestCase {
         XCTAssertNotEqual(finalID, grownID)
     }
 
+    func testTerminalGrowingBlockquoteIDIsEndInvariantWhileStreaming() {
+        let messageID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "> first line\n> second"
+        let grown = "> first line\n> second\n> third arrives"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        XCTAssertEqual(earlyDoc.blocks.map(\.kind), [.blockquote])
+        XCTAssertEqual(grownDoc.blocks.map(\.kind), [.blockquote])
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: earlyDoc.blocks[0],
+            source: earlyDoc.source,
+            isStreaming: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            source: grownDoc.source,
+            isStreaming: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID.range.start, grownID.range.start)
+        XCTAssertNotEqual(earlyID.range.end, grownID.range.end)
+        XCTAssertEqual(earlyID, grownID)
+        XCTAssertEqual(earlyID.accessibilityIdentifier, grownID.accessibilityIdentifier)
+        XCTAssertTrue(earlyID.accessibilityIdentifier.hasSuffix("-open"))
+        XCTAssertTrue(earlyID.accessibilityIdentifier.contains("blockquote"))
+    }
+
+    func testTerminalGrowingListItemIDIsEndInvariantWhileStreaming() {
+        let messageID = UUID(uuidString: "DDDDDDDD-DDDD-CCCC-DDDD-EEEEEEEEEEEE")!
+        // Single trailing list item grows as more of the item text streams in.
+        let early = "- partial"
+        let grown = "- partial item continues"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        XCTAssertEqual(earlyDoc.blocks.map(\.kind), [.listItem])
+        XCTAssertEqual(grownDoc.blocks.map(\.kind), [.listItem])
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: earlyDoc.blocks[0],
+            source: earlyDoc.source,
+            isStreaming: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            source: grownDoc.source,
+            isStreaming: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID.range.start, grownID.range.start)
+        XCTAssertNotEqual(earlyID.range.end, grownID.range.end)
+        XCTAssertEqual(earlyID, grownID)
+        XCTAssertEqual(earlyID.accessibilityIdentifier, grownID.accessibilityIdentifier)
+        XCTAssertTrue(earlyID.accessibilityIdentifier.hasSuffix("-open"))
+        XCTAssertTrue(earlyID.accessibilityIdentifier.contains("listItem"))
+    }
+
     func testOpenFenceIsProvisionalEvenWhenNotStreaming() throws {
         // Truncated / interrupted content keeps open-fence provisional so
         // copy IDs stay start-stable if the user reopens the message.
