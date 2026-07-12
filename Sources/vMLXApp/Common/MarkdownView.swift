@@ -146,11 +146,29 @@ private struct CompletedIdentifiedBlock: Identifiable {
 // MARK: - Table
 
 struct MarkdownTableBlockView: View {
+    /// Collapse body when row count exceeds this (P0 fixed threshold).
+    static let collapseRowThreshold = 100
+
     let headers: [String]
     let alignments: [MarkdownTableAlignment]
     let rows: [[String]]
     var accessibilityIdentifier: String = "markdown.table"
     @State private var copiedLabel: String?
+    @State private var expanded = false
+
+    /// Whether this table is large enough to offer collapse chrome.
+    var isCollapsible: Bool { rows.count > Self.collapseRowThreshold }
+
+    /// Rows rendered in the grid (prefix when collapsed).
+    var visibleRows: [[String]] {
+        Self.visibleRows(rows: rows, expanded: expanded)
+    }
+
+    /// Pure helper for tests and render path.
+    static func visibleRows(rows: [[String]], expanded: Bool) -> [[String]] {
+        guard rows.count > collapseRowThreshold, !expanded else { return rows }
+        return Array(rows.prefix(collapseRowThreshold))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -165,11 +183,11 @@ struct MarkdownTableBlockView: View {
                             )
                         }
                     }
-                    ForEach(rows.indices, id: \.self) { rowIndex in
+                    ForEach(visibleRows.indices, id: \.self) { rowIndex in
                         GridRow {
                             ForEach(headers.indices, id: \.self) { columnIndex in
                                 MarkdownTableCell(
-                                    text: rows[rowIndex][columnIndex],
+                                    text: visibleRows[rowIndex][columnIndex],
                                     alignment: alignments[columnIndex],
                                     isHeader: false
                                 )
@@ -180,6 +198,21 @@ struct MarkdownTableBlockView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if isCollapsible {
+                Button(expanded ? "Show less" : "Show full table") {
+                    expanded.toggle()
+                }
+                .buttonStyle(.plain)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.accent)
+                .accessibilityIdentifier("\(accessibilityIdentifier).expand")
+                .accessibilityLabel(
+                    expanded
+                        ? "Show fewer table rows"
+                        : "Show full table (\(rows.count) rows)"
+                )
+            }
 
             HStack(spacing: Theme.Spacing.sm) {
                 Button("Copy Markdown") { copyMarkdown() }
@@ -208,6 +241,7 @@ struct MarkdownTableBlockView: View {
         )
     }
 
+    /// Always copies the full table (headers + all rows), even when collapsed.
     private func copyMarkdown() {
         let payload = MarkdownTableClipboard.asMarkdown(
             headers: headers,
@@ -218,6 +252,7 @@ struct MarkdownTableBlockView: View {
         flash("Copied Markdown")
     }
 
+    /// Always copies the full table as TSV, even when collapsed.
     private func copyTSV() {
         let payload = MarkdownTableClipboard.asTSV(headers: headers, rows: rows)
         writePasteboard(payload)
@@ -290,9 +325,15 @@ private struct MarkdownTableCell: View {
 // MARK: - Code block
 
 /// Code block with an always-visible, keyboard-accessible copy button.
+///
+/// Line numbers (Advanced): off by default via UserDefaults
+/// `chat.markdown.showLineNumbers`. Per-block overflow can toggle them for
+/// this instance without writing the global preference.
 struct CodeBlockView: View {
     static let copyAccessibilityLabel = "Copy code"
     static let longBlockLineThreshold = 80
+    /// UserDefaults / AppStorage key for the global line-number preference.
+    static let showLineNumbersDefaultsKey = "chat.markdown.showLineNumbers"
 
     /// Legacy ordinal identifier. Prefer
     /// `MarkdownBlockID.copyCodeAccessibilityIdentifier` for new call sites.
@@ -300,10 +341,23 @@ struct CodeBlockView: View {
         "markdown.copy-code.\(ordinal)"
     }
 
+    /// Resolves effective line-number visibility for a block.
+    /// - Parameters:
+    ///   - preference: Global `UserDefaults` value (default false).
+    ///   - localOverride: Per-block `@State` override; `nil` means follow preference.
+    static func resolvesShowLineNumbers(preference: Bool, localOverride: Bool?) -> Bool {
+        localOverride ?? preference
+    }
+
     let language: String
     let code: String
     let copyButtonAccessibilityIdentifier: String
     var isProvisional: Bool = false
+
+    @AppStorage(CodeBlockView.showLineNumbersDefaultsKey)
+    private var preferenceShowLineNumbers = false
+    /// `nil` = follow global preference; non-nil = per-block override for this session.
+    @State private var localShowLineNumbersOverride: Bool? = nil
     @State private var copied = false
     @State private var wrap = false
     @State private var expanded = false
@@ -326,11 +380,39 @@ struct CodeBlockView: View {
 
     private var isLong: Bool { lineCount > Self.longBlockLineThreshold }
 
+    private var showLineNumbers: Bool {
+        Self.resolvesShowLineNumbers(
+            preference: preferenceShowLineNumbers,
+            localOverride: localShowLineNumbersOverride
+        )
+    }
+
+    private var sourceLines: [Substring] {
+        code.split(separator: "\n", omittingEmptySubsequences: false)
+    }
+
     private var displayCode: String {
         guard isLong, !expanded else { return code }
-        let lines = code.split(separator: "\n", omittingEmptySubsequences: false)
-        return lines.prefix(Self.longBlockLineThreshold).joined(separator: "\n")
+        return sourceLines.prefix(Self.longBlockLineThreshold).joined(separator: "\n")
             + "\n… (\(lineCount - Self.longBlockLineThreshold) more lines)"
+    }
+
+    /// 1-based source line numbers for currently displayed content (no gutter for the ellipsis row).
+    private var displayLineNumbers: [Int] {
+        let visibleCount: Int
+        if isLong, !expanded {
+            visibleCount = Self.longBlockLineThreshold
+        } else {
+            visibleCount = lineCount
+        }
+        return Array(1...max(1, visibleCount))
+    }
+
+    private var lineNumberGutter: String {
+        let width = max(2, String(displayLineNumbers.last ?? 1).count)
+        return displayLineNumbers
+            .map { String(format: "%\(width)d", $0) }
+            .joined(separator: "\n")
     }
 
     var body: some View {
@@ -354,6 +436,24 @@ struct CodeBlockView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(wrap ? "Disable wrap" : "Wrap code lines")
+                // Per-block Advanced overflow: toggle line numbers without writing UserDefaults.
+                Button {
+                    localShowLineNumbersOverride = !showLineNumbers
+                } label: {
+                    Text(showLineNumbers ? "Hide #" : "Show #")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.textMid)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("markdown.code.line-numbers")
+                .accessibilityLabel(
+                    showLineNumbers ? "Hide line numbers" : "Show line numbers"
+                )
+                .help(
+                    showLineNumbers
+                        ? "Hide line numbers for this block"
+                        : "Show line numbers for this block"
+                )
                 Button(action: copy) {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                         .font(Theme.Typography.caption)
@@ -371,18 +471,12 @@ struct CodeBlockView: View {
 
             Group {
                 if wrap {
-                    Text(displayCode)
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Theme.Colors.textHigh)
-                        .textSelection(.enabled)
+                    codeBody
                         .padding(Theme.Spacing.md)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        Text(displayCode)
-                            .font(.system(size: 12, weight: .regular, design: .monospaced))
-                            .foregroundStyle(Theme.Colors.textHigh)
-                            .textSelection(.enabled)
+                        codeBody
                             .padding(Theme.Spacing.md)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -414,6 +508,29 @@ struct CodeBlockView: View {
         )
     }
 
+    @ViewBuilder
+    private var codeBody: some View {
+        if showLineNumbers {
+            HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                Text(lineNumberGutter)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Theme.Colors.textLow)
+                    .multilineTextAlignment(.trailing)
+                    .accessibilityHidden(true)
+                Text(displayCode)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Theme.Colors.textHigh)
+                    .textSelection(.enabled)
+            }
+        } else {
+            Text(displayCode)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .foregroundStyle(Theme.Colors.textHigh)
+                .textSelection(.enabled)
+        }
+    }
+
+    /// Always copies the full code body, even when the block is collapsed.
     private func copy() {
         #if canImport(AppKit)
         let pb = NSPasteboard.general
