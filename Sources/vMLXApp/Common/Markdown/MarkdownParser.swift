@@ -27,7 +27,6 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         return MarkdownDocument(
             source: text,
             blocks: blocks,
-            incompleteTail: nil,
             parserName: name
         )
     }

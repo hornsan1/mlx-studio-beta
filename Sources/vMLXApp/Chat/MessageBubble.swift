@@ -186,14 +186,12 @@ struct MessageBubble: View {
     private var contentView: some View {
         if message.role == .assistant && message.isStreaming && message.content.isEmpty {
             TypingDots()
-        } else if message.role == .assistant && message.isStreaming {
-            MarkdownStreamingView(
+        } else if message.role == .assistant {
+            MarkdownView(
                 text: message.content,
                 messageID: message.id,
-                isStreaming: true
+                isStreaming: message.isStreaming
             )
-        } else if message.role == .assistant {
-            MarkdownView(text: message.content, messageID: message.id)
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text(message.content)

@@ -244,33 +244,13 @@ final class MarkdownPerformanceTests: XCTestCase {
         XCTAssertNotNil(sync)
     }
 
-    func testWarmRenderCachePopulatesSyncCache() async {
+    func testParseSyncIsIdempotent() {
         SyncMarkdownRenderCache.shared.removeAll()
         let source = "## Warm me\n\nSome **text** and a list:\n- a\n- b\n"
         let messageID = UUID()
-
-        MarkdownParserSupport.warmRenderCache(source: source, messageID: messageID)
-
-        // Detached warm is async; poll briefly so the utility task lands.
-        for _ in 0..<50 {
-            try? await Task.sleep(nanoseconds: 20_000_000) // 20 ms
-            // Explicit parseSync is the production path; once warm finishes,
-            // subsequent calls are cache hits with stable document identity.
-            let a = MarkdownParserSupport.parseSync(source, messageID: messageID)
-            let b = MarkdownParserSupport.parseSync(source, messageID: messageID)
-            if a == b, !a.blocks.isEmpty {
-                XCTAssertEqual(a, b)
-                XCTAssertFalse(a.blocks.isEmpty)
-                return
-            }
-        }
-
-        // Fallback: warm is best-effort; still require a correct parse result.
-        let doc = MarkdownParserSupport.parseSync(source, messageID: messageID)
-        XCTAssertFalse(doc.blocks.isEmpty)
-        XCTAssertEqual(
-            doc,
-            MarkdownParserSupport.parseSync(source, messageID: messageID)
-        )
+        let a = MarkdownParserSupport.parseSync(source, messageID: messageID)
+        let b = MarkdownParserSupport.parseSync(source, messageID: messageID)
+        XCTAssertEqual(a, b)
+        XCTAssertFalse(a.blocks.isEmpty)
     }
 }

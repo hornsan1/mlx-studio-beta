@@ -96,33 +96,6 @@ enum MarkdownParserSupport {
         )
     }
 
-    /// Prefetch parse into the sync (and actor) render caches so the first
-    /// completed-message `MarkdownView` body evaluation is typically a hit.
-    ///
-    /// Safe to call from the main actor: work is scheduled off-main so stream
-    /// finalize / import do not hitch the UI on cold parse of large messages.
-    static func warmRenderCache(
-        source: String,
-        messageID: UUID? = nil,
-        parser: any MarkdownParser = LightweightMarkdownParser.shared
-    ) {
-        guard !source.isEmpty else { return }
-        let capturedSource = source
-        let capturedID = messageID
-        let capturedParser = parser
-        Task.detached(priority: .utility) {
-            _ = MarkdownParserSupport.parseSync(
-                capturedSource,
-                messageID: capturedID,
-                parser: capturedParser
-            )
-            _ = await MarkdownRenderCache.shared.document(
-                source: capturedSource,
-                messageID: capturedID,
-                parser: capturedParser
-            )
-        }
-    }
 }
 
 /// Main-thread-friendly bounded cache (SwiftUI body).

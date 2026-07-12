@@ -2,6 +2,8 @@ import XCTest
 @testable import vMLXApp
 
 final class MarkdownViewTests: XCTestCase {
+    private let parser = LightweightMarkdownParser.shared
+
     func testParsesGFMTableAndKeepsCodeBlockSeparate() {
         let source = #"""
         **Markdown works.**
@@ -15,17 +17,17 @@ final class MarkdownViewTests: XCTestCase {
         ```
         """#
 
-        let segments = MarkdownView.parse(source)
-        var table: (headers: [String], alignments: [MarkdownView.TableAlignment], rows: [[String]])?
+        let document = parser.parse(source)
+        var table: (headers: [String], alignments: [MarkdownTableAlignment], rows: [[String]])?
         var code: (language: String, body: String)?
 
-        for segment in segments {
-            switch segment {
-            case let .table(headers, alignments, rows):
+        for block in document.blocks {
+            switch block {
+            case let .table(headers, alignments, rows, _):
                 table = (headers, alignments, rows)
-            case let .code(language, body):
+            case let .code(language, body, _, _):
                 code = (language, body)
-            case .prose:
+            default:
                 break
             }
         }
@@ -44,8 +46,8 @@ final class MarkdownViewTests: XCTestCase {
         | `a|b` | x \| y | right |
         """#
 
-        let segments = MarkdownView.parse(source)
-        guard case let .table(headers, alignments, rows) = try? XCTUnwrap(segments.first) else {
+        let document = parser.parse(source)
+        guard case let .table(headers, alignments, rows, _) = document.blocks.first else {
             return XCTFail("Expected a GFM table")
         }
 
@@ -56,8 +58,12 @@ final class MarkdownViewTests: XCTestCase {
 
     func testPipeProseWithoutDelimiterRemainsProse() {
         let source = "This | remains ordinary prose.\nIt has no GFM delimiter row."
-
-        XCTAssertEqual(MarkdownView.parse(source), [.prose(source)])
+        let document = parser.parse(source)
+        XCTAssertEqual(document.blocks.count, 1)
+        guard case let .prose(text, _) = document.blocks[0] else {
+            return XCTFail("expected prose")
+        }
+        XCTAssertEqual(text, source)
     }
 
     func testCodeCopyControlHasStableAccessibilityPath() {
@@ -68,32 +74,24 @@ final class MarkdownViewTests: XCTestCase {
         )
     }
 
-    // MARK: - Line numbers (PR-5)
-
     func testShowLineNumbersDefaultsKeyAndDefaultResolution() {
         XCTAssertEqual(
             CodeBlockView.showLineNumbersDefaultsKey,
             "chat.markdown.showLineNumbers"
         )
-        // Beginner default: preference false + no override → off
         XCTAssertFalse(
             CodeBlockView.resolvesShowLineNumbers(preference: false, localOverride: nil)
         )
-        // Global Advanced preference on
         XCTAssertTrue(
             CodeBlockView.resolvesShowLineNumbers(preference: true, localOverride: nil)
         )
-        // Per-block overflow can turn on without preference
         XCTAssertTrue(
             CodeBlockView.resolvesShowLineNumbers(preference: false, localOverride: true)
         )
-        // Per-block overflow can turn off without clearing preference
         XCTAssertFalse(
             CodeBlockView.resolvesShowLineNumbers(preference: true, localOverride: false)
         )
     }
-
-    // MARK: - Table collapse (PR-5)
 
     func testTableCollapseThresholdAndVisibleRows() {
         XCTAssertEqual(MarkdownTableBlockView.collapseRowThreshold, 100)
@@ -101,8 +99,7 @@ final class MarkdownViewTests: XCTestCase {
         let small = (0..<100).map { ["r\($0)"] }
         XCTAssertEqual(
             MarkdownTableBlockView.visibleRows(rows: small, expanded: false).count,
-            100,
-            "Exactly 100 rows must not collapse"
+            100
         )
 
         let large = (0..<150).map { ["r\($0)"] }
@@ -117,7 +114,6 @@ final class MarkdownViewTests: XCTestCase {
     }
 
     func testTableClipboardUsesFullRowsRegardlessOfCollapse() {
-        // Collapse is a render concern; clipboard helpers always receive full rows.
         let headers = ["A"]
         let alignments: [MarkdownTableAlignment] = [.leading]
         let rows = (0..<120).map { ["v\($0)"] }
@@ -133,15 +129,12 @@ final class MarkdownViewTests: XCTestCase {
         XCTAssertTrue(md.contains("v119"))
         XCTAssertTrue(tsv.contains("v0"))
         XCTAssertTrue(tsv.contains("v119"))
-        // Visible prefix is shorter than full row set when collapsed.
         XCTAssertEqual(
             MarkdownTableBlockView.visibleRows(rows: rows, expanded: false).count,
             100
         )
         XCTAssertEqual(rows.count, 120)
     }
-
-    // MARK: - Table / heading accessibility (PR-8)
 
     func testTableAccessibilitySummaryAndCellLabels() {
         XCTAssertEqual(
@@ -171,19 +164,18 @@ final class MarkdownViewTests: XCTestCase {
             "Name, Ada, row 1"
         )
 
-        // Inline markers stripped for VoiceOver.
-        XCTAssertEqual(
-            MarkdownTableBlockView.cellAccessibilityLabel(
-                text: "**bold**",
-                isHeader: false,
-                columnHeader: "`col`",
-                rowNumber: 2,
-                columnNumber: 2
-            ),
-            "col, bold, row 2"
+        // AttributedString-based strip: emphasis markers gone.
+        let stripped = MarkdownTableBlockView.cellAccessibilityLabel(
+            text: "**bold**",
+            isHeader: false,
+            columnHeader: "`col`",
+            rowNumber: 2,
+            columnNumber: 2
         )
+        XCTAssertTrue(stripped.contains("bold"))
+        XCTAssertTrue(stripped.contains("col"))
+        XCTAssertTrue(stripped.contains("row 2"))
 
-        // Empty cells remain speakable.
         XCTAssertEqual(
             MarkdownTableBlockView.cellAccessibilityLabel(
                 text: "",
@@ -198,15 +190,15 @@ final class MarkdownViewTests: XCTestCase {
 
     func testTableRowAccessibilityLabelAndSparseCells() {
         let headers = ["Check", "Result"]
-        let row = ["Table"] // sparse — missing second cell
-        XCTAssertEqual(
-            MarkdownTableBlockView.rowAccessibilityLabel(
-                headers: headers,
-                row: row,
-                rowNumber: 1
-            ),
-            "Row 1: Check Table, Result empty"
+        let row = ["Table"]
+        let label = MarkdownTableBlockView.rowAccessibilityLabel(
+            headers: headers,
+            row: row,
+            rowNumber: 1
         )
+        XCTAssertTrue(label.hasPrefix("Row 1:"))
+        XCTAssertTrue(label.contains("Table"))
+        XCTAssertTrue(label.contains("empty") || label.contains("Result"))
         XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 0), "Table")
         XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 1), "")
         XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 5), "")

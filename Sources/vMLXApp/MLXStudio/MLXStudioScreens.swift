@@ -7726,16 +7726,11 @@ private struct ChatTurnBubble: View {
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.Colors.textHigh)
             } else if turn.role == .assistant {
-                // Shared Markdown document model (same as production ChatScreen).
-                if turn.streamState == .streaming {
-                    MarkdownStreamingView(
-                        text: content,
-                        messageID: turn.id,
-                        isStreaming: true
-                    )
-                } else {
-                    MarkdownView(text: content, messageID: turn.id)
-                }
+                MarkdownView(
+                    text: content,
+                    messageID: turn.id,
+                    isStreaming: turn.streamState == .streaming
+                )
             } else {
                 Text(content)
                     .font(Theme.Typography.body)

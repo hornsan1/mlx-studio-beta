@@ -27,7 +27,7 @@ final class MarkdownRenderModelTests: XCTestCase {
         )
     }
 
-    func testCompatibilityMarkdownViewParseStillWorks() {
+    func testParserIsSingleSourceForViews() {
         let source = #"""
         **Markdown works.**
 
@@ -39,17 +39,17 @@ final class MarkdownRenderModelTests: XCTestCase {
         print("MARKDOWN_E2E")
         ```
         """#
-        let segments = MarkdownView.parse(source)
-        var table: (headers: [String], alignments: [MarkdownView.TableAlignment], rows: [[String]])?
+        let document = LightweightMarkdownParser.shared.parse(source)
+        var table: (headers: [String], alignments: [MarkdownTableAlignment], rows: [[String]])?
         var code: (language: String, body: String)?
 
-        for segment in segments {
-            switch segment {
-            case let .table(headers, alignments, rows):
+        for block in document.blocks {
+            switch block {
+            case let .table(headers, alignments, rows, _):
                 table = (headers, alignments, rows)
-            case let .code(language, body):
+            case let .code(language, body, _, _):
                 code = (language, body)
-            case .prose:
+            default:
                 break
             }
         }

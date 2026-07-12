@@ -92,23 +92,19 @@ final class MarkdownDocumentTests: XCTestCase {
         }
     }
 
-    func testCompatibilityParseMatchesDocument() {
+    func testDocumentParseIsSingleSourceOfTruth() {
         let source = #"""
         | Expression | Value | Notes |
         | :--- | :---: | ---: |
         | `a|b` | x \| y | right |
         """#
-        let segments = MarkdownView.parse(source)
         let document = parser.parse(source)
-        XCTAssertEqual(segments.count, document.blocks.count)
-        guard case let .table(headers, alignments, rows) = segments.first,
-              case let .table(dHeaders, dAlignments, dRows, _) = document.blocks.first
-        else {
-            return XCTFail("Expected table in both paths")
+        guard case let .table(headers, alignments, rows, _) = document.blocks.first else {
+            return XCTFail("Expected table")
         }
-        XCTAssertEqual(headers, dHeaders)
-        XCTAssertEqual(alignments.map { MarkdownTableAlignment(legacy: $0) }, dAlignments)
-        XCTAssertEqual(rows, dRows)
+        XCTAssertEqual(headers, ["Expression", "Value", "Notes"])
+        XCTAssertEqual(alignments, [.leading, .center, .trailing])
+        XCTAssertEqual(rows, [["`a|b`", "x | y", "right"]])
     }
 
     func testGoldenCorpusFixture() throws {
@@ -301,12 +297,3 @@ final class MarkdownDocumentTests: XCTestCase {
     }
 }
 
-private extension MarkdownTableAlignment {
-    init(legacy: MarkdownView.TableAlignment) {
-        switch legacy {
-        case .leading: self = .leading
-        case .center: self = .center
-        case .trailing: self = .trailing
-        }
-    }
-}
