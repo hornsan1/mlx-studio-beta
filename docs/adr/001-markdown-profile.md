@@ -15,11 +15,11 @@ MLX Studio ships a **GFM-focused, native SwiftUI** Markdown surface for assistan
 | Headings (ATX) | Planned (Milestone 1); prose path may render via `AttributedString` until then |
 | Paragraphs, hard/soft breaks | Yes |
 | Emphasis / strong / strikethrough | Yes (inline via system Markdown where available) |
-| Links | Yes, user-activated only; scheme allowlist |
+| Links | Yes, user-activated only; scheme allowlist enforced on **all** AttributedString surfaces |
 | Nested lists, task lists | Partial today; full GFM in Milestone 1 |
 | Blockquotes, thematic breaks | Partial / planned |
 | Inline code | Yes |
-| Fenced code (`` ``` `` / `~~~`) | Backtick fences today; tilde + unclosed-as-code in Milestone 1 |
+| Fenced code (`` ``` `` / `~~~`) | **Shipped:** backtick and tilde fences; unclosed fences parse as provisional code (`isClosed: false`) |
 | GFM pipe tables + alignment | Yes |
 | Raw HTML | **Inert** — shown as text/code, never interpreted |
 | Remote images / media | **Deferred** — no automatic network fetch |
@@ -29,8 +29,25 @@ MLX Studio ships a **GFM-focused, native SwiftUI** Markdown surface for assistan
 
 1. **Native views only** — no WebView/HTML renderer for chat Markdown.
 2. **Links** — only `https`, `http`, and `mailto`. Block `file:`, custom schemes, and automatic opens.
+   - **Enforced open path:** every AttributedString markdown surface (`MarkdownProseView`, `MarkdownTableCell`, future headings/lists) goes through `MarkdownAttributed.inline` → `MarkdownOpenURL.sanitizeLinks` (strip disallowed link attributes) **and** `.environment(\.openURL, MarkdownOpenURL.action)` (discard non-allowlisted schemes). Policy lives in `MarkdownLinkPolicy`.
 3. **No execution** — code blocks are copyable/selectable, never runnable from the bubble.
 4. **Source of truth** — `ChatMessage.content` (later `displayContent`) stores original Markdown bytes.
+
+### Streaming block identity (provisional contract)
+
+A block is **provisional** when:
+
+1. open code fence (`!isClosed`), **or**
+2. while streaming, it is **terminal-growing** (`range.end == source.utf16.count`)
+
+While provisional, accessibility / ForEach identity is **end-invariant**:
+
+- `markdown.<kind>.<uuid>.<start>-open`
+- `markdown.copy-code.<uuid>.<start>-open` (code)
+
+When finalized, freeze full range: `markdown.<kind>.<uuid>.<start>-<end>`.
+
+`ForEach` keys use `MarkdownBlockID` (not raw `range`) so provisional growth does not remount views.
 
 ### Parser strategy
 
@@ -46,6 +63,6 @@ MLX Studio ships a **GFM-focused, native SwiftUI** Markdown surface for assistan
 
 ## Consequences
 
-- Accessibility IDs for code/table actions are stable: `message UUID + source range + block kind`.
-- Progressive streaming (Milestone 2) reuses the same document model with a mutable tail.
+- Accessibility IDs for code/table actions are stable: `message UUID + source range + block kind`, with provisional open suffix while growing.
+- Progressive streaming reuses the same document model with a mutable tail; provisional IDs do not thrash on token append.
 - Composer preview (Milestone 3) must use the same renderer so preview never diverges from final messages.

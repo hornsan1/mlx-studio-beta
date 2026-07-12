@@ -15,7 +15,21 @@
 
 ## Decision for this slice
 
-**Ship A behind `MarkdownParser`.** Block views and `MarkdownLinkPolicy` are independent of the parser so B/C can replace A after a packaging gate without rewriting UI.
+**Ship A behind `MarkdownParser`.** Block views, `MarkdownLinkPolicy`, and `MarkdownOpenURL` are independent of the parser so B/C can replace A after a packaging gate without rewriting UI.
+
+## Already shipped (parser surface)
+
+- Backtick **and tilde** fenced code (` ``` ` / `~~~`)
+- Unclosed fences → provisional code blocks (`isClosed: false`), not plain tail
+- GFM pipe tables with alignment
+- Progressive stream split (`StreamingMarkdownSplit`) with open-fence-as-stable-code
+
+## Identity & security prerequisites (landed before grammar expansion)
+
+- **Provisional block IDs (K13):** open fence **or** streaming terminal-growing block → end-invariant `…-open` accessibility / ForEach keys via `MarkdownBlockID`.
+- **Link open path (K7):** `MarkdownOpenURL.sanitizeLinks` + `OpenURLAction` on all AttributedString markdown surfaces (`MarkdownProseView`, `MarkdownTableCell`).
+
+These are correctness/security gates for expanding structural GFM (headings, lists, quotes, tasks).
 
 ## Packaging gate (before adopting B or C)
 

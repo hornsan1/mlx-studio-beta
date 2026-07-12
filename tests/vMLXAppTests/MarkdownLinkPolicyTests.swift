@@ -51,4 +51,97 @@ final class MarkdownLinkPolicyTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - sanitizeLinks + allow/block matrix (K7)
+
+    func testSanitizeLinksStripsDisallowedSchemes() throws {
+        // Build attributed strings via markdown so link attributes exist.
+        let unsafe = try XCTUnwrap(
+            try? AttributedString(
+                markdown: "[x](javascript:alert(1)) [y](file:///etc/passwd) [z](vmlx://local)",
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )
+        )
+        // Precondition: parser attached some link attributes.
+        let hadAnyLink = unsafe.runs.contains { $0.link != nil }
+        XCTAssertTrue(hadAnyLink, "fixture should produce link attributes")
+
+        let cleaned = MarkdownOpenURL.sanitizeLinks(unsafe)
+        for run in cleaned.runs {
+            if let url = run.link {
+                XCTFail("disallowed link should be stripped, found \(url)")
+            }
+        }
+    }
+
+    func testSanitizeLinksKeepsAllowedSchemes() throws {
+        let safe = try XCTUnwrap(
+            try? AttributedString(
+                markdown: "[a](https://example.com) [b](http://localhost) [c](mailto:u@example.com)",
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )
+        )
+        let cleaned = MarkdownOpenURL.sanitizeLinks(safe)
+        var schemes: Set<String> = []
+        for run in cleaned.runs {
+            if let url = run.link, let scheme = url.scheme?.lowercased() {
+                schemes.insert(scheme)
+            }
+        }
+        XCTAssertEqual(schemes, Set(["https", "http", "mailto"]))
+    }
+
+    func testSanitizeLinksMixedKeepsOnlyAllowed() throws {
+        let mixed = try XCTUnwrap(
+            try? AttributedString(
+                markdown: "[ok](https://example.com/docs) [bad](javascript:void(0))",
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )
+        )
+        let cleaned = MarkdownOpenURL.sanitizeLinks(mixed)
+        var kept: [URL] = []
+        for run in cleaned.runs {
+            if let url = run.link {
+                kept.append(url)
+            }
+        }
+        XCTAssertEqual(kept.count, 1)
+        XCTAssertEqual(kept.first?.scheme?.lowercased(), "https")
+        XCTAssertTrue(MarkdownLinkPolicy.isAllowed(kept[0]))
+    }
+
+    func testMarkdownAttributedInlineSanitizes() {
+        let attr = MarkdownAttributed.inline("[go](javascript:alert(1)) plain")
+        XCTAssertNotNil(attr)
+        if let attr {
+            for run in attr.runs {
+                XCTAssertNil(run.link, "inline helper must strip unsafe links")
+            }
+        }
+    }
+
+    func testIsAllowedDecisionMatrix() {
+        let cases: [(String, Bool)] = [
+            ("https://example.com", true),
+            ("http://127.0.0.1:8080/x", true),
+            ("mailto:a@b.c", true),
+            ("file:///tmp/x", false),
+            ("javascript:alert(1)", false),
+            ("data:text/html,hi", false),
+            ("vmlx://session", false),
+            ("ftp://example.com", false),
+            ("ssh://host", false),
+        ]
+        for (raw, expect) in cases {
+            guard let url = URL(string: raw) else {
+                XCTFail("could not form URL for \(raw)")
+                continue
+            }
+            XCTAssertEqual(
+                MarkdownLinkPolicy.isAllowed(url),
+                expect,
+                "isAllowed(\(raw))"
+            )
+        }
+    }
 }

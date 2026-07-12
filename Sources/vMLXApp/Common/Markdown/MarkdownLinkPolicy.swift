@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -62,5 +63,55 @@ enum MarkdownLinkPolicy {
     static func openUserActivated(raw: String) -> Bool {
         guard let url = sanitizedURL(from: raw) else { return false }
         return openUserActivated(url)
+    }
+}
+
+// MARK: - OpenURL gate (all AttributedString markdown surfaces)
+
+/// Shared link open path for every SwiftUI surface that renders Markdown
+/// via `AttributedString`. Always pair with `sanitizeLinks` so disallowed
+/// destinations are stripped even if the environment action is bypassed.
+enum MarkdownOpenURL {
+    /// Environment action: allow only `https` / `http` / `mailto`.
+    static var action: OpenURLAction {
+        OpenURLAction { url in
+            guard MarkdownLinkPolicy.isAllowed(url) else { return .discarded }
+            return MarkdownLinkPolicy.openUserActivated(url) ? .handled : .discarded
+        }
+    }
+
+    /// Strip link attributes whose URL fails the allowlist so click targets
+    /// cannot open unsafe schemes. Hard guarantee independent of `openURL`.
+    static func sanitizeLinks(_ attributed: AttributedString) -> AttributedString {
+        var result = attributed
+        // Collect ranges first — mutating while iterating runs is unsafe.
+        var disallowed: [Range<AttributedString.Index>] = []
+        for run in result.runs {
+            guard let url = run.link else { continue }
+            if !MarkdownLinkPolicy.isAllowed(url) {
+                disallowed.append(run.range)
+            }
+        }
+        for range in disallowed {
+            result[range].link = nil
+        }
+        return result
+    }
+}
+
+// MARK: - Inline AttributedString helper
+
+/// Builds inline Markdown `AttributedString` values with disallowed link
+/// attributes already stripped. Apply `.environment(\.openURL, MarkdownOpenURL.action)`
+/// on the presenting `Text` as a second gate.
+enum MarkdownAttributed {
+    static func inline(_ source: String) -> AttributedString? {
+        guard let attr = try? AttributedString(
+            markdown: source,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else {
+            return nil
+        }
+        return MarkdownOpenURL.sanitizeLinks(attr)
     }
 }

@@ -61,6 +61,126 @@ final class MarkdownStreamingTests: XCTestCase {
         XCTAssertTrue(fenced.hasPrefix("````"))
         XCTAssertTrue(fenced.contains("code with ``` inside"))
     }
+
+    // MARK: - Provisional block IDs (K13)
+
+    func testOpenFenceCopyIDIsEndInvariantWhileGrowing() throws {
+        let messageID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "Intro\n\n```python\nprint(1)\n"
+        let grown = "Intro\n\n```python\nprint(1)\nprint(2)\n"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(earlyDoc.blocks.last),
+            source: earlyDoc.source,
+            isStreaming: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(grownDoc.blocks.last),
+            source: grownDoc.source,
+            isStreaming: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID, grownID)
+        XCTAssertEqual(
+            earlyID.copyCodeAccessibilityIdentifier,
+            grownID.copyCodeAccessibilityIdentifier
+        )
+        XCTAssertTrue(earlyID.copyCodeAccessibilityIdentifier.hasSuffix("-open"))
+        XCTAssertTrue(
+            earlyID.copyCodeAccessibilityIdentifier
+                .hasPrefix("markdown.copy-code.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.")
+        )
+        // range.end may differ; identity must not.
+        XCTAssertNotEqual(earlyID.range.end, grownID.range.end)
+    }
+
+    func testClosedFenceFreezesFullRangeID() throws {
+        let messageID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let source = "Intro\n\n```python\nprint(1)\n```\n"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+        let id = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(doc.blocks.last),
+            source: doc.source,
+            isStreaming: false
+        )
+        XCTAssertFalse(id.isProvisional)
+        XCTAssertTrue(id.copyCodeAccessibilityIdentifier.hasSuffix("-\(id.range.end)"))
+        XCTAssertFalse(id.copyCodeAccessibilityIdentifier.hasSuffix("-open"))
+
+        // Same frozen source → identical IDs on reparse.
+        let again = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(LightweightMarkdownParser.shared.parse(source).blocks.last),
+            source: source,
+            isStreaming: false
+        )
+        XCTAssertEqual(id, again)
+    }
+
+    func testTerminalGrowingProseIDIsEndInvariantWhileStreaming() {
+        let messageID = UUID(uuidString: "BBBBBBBB-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "Hello world"
+        let grown = "Hello world, more tokens arrive"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        XCTAssertEqual(earlyDoc.blocks.count, 1)
+        XCTAssertEqual(grownDoc.blocks.count, 1)
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: earlyDoc.blocks[0],
+            source: earlyDoc.source,
+            isStreaming: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            source: grownDoc.source,
+            isStreaming: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID.accessibilityIdentifier, grownID.accessibilityIdentifier)
+        XCTAssertTrue(earlyID.accessibilityIdentifier.hasSuffix("-open"))
+        XCTAssertEqual(earlyID, grownID)
+
+        // When streaming ends, identity freezes to full range.
+        let finalID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            source: grownDoc.source,
+            isStreaming: false
+        )
+        XCTAssertFalse(finalID.isProvisional)
+        XCTAssertTrue(finalID.accessibilityIdentifier.hasSuffix("-\(finalID.range.end)"))
+        XCTAssertNotEqual(finalID, grownID)
+    }
+
+    func testOpenFenceIsProvisionalEvenWhenNotStreaming() throws {
+        // Truncated / interrupted content keeps open-fence provisional so
+        // copy IDs stay start-stable if the user reopens the message.
+        let source = "```\npartial\n"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+        let id = MarkdownBlockID.id(
+            messageID: nil,
+            block: try XCTUnwrap(doc.blocks.first),
+            source: doc.source,
+            isStreaming: false
+        )
+        XCTAssertTrue(id.isProvisional)
+        XCTAssertTrue(id.accessibilityIdentifier.hasSuffix("-open"))
+    }
 }
 
 final class ChatMessageContextSplitTests: XCTestCase {

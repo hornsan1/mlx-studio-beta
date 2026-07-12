@@ -23,8 +23,26 @@ struct MarkdownView: View {
             parser: parser
         )
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            ForEach(Array(document.blocks.enumerated()), id: \.element.range) { _, block in
-                MarkdownBlockView(block: block, messageID: messageID)
+            // Key by MarkdownBlockID (end-invariant while provisional), not raw range.
+            ForEach(
+                document.blocks.map { block in
+                    CompletedIdentifiedBlock(
+                        id: MarkdownBlockID.id(
+                            messageID: messageID,
+                            block: block,
+                            source: document.source,
+                            isStreaming: false
+                        ),
+                        block: block
+                    )
+                }
+            ) { item in
+                MarkdownBlockView(
+                    block: item.block,
+                    messageID: messageID,
+                    source: document.source,
+                    isStreaming: false
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -91,6 +109,12 @@ struct MarkdownView: View {
             }
         }
     }
+}
+
+/// ForEach carrier for completed Markdown renders — identity is `MarkdownBlockID`.
+private struct CompletedIdentifiedBlock: Identifiable {
+    let id: MarkdownBlockID
+    let block: MarkdownBlock
 }
 
 // MARK: - Table
@@ -214,11 +238,9 @@ private struct MarkdownTableCell: View {
 
     var body: some View {
         Group {
-            if let attributed = try? AttributedString(
-                markdown: text,
-                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-            ) {
+            if let attributed = MarkdownAttributed.inline(text) {
                 Text(attributed)
+                    .environment(\.openURL, MarkdownOpenURL.action)
             } else {
                 Text(text)
             }

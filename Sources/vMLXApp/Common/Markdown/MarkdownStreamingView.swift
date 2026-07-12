@@ -44,8 +44,28 @@ struct MarkdownStreamingView: View {
     @ViewBuilder
     private var streamingBody: some View {
         let split = StreamingMarkdownSplit.split(document: document, fullSource: text)
-        ForEach(Array(split.stableBlocks.enumerated()), id: \.element.range) { _, block in
-            MarkdownBlockView(block: block, messageID: messageID)
+        let source = MarkdownParserSupport.normalizeNewlines(text)
+        // Key by end-invariant MarkdownBlockID (not raw range) so provisional
+        // blocks keep identity while range.end grows.
+        ForEach(
+            split.stableBlocks.map { block in
+                IdentifiedMarkdownBlock(
+                    id: MarkdownBlockID.id(
+                        messageID: messageID,
+                        block: block,
+                        source: source,
+                        isStreaming: true
+                    ),
+                    block: block
+                )
+            }
+        ) { item in
+            MarkdownBlockView(
+                block: item.block,
+                messageID: messageID,
+                source: source,
+                isStreaming: true
+            )
         }
         if !split.tail.isEmpty {
             StreamingTextView(text: split.tail, isStreaming: true)
@@ -80,6 +100,13 @@ struct MarkdownStreamingView: View {
             _ = msgID
         }
     }
+}
+
+/// ForEach carrier so block identity is `MarkdownBlockID` (Hashable end-invariant
+/// while provisional), not the growing source range alone.
+private struct IdentifiedMarkdownBlock: Identifiable {
+    let id: MarkdownBlockID
+    let block: MarkdownBlock
 }
 
 /// Splits a parsed document into finalized blocks plus a mutable tail string.
@@ -122,9 +149,17 @@ enum StreamingMarkdownSplit {
 struct MarkdownBlockView: View {
     let block: MarkdownBlock
     var messageID: UUID? = nil
+    /// Normalized source for provisional ID computation (K13).
+    var source: String = ""
+    var isStreaming: Bool = false
 
     var body: some View {
-        let blockID = block.blockID(messageID: messageID)
+        let blockID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: block,
+            source: source,
+            isStreaming: isStreaming
+        )
         switch block {
         case .prose(let s, _):
             MarkdownProseView(text: s)
@@ -141,7 +176,7 @@ struct MarkdownBlockView: View {
                 language: lang,
                 code: body,
                 copyButtonAccessibilityIdentifier: blockID.copyCodeAccessibilityIdentifier,
-                isProvisional: !isClosed
+                isProvisional: !isClosed || blockID.isProvisional
             )
         case .fallback(let s, _):
             MarkdownProseView(text: s)
@@ -154,15 +189,13 @@ struct MarkdownProseView: View {
     let text: String
 
     var body: some View {
-        if let attr = try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
+        if let attr = MarkdownAttributed.inline(text) {
             Text(attr)
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.textHigh)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .environment(\.openURL, MarkdownOpenURL.action)
         } else {
             Text(text)
                 .font(Theme.Typography.body)

@@ -29,23 +29,109 @@ enum MarkdownBlockKind: String, Hashable, Sendable, Codable {
 /// Replaces transient segment ordinals such as `markdown.copy-code.3` so
 /// accessibility IDs do not shift after a stream completes or when a message
 /// is reopened from storage.
+///
+/// While **provisional** (open fence or streaming terminal-growing block),
+/// identity is **end-invariant**: only `range.start` participates in equality
+/// and the accessibility string uses a fixed `…-open` suffix so token appends
+/// do not remount views or rotate AX IDs.
 struct MarkdownBlockID: Hashable, Sendable {
     var messageID: UUID?
     var range: MarkdownSourceRange
     var kind: MarkdownBlockKind
+    /// `true` when the block is still growing (open code fence or streaming
+    /// terminal block). Accessibility / ForEach identity ignores `range.end`.
+    var isProvisional: Bool
+
+    init(
+        messageID: UUID?,
+        range: MarkdownSourceRange,
+        kind: MarkdownBlockKind,
+        isProvisional: Bool = false
+    ) {
+        self.messageID = messageID
+        self.range = range
+        self.kind = kind
+        self.isProvisional = isProvisional
+    }
+
+    /// End marker used in accessibility / copy identifiers.
+    /// Provisional → `"open"`; finalized → decimal `range.end`.
+    private var endMarker: String {
+        isProvisional ? "open" : "\(range.end)"
+    }
 
     /// Deterministic accessibility / test identifier.
     ///
-    /// Format: `markdown.<kind>.<messageUUID|orphan>.<start>-<end>`
+    /// Format:
+    /// - Provisional: `markdown.<kind>.<messageUUID|orphan>.<start>-open`
+    /// - Finalized:   `markdown.<kind>.<messageUUID|orphan>.<start>-<end>`
     var accessibilityIdentifier: String {
         let messageKey = messageID?.uuidString.lowercased() ?? "orphan"
-        return "markdown.\(kind.rawValue).\(messageKey).\(range.start)-\(range.end)"
+        return "markdown.\(kind.rawValue).\(messageKey).\(range.start)-\(endMarker)"
     }
 
     /// Copy-control identifier for code blocks (keeps the historical prefix
     /// so e2e scripts can match either legacy ordinal or stable IDs).
     var copyCodeAccessibilityIdentifier: String {
-        "markdown.copy-code.\(messageID?.uuidString.lowercased() ?? "orphan").\(range.start)-\(range.end)"
+        let messageKey = messageID?.uuidString.lowercased() ?? "orphan"
+        return "markdown.copy-code.\(messageKey).\(range.start)-\(endMarker)"
+    }
+
+    // MARK: Hashable (end-invariant while provisional)
+
+    static func == (lhs: MarkdownBlockID, rhs: MarkdownBlockID) -> Bool {
+        lhs.messageID == rhs.messageID
+            && lhs.kind == rhs.kind
+            && lhs.range.start == rhs.range.start
+            && lhs.isProvisional == rhs.isProvisional
+            && (lhs.isProvisional || lhs.range.end == rhs.range.end)
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(messageID)
+        hasher.combine(kind)
+        hasher.combine(range.start)
+        hasher.combine(isProvisional)
+        if !isProvisional {
+            hasher.combine(range.end)
+        }
+    }
+
+    // MARK: Factory
+
+    /// Normative provisional predicate (K13):
+    /// open code fence **or** streaming terminal-growing block.
+    static func isProvisional(
+        block: MarkdownBlock,
+        source: String,
+        isStreaming: Bool
+    ) -> Bool {
+        if case .code(_, _, _, let isClosed) = block, !isClosed {
+            return true
+        }
+        if isStreaming, block.range.end == source.utf16.count {
+            return true
+        }
+        return false
+    }
+
+    /// Build a block ID with the correct provisional flag for streaming.
+    ///
+    /// - Parameters:
+    ///   - source: normalized document source (UTF-16 length basis for ranges).
+    ///   - isStreaming: true for in-flight assistant bubbles / MarkdownStreamingView.
+    static func id(
+        messageID: UUID?,
+        block: MarkdownBlock,
+        source: String,
+        isStreaming: Bool
+    ) -> MarkdownBlockID {
+        MarkdownBlockID(
+            messageID: messageID,
+            range: block.range,
+            kind: block.kind,
+            isProvisional: isProvisional(block: block, source: source, isStreaming: isStreaming)
+        )
     }
 }
 
@@ -95,8 +181,15 @@ enum MarkdownBlock: Hashable, Sendable {
         }
     }
 
-    func blockID(messageID: UUID?) -> MarkdownBlockID {
-        MarkdownBlockID(messageID: messageID, range: range, kind: kind)
+    /// Convenience ID for completed (non-streaming) renders.
+    /// Open fences still mark provisional so copy IDs stay end-invariant.
+    func blockID(messageID: UUID?, source: String = "", isStreaming: Bool = false) -> MarkdownBlockID {
+        MarkdownBlockID.id(
+            messageID: messageID,
+            block: self,
+            source: source,
+            isStreaming: isStreaming
+        )
     }
 }
 
@@ -120,8 +213,15 @@ struct MarkdownDocument: Hashable, Sendable {
         parserName: "none"
     )
 
-    func blockIDs(messageID: UUID?) -> [MarkdownBlockID] {
-        blocks.map { $0.blockID(messageID: messageID) }
+    func blockIDs(messageID: UUID?, isStreaming: Bool = false) -> [MarkdownBlockID] {
+        blocks.map {
+            MarkdownBlockID.id(
+                messageID: messageID,
+                block: $0,
+                source: source,
+                isStreaming: isStreaming
+            )
+        }
     }
 }
 
