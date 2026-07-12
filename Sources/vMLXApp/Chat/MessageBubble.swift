@@ -328,11 +328,8 @@ struct MessageBubble: View {
         #if canImport(AppKit)
         let payload: String
         if plain {
-            // Strip common Markdown markers for a plain-text pasteboard payload.
-            payload = message.content
-                .replacingOccurrences(of: "**", with: "")
-                .replacingOccurrences(of: "__", with: "")
-                .replacingOccurrences(of: "```", with: "")
+            // Structure-aware plain text: tables → TSV, code → body, prose stripped.
+            payload = MarkdownPlainText.render(source: message.content)
         } else {
             payload = message.content
         }
