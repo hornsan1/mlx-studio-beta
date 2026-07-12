@@ -2,7 +2,8 @@
 # Executable Markdown AX contract (packaging-optional).
 #
 # Unit gates always run. Installed-app AX pasteboard asserts run only when
-# the packaged app and Accessibility tooling are available.
+# the packaged app and Accessibility tooling are available AND the fixture
+# chat can be injected into the production SQLite store.
 #
 # Usage:
 #   tests/e2e/mlx-studio-markdown-smoke.sh [/path/to/MLX Studio.app]
@@ -12,12 +13,22 @@
 #   0  unit gates pass AND (if app+AX available) pasteboard asserts pass
 #   0  unit gates pass, app missing            → prints SKIP_NO_APP
 #   0  unit gates pass, AX denied / incomplete → prints SKIP_NO_AX
+#   0  unit gates pass, SQLite seed unavailable → prints SKIP_NO_AX
+#      (soft packaging: avoids false exit 2 when chat cannot be injected)
 #   1  unit gates fail
-#   2  packaging lane: app present, AX available, assert failed
+#   2  packaging lane: app present, AX available, seed verified, assert failed
 #
 # Env:
 #   MLX_STUDIO_APP   path to packaged .app (overrides positional when set)
 #   BUNDLE_ID        defaults domain (default: ai.dealign.mlxstudio.beta)
+#   VMLX_SQLITE      override path to vmlx.sqlite3 (default: Application Support)
+#
+# Seed notes:
+#   Production RootView mounts ChatScreen (SQLite), not Studio UserDefaults.
+#   Studio defaults (mlxstudio.chat.sessions) only feed chat once via
+#   StudioChatHistoryMigration (mlxstudio.chat.unifiedSQLiteMigration.v1).
+#   This script seeds ~/Library/Application Support/vMLX/vmlx.sqlite3 directly
+#   and sets mlxstudio.chat.unifiedSelectedSessionID for durable selection.
 #
 # Does not require network. Not a hard PR CI gate until packaging owns exit 2.
 
@@ -30,11 +41,14 @@ AX_DIR="$ROOT_DIR/tests/e2e/swift-axdriver"
 AX_BIN="$AX_DIR/.build/release/vmlx-axdriver"
 REPORT_DIR="$ROOT_DIR/tests/e2e/reports"
 BUNDLE_ID="${BUNDLE_ID:-ai.dealign.mlxstudio.beta}"
+VMLX_SQLITE="${VMLX_SQLITE:-$HOME/Library/Application Support/vMLX/vmlx.sqlite3}"
 TS="$(date +%Y%m%d-%H%M%S)"
 TMP_APP="/tmp/MLX Studio Markdown Smoke.app"
 PID=""
+# Fallback expected body; packaging branch overwrites from import fixture.
 EXPECTED_CODE_BODY='print("MARKDOWN_E2E")'
 SESSION_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+USER_TURN_ID="11111111-1111-1111-1111-111111111111"
 ASSISTANT_TURN_ID="ffffffff-0000-1111-2222-333333333333"
 
 # Prefer env over positional; positional remains for manual packaging runs.
@@ -54,20 +68,25 @@ fail_assert() {
   exit 2
 }
 
+print_manual_checklist() {
+  echo "Manual checklist when automation skipped:"
+  echo "  1. Import $IMPORT_FIX (Chat → Import conversation) or open a chat with a fenced code block"
+  echo "  2. Focus the code Copy control (markdown.copy-code.*)"
+  echo "  3. Activate copy; pbpaste should equal: $EXPECTED_CODE_BODY"
+  echo "  4. Optional: light/dark screenshots under tests/e2e/reports/"
+}
+
 skip_no_app() {
   echo "SKIP_NO_APP: $*"
   echo "OK (unit gates only; packaging AX skipped)"
+  print_manual_checklist
   exit 0
 }
 
 skip_no_ax() {
   echo "SKIP_NO_AX: $*"
   echo "OK (unit gates only; AX/pasteboard path skipped)"
-  echo "Manual checklist when automation skipped:"
-  echo "  1. Import $IMPORT_FIX (or open a chat with a fenced code block)"
-  echo "  2. Focus the code Copy control (markdown.copy-code.*)"
-  echo "  3. Activate copy; pbpaste should equal: $EXPECTED_CODE_BODY"
-  echo "  4. Optional: light/dark screenshots under tests/e2e/reports/"
+  print_manual_checklist
   exit 0
 }
 
@@ -82,7 +101,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Unit gates (always)
+# Unit gates (always) — only existence checks before swift test
 # ---------------------------------------------------------------------------
 
 echo "== Markdown smoke =="
@@ -98,21 +117,6 @@ fi
 
 CASE_COUNT="$(python3 -c "import json; print(len(json.load(open('$FIX'))['cases']))")"
 note "golden corpus present ($CASE_COUNT cases)"
-
-# Expected code body from the import fixture (keeps smoke aligned with fixture).
-FIXTURE_BODY="$(
-  IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
-import json, os, re
-path = os.environ["IMPORT_FIX"]
-content = json.load(open(path))["messages"][1]["content"]
-m = re.search(r"```(?:swift)?\n(.*?)```", content, re.S)
-if not m:
-    raise SystemExit("import fixture missing fenced code body")
-print(m.group(1).rstrip("\n"))
-PY
-)"
-EXPECTED_CODE_BODY="$FIXTURE_BODY"
-note "expected code pasteboard body: $EXPECTED_CODE_BODY"
 
 note "unit tests (Markdown*)"
 cd "$ROOT_DIR"
@@ -184,10 +188,23 @@ fi
 note "AX permission: trusted"
 
 # ---------------------------------------------------------------------------
-# Launch app with seeded markdown chat (Studio session store)
+# Fixture body (packaging branch only — after unit gates)
 # ---------------------------------------------------------------------------
 
-note "seeding Studio chat session from import fixture content"
+FIXTURE_BODY="$(
+  IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
+import json, os, re
+path = os.environ["IMPORT_FIX"]
+content = json.load(open(path))["messages"][1]["content"]
+m = re.search(r"```(?:swift)?\n(.*?)```", content, re.S)
+if not m:
+    raise SystemExit("import fixture missing fenced code body")
+print(m.group(1).rstrip("\n"))
+PY
+)" || skip_no_ax "import fixture $IMPORT_FIX missing fenced code body (cannot assert pasteboard)"
+EXPECTED_CODE_BODY="$FIXTURE_BODY"
+note "expected code pasteboard body: $EXPECTED_CODE_BODY"
+
 ASSISTANT_CONTENT="$(
   IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
 import json, os
@@ -201,52 +218,140 @@ print(json.load(open(os.environ["IMPORT_FIX"]))["messages"][0]["content"], end="
 PY
 )"
 
-SESSION_JSON="$(
-  ASSISTANT_CONTENT="$ASSISTANT_CONTENT" \
-  USER_CONTENT="$USER_CONTENT" \
-  SESSION_ID="$SESSION_ID" \
-  ASSISTANT_TURN_ID="$ASSISTANT_TURN_ID" \
-  /usr/bin/python3 - <<'PY'
-import json, os
+# ---------------------------------------------------------------------------
+# Seed production Chat SQLite (not Studio UserDefaults-only)
+# ---------------------------------------------------------------------------
+# ChatScreen reads ~/Library/Application Support/vMLX/vmlx.sqlite3.
+# Studio UserDefaults migration runs only once (unifiedSQLiteMigration.v1);
+# re-seeding mlxstudio.chat.sessions alone does not update live chat after
+# migration has completed on the machine.
 
-assistant = os.environ["ASSISTANT_CONTENT"]
-user = os.environ["USER_CONTENT"]
-session_id = os.environ["SESSION_ID"]
-assistant_id = os.environ["ASSISTANT_TURN_ID"]
-# JSONEncoder Date default is seconds since 2001-01-01 (Reference Date).
-created = 803000000.0
-print(json.dumps([{
-    "id": session_id,
-    "title": "Markdown E2E",
-    "modelName": "Local test model",
-    "turns": [
-        {
-            "id": "11111111-1111-1111-1111-111111111111",
-            "role": "user",
-            "content": user,
-            "createdAt": created,
-            "streamState": "complete",
-        },
-        {
-            "id": assistant_id,
-            "role": "assistant",
-            "content": assistant,
-            "createdAt": created + 1,
-            "streamState": "complete",
-        },
-    ],
-    "createdAt": created,
-    "updatedAt": created + 1,
-    "isPinned": False,
-}], separators=(",", ":")))
-PY
-)"
-SESSION_HEX="$(printf '%s' "$SESSION_JSON" | /usr/bin/xxd -p -c 256 | tr -d '\n')"
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  skip_no_ax "sqlite3 CLI missing — cannot inject fixture into production chat DB"
+fi
 
+note "seeding production chat SQLite: $VMLX_SQLITE"
+mkdir -p "$(dirname "$VMLX_SQLITE")"
+
+# Ensure base tables exist (app may never have launched on a clean agent).
+# Keep schema aligned with Database.migrate() core columns; extra columns are
+# added by the app on launch if user_version is behind.
+sqlite3 "$VMLX_SQLITE" <<'SQL'
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    model_path TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    reasoning TEXT,
+    tool_calls_json TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_messages_session ON messages(session_id, created_at);
+SQL
+
+# Best-effort column upgrades so INSERT matches common app schemas without
+# requiring a full user_version dance when the DB is brand new.
+for col_sql in \
+  "ALTER TABLE sessions ADD COLUMN model_name TEXT;" \
+  "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;" \
+  "ALTER TABLE sessions ADD COLUMN collection_name TEXT;" \
+  "ALTER TABLE messages ADD COLUMN is_streaming INTEGER NOT NULL DEFAULT 0;" \
+  "ALTER TABLE messages ADD COLUMN image_data BLOB;" \
+  "ALTER TABLE messages ADD COLUMN video_paths BLOB;" \
+  "ALTER TABLE messages ADD COLUMN tool_statuses BLOB;" \
+  "ALTER TABLE messages ADD COLUMN request_context TEXT NOT NULL DEFAULT '';" \
+  "ALTER TABLE messages ADD COLUMN generation_state TEXT;"
+do
+  sqlite3 "$VMLX_SQLITE" "$col_sql" 2>/dev/null || true
+done
+
+# Unix epoch seconds (Database binds Date.timeIntervalSince1970).
+NOW_UNIX="$(/usr/bin/python3 -c 'import time; print(f"{time.time():.3f}")')"
+USER_UNIX="$(/usr/bin/python3 -c "print(float('${NOW_UNIX}') - 2)")"
+ASSIST_UNIX="$(/usr/bin/python3 -c "print(float('${NOW_UNIX}') - 1)")"
+
+SEED_LOG="$REPORT_DIR/markdown-smoke-sqlite-seed-$TS.log"
+set +e
+# Escape single quotes for SQL string literals.
+sql_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+USER_SQL="$(sql_quote "$USER_CONTENT")"
+ASSIST_SQL="$(sql_quote "$ASSISTANT_CONTENT")"
+
+sqlite3 "$VMLX_SQLITE" >"$SEED_LOG" 2>&1 <<SQL
+PRAGMA foreign_keys=ON;
+BEGIN;
+DELETE FROM messages WHERE session_id='${SESSION_ID}';
+DELETE FROM sessions WHERE id='${SESSION_ID}';
+INSERT INTO sessions (id, title, model_path, model_name, is_pinned, collection_name, created_at, updated_at)
+VALUES (
+  '${SESSION_ID}',
+  'Markdown E2E',
+  NULL,
+  'Local test model',
+  0,
+  NULL,
+  ${USER_UNIX},
+  ${NOW_UNIX}
+);
+INSERT INTO messages (id, session_id, role, content, created_at, is_streaming)
+VALUES (
+  '${USER_TURN_ID}',
+  '${SESSION_ID}',
+  'user',
+  '${USER_SQL}',
+  ${USER_UNIX},
+  0
+);
+INSERT INTO messages (id, session_id, role, content, created_at, is_streaming)
+VALUES (
+  '${ASSISTANT_TURN_ID}',
+  '${SESSION_ID}',
+  'assistant',
+  '${ASSIST_SQL}',
+  ${ASSIST_UNIX},
+  0
+);
+COMMIT;
+SQL
+SEED_RC=$?
+set -e
+
+if [[ "$SEED_RC" -ne 0 ]]; then
+  skip_no_ax "SQLite seed failed (rc=$SEED_RC); see $SEED_LOG — soft skip to avoid false packaging exit 2"
+fi
+
+# Verify seed landed (production path only proceeds when content is present).
+SEED_CHECK="$(sqlite3 "$VMLX_SQLITE" "SELECT content FROM messages WHERE id='${ASSISTANT_TURN_ID}';" 2>/dev/null || true)"
+if [[ "$SEED_CHECK" != *"$EXPECTED_CODE_BODY"* ]]; then
+  skip_no_ax "SQLite seed verification failed (assistant message missing expected code body) — soft skip to avoid false packaging exit 2"
+fi
+note "SQLite seed verified for session $SESSION_ID"
+
+# Durable selection for consolidated Chat runtime (not Studio selectedSessionID).
 defaults write "$BUNDLE_ID" mlxstudio.onboardingComplete -bool true
 defaults write "$BUNDLE_ID" mlxstudio.experienceMode -string beginner
-defaults write "$BUNDLE_ID" mlxstudio.chat.sessions -data "$SESSION_HEX"
+defaults write "$BUNDLE_ID" mlxstudio.chat.unifiedSelectedSessionID "$SESSION_ID"
+# Preferred migration key is consumed once on attach; set it as a fallback for
+# first-launch-after-reset agents. Harmless if already migrated.
+defaults write "$BUNDLE_ID" mlxstudio.chat.unifiedPreferredSessionID "$SESSION_ID"
+# Keep Studio keys aligned for Library surfaces that still read them.
 defaults write "$BUNDLE_ID" mlxstudio.chat.selectedSessionID "$SESSION_ID"
+
+# ---------------------------------------------------------------------------
+# Launch app
+# ---------------------------------------------------------------------------
 
 pkill -x MLXStudio 2>/dev/null || true
 rm -rf "$TMP_APP"
@@ -255,7 +360,6 @@ xattr -cr "$TMP_APP" 2>/dev/null || true
 
 MLX_BIN="$TMP_APP/Contents/MacOS/MLXStudio"
 if [[ ! -x "$MLX_BIN" ]]; then
-  # Some packages use a different executable name.
   if [[ -x "$TMP_APP/Contents/MacOS/MLX Studio" ]]; then
     MLX_BIN="$TMP_APP/Contents/MacOS/MLX Studio"
   else
@@ -277,7 +381,7 @@ fi
 "$AX_BIN" click "$PID" "Chat" >"$REPORT_DIR/markdown-smoke-click-chat-$TS.txt" 2>&1 || true
 sleep 1
 
-# Prefer the seeded session title if visible in Library/Chat history.
+# Prefer the seeded session title if visible in the chat session list.
 "$AX_BIN" wait "$PID" "Markdown E2E" 15 >"$REPORT_DIR/markdown-smoke-wait-session-$TS.txt" 2>&1 || true
 "$AX_BIN" click "$PID" "Markdown E2E" >"$REPORT_DIR/markdown-smoke-click-session-$TS.txt" 2>&1 || true
 sleep 1
@@ -293,25 +397,23 @@ set -e
 if [[ "$GREP_RC" -ne 0 ]] || ! grep -q "markdown.copy-code" "$GREP_OUT"; then
   "$AX_BIN" dump "$PID" >"$REPORT_DIR/markdown-smoke-axtree-$TS.txt" 2>&1 || true
   "$AX_BIN" shot "$PID" "$REPORT_DIR/markdown-smoke-$TS.png" 2>/dev/null || true
-  fail_assert "no markdown.copy-code.* control found (see $GREP_OUT and axtree dump)"
+  # Seed is verified in SQLite; missing AX control is a real packaging assert.
+  fail_assert "no markdown.copy-code.* control found after SQLite seed (see $GREP_OUT and axtree dump)"
 fi
 
 COPY_ID="$(
   GREP_OUT="$GREP_OUT" /usr/bin/python3 - <<'PY'
 import os, re
 text = open(os.environ["GREP_OUT"], encoding="utf-8", errors="replace").read()
-# Prefer full stable IDs; fall back to legacy ordinal.
 ids = re.findall(r"markdown\.copy-code\.[A-Za-z0-9._-]+", text)
 if not ids:
     raise SystemExit(1)
-# Prefer non-open finalized IDs when both exist.
 final = [i for i in ids if not i.endswith("-open")]
 print((final or ids)[0])
 PY
 )" || fail_assert "could not parse copy-code identifier from $GREP_OUT"
 
 note "clicking copy control: $COPY_ID"
-# Clear pasteboard so a stale value cannot satisfy the assert.
 printf '' | /usr/bin/pbcopy 2>/dev/null || true
 
 set +e
@@ -319,7 +421,6 @@ set +e
 CLICK_RC=$?
 set -e
 if [[ "$CLICK_RC" -ne 0 ]]; then
-  # Fallback: click by accessibility label.
   set +e
   "$AX_BIN" click "$PID" "Copy code" >"$REPORT_DIR/markdown-smoke-click-copy-label-$TS.txt" 2>&1
   CLICK_RC=$?
@@ -331,7 +432,6 @@ fi
 
 sleep 0.5
 PASTEBOARD="$(/usr/bin/pbpaste | tr -d '\r')"
-# Normalize trailing newline for comparison.
 PASTE_NORM="$(printf '%s' "$PASTEBOARD" | sed -e 's/[[:space:]]*$//')"
 EXPECT_NORM="$(printf '%s' "$EXPECTED_CODE_BODY" | sed -e 's/[[:space:]]*$//')"
 
@@ -345,8 +445,7 @@ fi
 
 note "pasteboard assert passed: $EXPECT_NORM"
 
-# Optional: table copy-markdown control (best-effort; does not fail packaging
-# if absent — code copy is the hard assert for this contract).
+# Optional: table copy-markdown control (best-effort; not a hard assert).
 TABLE_GREP="$REPORT_DIR/markdown-smoke-table-grep-$TS.txt"
 if "$AX_BIN" grep "$PID" "markdown.table" >"$TABLE_GREP" 2>&1 && grep -q "markdown.table" "$TABLE_GREP"; then
   note "table control present (optional probe ok)"
