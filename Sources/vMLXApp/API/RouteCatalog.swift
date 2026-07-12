@@ -71,7 +71,8 @@ public struct RouteEntry: Identifiable, Hashable, Sendable {
 }
 
 public enum RouteCatalog {
-    /// Full table — 52 routes as of §290.
+    /// User-visible route table. Placeholder-only capabilities are omitted;
+    /// specifically, TTS stays hidden until a neural backend ships.
     public static let all: [RouteEntry] = [
         // MARK: Liveness
         .init(method: .get, path: "/health",
@@ -134,15 +135,6 @@ public enum RouteCatalog {
               family: .openAI, brief: "Whisper speech-to-English translation",
               auth: .bearer, streams: false, modality: .audio, sampleBody: "",
               docsAnchor: "audio-translate"),
-        .init(method: .post, path: "/v1/audio/speech",
-              family: .openAI, brief: "TTS — Kokoro / Parler / Dia voice synthesis",
-              auth: .bearer, streams: false, modality: .audio,
-              sampleBody: #"{"model":"kokoro","input":"hello world","voice":"af_sky"}"#,
-              docsAnchor: "audio-speech"),
-        .init(method: .get, path: "/v1/audio/voices",
-              family: .openAI, brief: "Enumerate available TTS voices",
-              auth: .bearer, streams: false, modality: .audio, sampleBody: "",
-              docsAnchor: "audio-voices"),
         .init(method: .post, path: "/v1/responses",
               family: .openAI, brief: "OpenAI Responses API (tools + thinking blocks)",
               auth: .bearer, streams: true, modality: .text,

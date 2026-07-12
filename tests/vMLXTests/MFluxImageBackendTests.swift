@@ -9,6 +9,9 @@ final class MFluxImageBackendTests: XCTestCase {
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "flux1-schnell"), "schnell")
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "FLUX.1-schnell"), "schnell")
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "flux1-dev"), "dev")
+        XCTAssertEqual(MFluxImageBackend.baseModelName(for: "krea-2-turbo"), "krea-2")
+        XCTAssertEqual(MFluxImageBackend.baseModelName(for: "krea2"), "krea-2")
+        XCTAssertEqual(MFluxImageBackend.baseModelName(for: "flux-krea-dev"), "krea-dev")
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "flux2-klein"), "flux2-klein-4b")
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "z-image-turbo"), "z-image-turbo")
         XCTAssertEqual(MFluxImageBackend.baseModelName(for: "qwen-image"), "qwen")
@@ -18,6 +21,7 @@ final class MFluxImageBackendTests: XCTestCase {
     func testRuntimeNamesMapToDedicatedMFluxExecutables() {
         XCTAssertEqual(MFluxImageBackend.executableName(for: "flux1-schnell"), "mflux-generate")
         XCTAssertEqual(MFluxImageBackend.executableName(for: "FLUX.1-dev"), "mflux-generate")
+        XCTAssertEqual(MFluxImageBackend.executableName(for: "krea-2-turbo"), "mflux-generate-krea2")
         XCTAssertEqual(MFluxImageBackend.executableName(for: "flux2-klein"), "mflux-generate-flux2")
         XCTAssertEqual(MFluxImageBackend.executableName(for: "z-image-turbo"), "mflux-generate-z-image-turbo")
         XCTAssertEqual(MFluxImageBackend.executableName(for: "qwen-image"), "mflux-generate-qwen")

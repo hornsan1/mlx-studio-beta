@@ -1015,17 +1015,17 @@ public enum L10n {
             ko: "생성 중…",
             zh: "生成中…"
         )
-        public static let stepFormat = L10nEntry(
-            en: "Step %lld / %lld",
-            ja: "ステップ %lld / %lld",
-            ko: "스텝 %lld / %lld",
-            zh: "步骤 %lld / %lld"
+        public static let requestedStepsFormat = L10nEntry(
+            en: "Requested %lld steps",
+            ja: "%lld ステップ要求",
+            ko: "%lld단계 요청",
+            zh: "请求 %lld 步"
         )
-        public static let elapsedEtaFormat = L10nEntry(
-            en: "%llds elapsed · ETA %@",
-            ja: "%llds 経過 · 残り %@",
-            ko: "%llds 경과 · ETA %@",
-            zh: "已用 %llds · 剩余 %@"
+        public static let elapsedFormat = L10nEntry(
+            en: "%llds elapsed",
+            ja: "%llds 経過",
+            ko: "%llds 경과",
+            zh: "已用 %llds"
         )
         public static let change = L10nEntry(
             en: "Change",

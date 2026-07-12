@@ -8,6 +8,12 @@ import vMLXTheme
 struct SessionsSidebar: View {
     @Bindable var vm: ChatViewModel
     @Environment(\.appLocale) private var appLocale
+    @State private var importError: String?
+    @State private var exportError: String?
+
+    private var collectionNames: [String] {
+        Array(Set(vm.sessions.compactMap(\.collectionName))).sorted()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +59,14 @@ struct SessionsSidebar: View {
             .padding(.horizontal, Theme.Spacing.md)
             .padding(.top, Theme.Spacing.sm)
 
+            Button(action: importConversation) {
+                Label("Import conversation", systemImage: "square.and.arrow.down")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.textMid)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, Theme.Spacing.xs)
+
             ScrollView {
                 LazyVStack(spacing: Theme.Spacing.xs) {
                     ForEach(vm.filteredSessions) { s in
@@ -62,7 +76,11 @@ struct SessionsSidebar: View {
                             onSelect: { vm.selectSession(s.id) },
                             onDelete: { vm.deleteSession(s.id) },
                             onRename: { newTitle in vm.renameSession(s.id, to: newTitle) },
-                            onExport: { exportSession(s) }
+                            onExport: { exportSession(s) },
+                            onDuplicate: { vm.duplicateSession(s.id) },
+                            onTogglePinned: { vm.togglePinned(s.id) },
+                            onMove: { vm.moveSession(s.id, toCollection: $0) },
+                            availableCollections: collectionNames
                         )
                     }
                 }
@@ -77,6 +95,39 @@ struct SessionsSidebar: View {
                 .padding(.horizontal, Theme.Spacing.md)
                 .padding(.vertical, Theme.Spacing.sm)
         }
+        .alert("Import failed", isPresented: Binding(
+            get: { importError != nil },
+            set: { if !$0 { importError = nil } }
+        )) {
+            Button("OK", role: .cancel) { importError = nil }
+        } message: {
+            Text(importError ?? "Unknown import error")
+        }
+        .alert("Export failed", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "The conversation could not be written.")
+        }
+    }
+
+    private func importConversation() {
+        #if canImport(AppKit)
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.title = "Import conversation"
+        panel.prompt = "Import"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try vm.importConversation(Data(contentsOf: url))
+        } catch {
+            importError = error.localizedDescription
+        }
+        #endif
     }
 
     /// Opens an NSSavePanel then writes the rendered Markdown or JSON
@@ -111,7 +162,14 @@ struct SessionsSidebar: View {
             } else {
                 payload = ChatExporter.exportToMarkdown(session, messages: msgs)
             }
-            try? payload.data(using: .utf8)?.write(to: url, options: .atomic)
+            do {
+                guard let data = payload.data(using: .utf8) else {
+                    throw CocoaError(.fileWriteInapplicableStringEncoding)
+                }
+                try data.write(to: url, options: .atomic)
+            } catch {
+                exportError = error.localizedDescription
+            }
         }
         #endif
     }
@@ -124,6 +182,10 @@ private struct SessionRow: View {
     let onDelete: () -> Void
     let onRename: (String) -> Void
     let onExport: () -> Void
+    let onDuplicate: () -> Void
+    let onTogglePinned: () -> Void
+    let onMove: (String?) -> Void
+    let availableCollections: [String]
 
     @State private var hovered = false
     @State private var showDeleteConfirm = false
@@ -142,10 +204,23 @@ private struct SessionRow: View {
                         .onSubmit { commitRename() }
                         .onExitCommand { cancelRename() }
                 } else {
-                    Text(session.title)
-                        .font(Theme.Typography.body)
-                        .foregroundStyle(isActive ? Theme.Colors.textHigh : Theme.Colors.textMid)
-                        .lineLimit(1)
+                    if session.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.Colors.warning)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(session.title)
+                            .font(Theme.Typography.body)
+                            .foregroundStyle(isActive ? Theme.Colors.textHigh : Theme.Colors.textMid)
+                            .lineLimit(1)
+                        if let detail = sessionDetail {
+                            Text(detail)
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.textLow)
+                                .lineLimit(1)
+                        }
+                    }
                 }
                 Spacer()
                 if hovered && !isRenaming {
@@ -180,6 +255,16 @@ private struct SessionRow: View {
         .onHover { hovered = $0 }
         .contextMenu {
             Button(L10n.Common.rename.render(appLocale)) { startRename() }
+            Button(session.isPinned ? "Unpin" : "Pin") { onTogglePinned() }
+            Button("Duplicate") { onDuplicate() }
+            Menu("Move to collection") {
+                Button("Unfiled") { onMove(nil) }
+                ForEach(availableCollections, id: \.self) { name in
+                    Button(name) { onMove(name) }
+                }
+                Divider()
+                Button("New collection…") { startCollectionRename() }
+            }
             Button(L10n.Common.exportAsMarkdown.render(appLocale)) { onExport() }
             Divider()
             Button(L10n.Common.deleteChat.render(appLocale), role: .destructive) {
@@ -196,6 +281,31 @@ private struct SessionRow: View {
         } message: {
             Text(L10n.ChatUI.deleteSessionConfirm.format(locale: appLocale, session.title as NSString))
         }
+        .alert("New collection", isPresented: $showCollectionPrompt) {
+            TextField("Collection name", text: $collectionDraft)
+            Button("Cancel", role: .cancel) { }
+            Button("Move") { onMove(collectionDraft) }
+                .disabled(collectionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Keep related conversations together without changing their content.")
+        }
+    }
+
+    @State private var showCollectionPrompt = false
+    @State private var collectionDraft = ""
+
+    private var sessionDetail: String? {
+        let parts = [session.collectionName, session.modelName]
+            .compactMap { value in
+                value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func startCollectionRename() {
+        collectionDraft = session.collectionName ?? ""
+        showCollectionPrompt = true
     }
 
     private func startRename() {

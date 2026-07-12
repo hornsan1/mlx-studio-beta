@@ -73,6 +73,56 @@ final class ImageModelInstallVerifierTests: XCTestCase {
         XCTAssertTrue(issues.contains("tokenizer_2/tokenizer.json is missing"))
     }
 
+    func testFluxKreaDevLayoutUsesFluxDevRequirements() throws {
+        let root = try makeFlux1Directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertTrue(
+            ImageModelInstallVerifier.issues(
+                runtimeName: "flux-krea-dev",
+                repo: "black-forest-labs/FLUX.1-Krea-dev",
+                localPath: root
+            ).isEmpty
+        )
+
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent("text_encoder_2/0.safetensors")
+        )
+
+        let issues = ImageModelInstallVerifier.issues(
+            runtimeName: "flux-krea-dev",
+            repo: "black-forest-labs/FLUX.1-Krea-dev",
+            localPath: root
+        )
+
+        XCTAssertTrue(issues.contains("text_encoder_2/0.safetensors is missing"))
+    }
+
+    func testKrea2TurboLayoutUsesNativeRootCheckpoint() throws {
+        let root = try makeKrea2Directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertTrue(
+            ImageModelInstallVerifier.issues(
+                runtimeName: "krea-2-turbo",
+                repo: "krea/Krea-2-Turbo",
+                localPath: root
+            ).isEmpty
+        )
+
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent("turbo.safetensors")
+        )
+
+        let issues = ImageModelInstallVerifier.issues(
+            runtimeName: "krea/Krea-2-Turbo",
+            repo: "krea/Krea-2-Turbo",
+            localPath: root
+        )
+
+        XCTAssertTrue(issues.contains("turbo.safetensors is missing"))
+    }
+
     func testZImageTurboLayoutRequiresTokenizer() throws {
         let root = try makeZImageDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -215,6 +265,21 @@ final class ImageModelInstallVerifierTests: XCTestCase {
             root.appendingPathComponent("vae"),
             weightMap: ["decoder.conv_in.conv2d.weight": "0.safetensors"]
         )
+        try Data("{}".utf8).write(to: root.appendingPathComponent("tokenizer/tokenizer.json"))
+        return root
+    }
+
+    private func makeKrea2Directory() throws -> URL {
+        let root = try makeDirectory(named: "vmlx-image-krea2")
+        try Data("stub".utf8).write(to: root.appendingPathComponent("turbo.safetensors"))
+        for component in ["vae", "text_encoder", "tokenizer"] {
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(component, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+        try Data("stub".utf8).write(to: root.appendingPathComponent("vae/diffusion_pytorch_model.safetensors"))
+        try Data("stub".utf8).write(to: root.appendingPathComponent("text_encoder/model.safetensors"))
         try Data("{}".utf8).write(to: root.appendingPathComponent("tokenizer/tokenizer.json"))
         return root
     }

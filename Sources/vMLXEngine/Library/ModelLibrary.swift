@@ -11,6 +11,20 @@ import CryptoKit
 /// the in-memory cache + subscriber list are mutated only on the actor.
 public actor ModelLibrary {
 
+    /// A declared `*-00001-of-00002.safetensors` set. The directory is part
+    /// of the identity because diffusion-style layouts can contain multiple
+    /// independently sharded components under one model root.
+    private struct SafetensorShardSetKey: Hashable {
+        let directoryPath: String
+        let prefix: String
+        let expectedShardCount: Int
+    }
+
+    private struct SafetensorShardDescriptor {
+        let key: SafetensorShardSetKey
+        let index: Int
+    }
+
     // MARK: - Types
 
     public struct ModelEntry: Sendable, Identifiable, Hashable {
@@ -503,6 +517,7 @@ public actor ModelLibrary {
                 if !trimmed.isEmpty {
                     let candidate = snapshots.appendingPathComponent(trimmed, isDirectory: true)
                     if Self.hasLoadableModelMarker(at: candidate),
+                       Self.hasCompleteSafetensorShardSets(at: candidate),
                        totalWeightBytes(in: candidate) > 0
                     {
                         refMainURL = candidate
@@ -517,7 +532,10 @@ public actor ModelLibrary {
             // Fall back to largest-weight snapshot.
             var best: (url: URL, size: Int64, mtime: Date)? = nil
             for rev in revs {
-                guard Self.hasLoadableModelMarker(at: rev) else { continue }
+                guard Self.hasLoadableModelMarker(at: rev),
+                      Self.hasCompleteSafetensorShardSets(at: rev) else {
+                    continue
+                }
                 let size = totalWeightBytes(in: rev)
                 guard size > 0 else { continue }
                 let mtime = (try? fm.attributesOfItem(atPath: rev.path))?[.modificationDate]
@@ -602,6 +620,15 @@ public actor ModelLibrary {
 
     private func buildEntry(dir: URL, source: Source, now: Date) -> ModelEntry? {
         let canonical = dir.resolvingSymlinksInPath()
+        // A Hugging Face snapshot can expose config/tokenizer plus only the
+        // first safetensors shard while a download is still in progress.
+        // Treat any declared multi-shard set as all-or-nothing: listing an
+        // incomplete directory as ready invites a load-time failure. Keep the
+        // same guard here (in addition to HF candidate selection) so custom
+        // directories and bundled resources cannot bypass it.
+        guard Self.hasCompleteSafetensorShardSets(at: canonical) else {
+            return nil
+        }
         // CapabilityDetector is the source of truth for family + parser
         // metadata. ModelDetector is still used internally by the engine
         // load path; the two agree on model_type resolution.
@@ -899,6 +926,103 @@ public actor ModelLibrary {
             || hasImageRuntimeLayout(at: dir)
     }
 
+    /// Returns false when a model directory contains a declared safetensors
+    /// shard set with a missing, dangling, duplicate, or out-of-range member.
+    ///
+    /// This deliberately only recognizes the standard
+    /// `<prefix>-<index>-of-<count>.safetensors` convention. Directories with
+    /// ordinary `model.safetensors` files retain their existing discovery
+    /// behaviour, while every independently sharded set below a model root
+    /// must be complete before the root is considered ready.
+    internal static func hasCompleteSafetensorShardSets(at dir: URL) -> Bool {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return true
+        }
+
+        var indexesBySet: [SafetensorShardSetKey: Set<Int>] = [:]
+        var invalidSets = Set<SafetensorShardSetKey>()
+
+        for case let url as URL in enumerator {
+            guard let descriptor = safetensorShardDescriptor(for: url) else {
+                continue
+            }
+
+            let resolved = url.resolvingSymlinksInPath()
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: resolved.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  descriptor.index >= 1,
+                  descriptor.index <= descriptor.key.expectedShardCount else {
+                invalidSets.insert(descriptor.key)
+                continue
+            }
+            let inserted = indexesBySet[descriptor.key, default: []]
+                .insert(descriptor.index)
+                .inserted
+            if !inserted {
+                invalidSets.insert(descriptor.key)
+            }
+        }
+
+        guard invalidSets.isEmpty else { return false }
+        return indexesBySet.allSatisfy { key, indexes in
+            indexes.count == key.expectedShardCount
+        }
+    }
+
+    private static func safetensorShardDescriptor(
+        for url: URL
+    ) -> SafetensorShardDescriptor? {
+        guard url.pathExtension.lowercased() == "safetensors" else {
+            return nil
+        }
+
+        let stem = url.deletingPathExtension().lastPathComponent
+        guard let ofRange = stem.range(of: "-of-", options: .backwards) else {
+            return nil
+        }
+        let beforeOf = String(stem[..<ofRange.lowerBound])
+        let countText = String(stem[ofRange.upperBound...])
+        guard let separator = beforeOf.range(of: "-", options: .backwards),
+              !separator.isEmpty else {
+            return nil
+        }
+
+        let prefix = String(beforeOf[..<separator.lowerBound])
+        let indexText = String(beforeOf[separator.upperBound...])
+        guard !prefix.isEmpty,
+              let index = decimalInteger(indexText),
+              let expectedShardCount = decimalInteger(countText),
+              expectedShardCount > 1 else {
+            return nil
+        }
+
+        return SafetensorShardDescriptor(
+            key: SafetensorShardSetKey(
+                directoryPath: url.deletingLastPathComponent()
+                    .standardizedFileURL.path,
+                prefix: prefix,
+                expectedShardCount: expectedShardCount
+            ),
+            index: index
+        )
+    }
+
+    private static func decimalInteger(_ string: String) -> Int? {
+        guard !string.isEmpty,
+              string.unicodeScalars.allSatisfy({ scalar in
+                  scalar.value >= 48 && scalar.value <= 57
+              }) else {
+            return nil
+        }
+        return Int(string)
+    }
+
     internal static func hasImageRuntimeLayout(at dir: URL) -> Bool {
         let hasTransformer = hasWeightFile(
             under: dir.appendingPathComponent("transformer", isDirectory: true)
@@ -948,6 +1072,12 @@ public actor ModelLibrary {
         let lower = text.lowercased()
         if lower.contains("z-image") || lower.contains("zimage") {
             return "z-image-turbo"
+        }
+        if lower.contains("krea-2") || lower.contains("krea2") {
+            return "krea-2-turbo"
+        }
+        if lower.contains("krea") {
+            return "flux-krea-dev"
         }
         if lower.contains("qwen-image") || lower.contains("qwen image") {
             return "qwen-image"

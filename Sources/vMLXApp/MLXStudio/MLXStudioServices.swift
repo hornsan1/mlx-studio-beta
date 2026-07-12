@@ -693,7 +693,9 @@ enum ModelInstallEvent: Sendable {
 struct StudioChatRequest: Sendable {
     var model: ModelRef
     var messages: [ChatTurn]
-    var maxTokens: Int = 512
+    var maxTokens: Int = StudioChatRuntime.defaultMaxResponseTokens
+    var systemPrompt: String?
+    var contextLimitTokens: Int? = StudioChatRuntime.defaultContextLimitTokens
     var enableThinking: Bool = false
 }
 
@@ -763,6 +765,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
     var title: String
     var modelName: String?
     var turns: [ChatTurn]
+    var systemPrompt: String?
+    var maxResponseTokens: Int?
+    var contextLimitTokens: Int?
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
     var isPinned: Bool = false
@@ -774,6 +779,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         title: String,
         modelName: String? = nil,
         turns: [ChatTurn],
+        systemPrompt: String? = nil,
+        maxResponseTokens: Int? = nil,
+        contextLimitTokens: Int? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         isPinned: Bool = false,
@@ -784,6 +792,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         self.title = title
         self.modelName = modelName
         self.turns = turns
+        self.systemPrompt = StudioChatRuntime.normalizedSystemPrompt(systemPrompt)
+        self.maxResponseTokens = maxResponseTokens.map(StudioChatRuntime.sanitizedMaxResponseTokens)
+        self.contextLimitTokens = contextLimitTokens.map(StudioChatRuntime.sanitizedContextLimitTokens)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.isPinned = isPinned
@@ -796,6 +807,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         case title
         case modelName
         case turns
+        case systemPrompt
+        case maxResponseTokens
+        case contextLimitTokens
         case createdAt
         case updatedAt
         case isPinned
@@ -809,6 +823,13 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? "New Chat"
         modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         turns = try container.decodeIfPresent([ChatTurn].self, forKey: .turns) ?? []
+        systemPrompt = StudioChatRuntime.normalizedSystemPrompt(
+            try container.decodeIfPresent(String.self, forKey: .systemPrompt)
+        )
+        maxResponseTokens = try container.decodeIfPresent(Int.self, forKey: .maxResponseTokens)
+            .map(StudioChatRuntime.sanitizedMaxResponseTokens)
+        contextLimitTokens = try container.decodeIfPresent(Int.self, forKey: .contextLimitTokens)
+            .map(StudioChatRuntime.sanitizedContextLimitTokens)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
@@ -822,6 +843,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         try container.encode(title, forKey: .title)
         try container.encodeIfPresent(modelName, forKey: .modelName)
         try container.encode(turns, forKey: .turns)
+        try container.encodeIfPresent(systemPrompt, forKey: .systemPrompt)
+        try container.encodeIfPresent(maxResponseTokens, forKey: .maxResponseTokens)
+        try container.encodeIfPresent(contextLimitTokens, forKey: .contextLimitTokens)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode(isPinned, forKey: .isPinned)
@@ -1475,6 +1499,62 @@ enum ChatEvent: Sendable {
     case finished(String?)
 }
 
+enum StudioChatRuntime {
+    static let defaultMaxResponseTokens = 512
+    static let defaultContextLimitTokens = 262_144
+    static let minTokenLimit = 1
+    static let maxTokenLimit = 1_000_000
+
+    static func sanitizedMaxResponseTokens(_ value: Int) -> Int {
+        min(maxTokenLimit, max(minTokenLimit, value))
+    }
+
+    static func sanitizedContextLimitTokens(_ value: Int) -> Int {
+        min(maxTokenLimit, max(minTokenLimit, value))
+    }
+
+    static func normalizedSystemPrompt(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func requestMessages(
+        systemPrompt: String?,
+        turns: [ChatTurn]
+    ) -> [ChatRequest.Message] {
+        var messages = turns.map { turn in
+            ChatRequest.Message(
+                role: turn.role.rawValue,
+                content: .string(turn.content)
+            )
+        }
+        if let prompt = normalizedSystemPrompt(systemPrompt) {
+            messages.insert(
+                ChatRequest.Message(role: ChatTurn.Role.system.rawValue, content: .string(prompt)),
+                at: 0
+            )
+        }
+        return messages
+    }
+
+    static func estimatedContextTokens(
+        systemPrompt: String,
+        turns: [ChatTurn],
+        draftPrompt: String
+    ) -> Int {
+        let contextText = ([systemPrompt] + turns.map(\.content) + [draftPrompt])
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !contextText.isEmpty else { return 0 }
+        return max(1, Int(ceil(Double(contextText.utf8.count) / 4.0)))
+    }
+
+    static func totalTokens(_ usage: StreamChunk.Usage) -> Int {
+        usage.promptTokens + usage.completionTokens
+    }
+}
+
 enum StudioChatText {
     static func clean(_ text: String) -> String {
         var output = text
@@ -2028,16 +2108,22 @@ final class StudioChatService: ChatService {
 
     func streamMessage(_ request: StudioChatRequest) async throws -> AsyncThrowingStream<ChatEvent, Error> {
         let engine = app.engine
+        if let contextLimitTokens = request.contextLimitTokens {
+            var global = await engine.settings.global()
+            let sanitizedLimit = StudioChatRuntime.sanitizedContextLimitTokens(contextLimitTokens)
+            if global.maxPromptTokens != sanitizedLimit {
+                global.maxPromptTokens = sanitizedLimit
+                await engine.applySettings(global)
+            }
+        }
         let engineRequest = ChatRequest(
             model: request.model.displayName,
-            messages: request.messages.map { turn in
-                ChatRequest.Message(
-                    role: turn.role.rawValue,
-                    content: .string(turn.content)
-                )
-            },
+            messages: StudioChatRuntime.requestMessages(
+                systemPrompt: request.systemPrompt,
+                turns: request.messages
+            ),
             stream: true,
-            maxTokens: request.maxTokens,
+            maxTokens: StudioChatRuntime.sanitizedMaxResponseTokens(request.maxTokens),
             enableThinking: request.enableThinking
         )
         let upstream = await engine.stream(request: engineRequest)

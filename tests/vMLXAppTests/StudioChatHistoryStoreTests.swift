@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import vMLXApp
+import vMLXEngine
 
 final class StudioChatHistoryStoreTests: XCTestCase {
     private var defaults: UserDefaults!
@@ -96,6 +97,44 @@ final class StudioChatHistoryStoreTests: XCTestCase {
         XCTAssertEqual(loaded.first?.summaryExportPath, "/tmp/Saved summary chat-summary-11111111.md")
         XCTAssertEqual(loaded.first?.summaryExportedAt, exported)
         XCTAssertEqual(loaded.first?.hasSummaryExport, true)
+    }
+
+    func testRuntimeControlsPersistWithSession() {
+        let session = StudioChatSession(
+            title: "Runtime chat",
+            turns: [ChatTurn(role: .user, content: "Use the saved controls")],
+            systemPrompt: "  Be precise.  ",
+            maxResponseTokens: 2_048,
+            contextLimitTokens: 32_768
+        )
+
+        StudioChatHistoryStore.saveSessions([session], defaults: defaults)
+
+        let loaded = StudioChatHistoryStore.loadSessions(defaults: defaults)
+        XCTAssertEqual(loaded.first?.systemPrompt, "Be precise.")
+        XCTAssertEqual(loaded.first?.maxResponseTokens, 2_048)
+        XCTAssertEqual(loaded.first?.contextLimitTokens, 32_768)
+    }
+
+    func testRuntimeRequestMessagesInsertSystemPromptAndClampBudgets() {
+        let messages = StudioChatRuntime.requestMessages(
+            systemPrompt: "  You are concise.  ",
+            turns: [ChatTurn(role: .user, content: "Hi")]
+        )
+
+        XCTAssertEqual(messages.map(\.role), ["system", "user"])
+        XCTAssertEqual(stringContent(messages[0]), "You are concise.")
+        XCTAssertEqual(stringContent(messages[1]), "Hi")
+        XCTAssertEqual(StudioChatRuntime.sanitizedMaxResponseTokens(-50), 1)
+        XCTAssertEqual(StudioChatRuntime.sanitizedContextLimitTokens(2_000_000), 1_000_000)
+        XCTAssertGreaterThan(
+            StudioChatRuntime.estimatedContextTokens(
+                systemPrompt: "You are concise.",
+                turns: [ChatTurn(role: .user, content: "Hi")],
+                draftPrompt: ""
+            ),
+            0
+        )
     }
 
     func testSelectedSessionIDPersistsAndClearsWhenInvalid() {
@@ -228,5 +267,15 @@ final class StudioChatHistoryStoreTests: XCTestCase {
         XCTAssertEqual(loaded[0].title, "Legacy prompt")
         XCTAssertEqual(loaded[0].turns, turns)
         XCTAssertNotNil(defaults.data(forKey: StudioChatHistoryStore.sessionsKey))
+    }
+
+    private func stringContent(_ message: ChatRequest.Message) -> String? {
+        guard let content = message.content else { return nil }
+        switch content {
+        case .string(let value):
+            return value
+        case .parts:
+            return nil
+        }
     }
 }

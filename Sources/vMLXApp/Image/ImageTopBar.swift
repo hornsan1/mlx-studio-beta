@@ -2,13 +2,13 @@
 //
 // ImageTopBar — header strip at the top of the Image screen. Shows the
 // selected model, a live status pill, elapsed timer while generating, a
-// step counter (e.g. "12/30"), and a Stop button that only appears while a
-// job is in flight.
+// requested step budget, and a Stop button that only appears while a job is
+// in flight.
 //
 // Parity with Electron components/image/ImageTopBar.tsx:
 //   • status dot + label (idle | generating | editing | error)
 //   • elapsed seconds
-//   • current/total step
+//   • requested step count
 //   • cancel button
 
 import SwiftUI
@@ -19,8 +19,7 @@ struct ImageTopBar: View {
     let selectedModel: ImageCatalogModel?
     let status: ImageScreen.Status
     let elapsedSeconds: Int
-    let currentStep: Int
-    let totalSteps: Int
+    let requestedSteps: Int
     let onStop: () -> Void
     let onOpenSettings: () -> Void
 
@@ -35,11 +34,11 @@ struct ImageTopBar: View {
             statusPill
 
             if status.isActive {
-                Text("\(currentStep)/\(totalSteps)")
+                Text(L10n.ImageUI.requestedStepsFormat.format(locale: appLocale, Int64(requestedSteps)))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textMid)
                     .monospacedDigit()
-                Text(timeString(elapsedSeconds))
+                Text(L10n.ImageUI.elapsedFormat.format(locale: appLocale, Int64(elapsedSeconds)))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.textLow)
                     .monospacedDigit()
@@ -93,9 +92,4 @@ struct ImageTopBar: View {
         )
     }
 
-    private func timeString(_ sec: Int) -> String {
-        if sec < 60 { return "\(sec)s" }
-        let m = sec / 60, s = sec % 60
-        return String(format: "%d:%02d", m, s)
-    }
 }

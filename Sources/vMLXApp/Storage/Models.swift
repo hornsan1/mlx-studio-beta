@@ -6,19 +6,42 @@ struct ChatSession: Identifiable, Codable, Hashable {
     var id: UUID
     var title: String
     var modelPath: String?
+    /// Stable display identity captured when the conversation is created.
+    /// Kept separately from `modelPath` so reopening a chat can explain
+    /// which model produced it even when that model was moved or deleted.
+    var modelName: String?
+    var isPinned: Bool
+    /// Lightweight collection name. Nil means the unfiled/default group.
+    var collectionName: String?
     var createdAt: Date
     var updatedAt: Date
 
     init(id: UUID = UUID(),
          title: String = "New chat",
          modelPath: String? = nil,
+         modelName: String? = nil,
+         isPinned: Bool = false,
+         collectionName: String? = nil,
          createdAt: Date = .now,
          updatedAt: Date = .now) {
         self.id = id
         self.title = title
         self.modelPath = modelPath
+        self.modelName = modelName
+        self.isPinned = isPinned
+        self.collectionName = collectionName
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// `ChatViewModel` uses this to decide whether the first user prompt can
+    /// replace the generic shell-created title. Keep the comparison
+    /// case-insensitive because historic rows use both `New Chat` and
+    /// `New chat`.
+    var hasPlaceholderTitle: Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized.isEmpty || normalized == "new chat" || normalized == "untitled chat"
     }
 }
 
@@ -41,6 +64,14 @@ struct InlineToolCall: Identifiable, Hashable {
     var exitCode: Int?
 }
 
+/// Terminal generation outcome for assistant messages (export + relaunch).
+enum ChatGenerationState: String, Codable, Hashable, Sendable {
+    case complete
+    case stopped
+    case failed
+    case interrupted
+}
+
 /// Persisted chat message.
 struct ChatMessage: Identifiable, Codable, Hashable {
     enum Role: String, Codable { case system, user, assistant, tool }
@@ -48,7 +79,12 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var id: UUID
     var sessionId: UUID
     var role: Role
+    /// User-visible Markdown / plain text. Never includes injected retrieval.
     var content: String
+    /// Document extraction/retrieval text injected for the model only.
+    /// Kept out of the bubble body so preview/export do not present retrieved
+    /// docs as user-authored text.
+    var requestContext: String = ""
     var reasoning: String?
     var imageData: [Data]        // inline base64-decoded images
     /// Absolute `file://` URLs of attached videos. Stored as paths
@@ -65,6 +101,8 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var toolStatuses: [String: ToolCallStatus] = [:]
     var createdAt: Date
     var isStreaming: Bool
+    /// Assistant completion outcome. `nil` for non-assistant or legacy rows.
+    var generationState: ChatGenerationState? = nil
 
     /// Per-message metrics surfaced by the metrics strip under each assistant
     /// turn. Transient — not persisted to SQLite (matches Electron behavior:
@@ -73,39 +111,62 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var usage: StreamChunk.Usage? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, sessionId, role, content, reasoning, imageData, videoPaths, toolCallsJSON
-        case toolStatuses, createdAt, isStreaming
+        case id, sessionId, role, content, requestContext, reasoning, imageData, videoPaths
+        case toolCallsJSON, toolStatuses, createdAt, isStreaming, generationState
+        case displayContent
+    }
+
+    /// Text sent to the model: display content plus optional request context.
+    var modelPayloadContent: String {
+        let display = content
+        let ctx = requestContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ctx.isEmpty { return display }
+        if display.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return ctx }
+        return display + "\n\n" + ctx
+    }
+
+    /// Alias for plan language: raw user Markdown bytes.
+    var displayContent: String {
+        get { content }
+        set { content = newValue }
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
         lhs.id == rhs.id && lhs.sessionId == rhs.sessionId && lhs.role == rhs.role &&
-        lhs.content == rhs.content && lhs.reasoning == rhs.reasoning &&
+        lhs.content == rhs.content && lhs.requestContext == rhs.requestContext &&
+        lhs.reasoning == rhs.reasoning &&
         lhs.imageData == rhs.imageData && lhs.videoPaths == rhs.videoPaths &&
         lhs.toolCallsJSON == rhs.toolCallsJSON &&
         lhs.toolStatuses == rhs.toolStatuses &&
-        lhs.createdAt == rhs.createdAt && lhs.isStreaming == rhs.isStreaming
+        lhs.createdAt == rhs.createdAt && lhs.isStreaming == rhs.isStreaming &&
+        lhs.generationState == rhs.generationState
     }
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
         hasher.combine(content)
+        hasher.combine(requestContext)
         hasher.combine(isStreaming)
+        hasher.combine(generationState)
     }
 
     init(id: UUID = UUID(),
          sessionId: UUID,
          role: Role,
          content: String = "",
+         requestContext: String = "",
          reasoning: String? = nil,
          imageData: [Data] = [],
          videoPaths: [String] = [],
          toolCallsJSON: String? = nil,
          toolStatuses: [String: ToolCallStatus] = [:],
          createdAt: Date = .now,
-         isStreaming: Bool = false) {
+         isStreaming: Bool = false,
+         generationState: ChatGenerationState? = nil) {
         self.id = id
         self.sessionId = sessionId
         self.role = role
         self.content = content
+        self.requestContext = requestContext
         self.reasoning = reasoning
         self.imageData = imageData
         self.videoPaths = videoPaths
@@ -113,6 +174,7 @@ struct ChatMessage: Identifiable, Codable, Hashable {
         self.toolStatuses = toolStatuses
         self.createdAt = createdAt
         self.isStreaming = isStreaming
+        self.generationState = generationState
     }
 
     // Backward-compat decoder: pre-iter-15 rows have no `videoPaths`
@@ -122,7 +184,12 @@ struct ChatMessage: Identifiable, Codable, Hashable {
         self.id          = try c.decode(UUID.self, forKey: .id)
         self.sessionId   = try c.decode(UUID.self, forKey: .sessionId)
         self.role        = try c.decode(Role.self, forKey: .role)
-        self.content     = try c.decode(String.self, forKey: .content)
+        if let display = try c.decodeIfPresent(String.self, forKey: .displayContent) {
+            self.content = display
+        } else {
+            self.content = try c.decode(String.self, forKey: .content)
+        }
+        self.requestContext = try c.decodeIfPresent(String.self, forKey: .requestContext) ?? ""
         self.reasoning   = try c.decodeIfPresent(String.self, forKey: .reasoning)
         self.imageData   = try c.decodeIfPresent([Data].self, forKey: .imageData) ?? []
         self.videoPaths  = try c.decodeIfPresent([String].self, forKey: .videoPaths) ?? []
@@ -130,6 +197,26 @@ struct ChatMessage: Identifiable, Codable, Hashable {
         self.toolStatuses  = try c.decodeIfPresent([String: ToolCallStatus].self, forKey: .toolStatuses) ?? [:]
         self.createdAt   = try c.decode(Date.self, forKey: .createdAt)
         self.isStreaming = try c.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
+        self.generationState = try c.decodeIfPresent(ChatGenerationState.self, forKey: .generationState)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(sessionId, forKey: .sessionId)
+        try c.encode(role, forKey: .role)
+        try c.encode(content, forKey: .content)
+        if !requestContext.isEmpty {
+            try c.encode(requestContext, forKey: .requestContext)
+        }
+        try c.encodeIfPresent(reasoning, forKey: .reasoning)
+        try c.encode(imageData, forKey: .imageData)
+        try c.encode(videoPaths, forKey: .videoPaths)
+        try c.encodeIfPresent(toolCallsJSON, forKey: .toolCallsJSON)
+        try c.encode(toolStatuses, forKey: .toolStatuses)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(isStreaming, forKey: .isStreaming)
+        try c.encodeIfPresent(generationState, forKey: .generationState)
     }
 
     /// Decoded tool-call list for inline cards. Empty when nothing is set.

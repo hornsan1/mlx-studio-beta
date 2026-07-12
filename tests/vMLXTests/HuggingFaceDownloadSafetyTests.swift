@@ -119,6 +119,64 @@ final class HuggingFaceDownloadSafetyTests: XCTestCase {
         XCTAssertNil(HuggingFaceDownloadSafety.resolveURL(repo: "mlx-community/test", path: "../config.json"))
     }
 
+    func testDownloadManagerAllowsLegacyMLXWeightFiles() {
+        XCTAssertTrue(DownloadManager.shouldDownloadSibling("weights.npz"))
+        XCTAssertTrue(DownloadManager.shouldDownloadSibling("nested/model.safetensors"))
+        XCTAssertTrue(DownloadManager.shouldDownloadSibling("tokenizer.json"))
+
+        XCTAssertFalse(DownloadManager.shouldDownloadSibling("../weights.npz"))
+        XCTAssertFalse(DownloadManager.shouldDownloadSibling("weights/../weights.npz"))
+        XCTAssertFalse(DownloadManager.shouldDownloadSibling("README.md"))
+    }
+
+    func testDownloadManagerOnlyFetchesKrea2RuntimeFiles() {
+        XCTAssertTrue(
+            DownloadManager.shouldDownloadSibling("turbo.safetensors", for: "krea/Krea-2-Turbo")
+        )
+        XCTAssertTrue(
+            DownloadManager.shouldDownloadSibling(
+                "vae/diffusion_pytorch_model.safetensors",
+                for: "krea/Krea-2-Turbo"
+            )
+        )
+        XCTAssertTrue(
+            DownloadManager.shouldDownloadSibling("tokenizer/tokenizer.json", for: "krea/Krea-2-Turbo")
+        )
+
+        XCTAssertFalse(
+            DownloadManager.shouldDownloadSibling(
+                "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+                for: "krea/Krea-2-Turbo"
+            )
+        )
+        XCTAssertFalse(
+            DownloadManager.shouldDownloadSibling("images/00.jpg", for: "krea/Krea-2-Turbo")
+        )
+    }
+
+    func testWhisperTokenizerSupplementMapping() {
+        XCTAssertEqual(
+            DownloadManager.whisperTokenizerSourceRepo(for: "mlx-community/whisper-tiny-mlx"),
+            "openai/whisper-tiny"
+        )
+        XCTAssertEqual(
+            DownloadManager.whisperTokenizerSourceRepo(for: "mlx-community/whisper-small-mlx"),
+            "openai/whisper-small"
+        )
+        XCTAssertNil(DownloadManager.whisperTokenizerSourceRepo(for: "LiquidAI/LFM2.5-350M"))
+    }
+
+    func testWhisperTokenizerSupplementIsTokenizerOnly() {
+        XCTAssertTrue(DownloadManager.isWhisperTokenizerSidecar("tokenizer.json"))
+        XCTAssertTrue(DownloadManager.isWhisperTokenizerSidecar("tokenizer_config.json"))
+        XCTAssertTrue(DownloadManager.isWhisperTokenizerSidecar("merges.txt"))
+
+        XCTAssertFalse(DownloadManager.isWhisperTokenizerSidecar("config.json"))
+        XCTAssertFalse(DownloadManager.isWhisperTokenizerSidecar("model.safetensors"))
+        XCTAssertFalse(DownloadManager.isWhisperTokenizerSidecar("nested/tokenizer.json"))
+        XCTAssertFalse(DownloadManager.isWhisperTokenizerSidecar("../tokenizer.json"))
+    }
+
     private func makeDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("vmlx-hf-safety-\(UUID().uuidString)", isDirectory: true)

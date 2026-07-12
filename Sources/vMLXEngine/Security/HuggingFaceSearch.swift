@@ -258,7 +258,10 @@ public struct HuggingFaceRuntimeCompatibility: Sendable, Hashable {
             )
         }
 
-        guard hasRequiredImageRuntimeFiles(siblingFilenames: siblingFilenames) else {
+        guard hasRequiredImageRuntimeFiles(
+            runtimeName: runtimeName,
+            siblingFilenames: siblingFilenames
+        ) else {
             return .init(
                 isCompatible: false,
                 format: format,
@@ -289,6 +292,8 @@ public struct HuggingFaceRuntimeCompatibility: Sendable, Hashable {
     private static let supportedImageRuntimeNames: Set<String> = [
         "flux1-schnell",
         "flux1-dev",
+        "krea-2-turbo",
+        "flux-krea-dev",
         "flux2-klein",
         "z-image-turbo",
     ]
@@ -332,7 +337,9 @@ public struct HuggingFaceRuntimeCompatibility: Sendable, Hashable {
         if isJANG { return .jang }
 
         let isMLX = lowerLibrary == "mlx"
+            || lowerLibrary == "mflux"
             || tags.contains("mlx")
+            || tags.contains("mflux")
             || lowerId.hasPrefix("mlx-community/")
         if isMLX { return .mlx }
 
@@ -391,7 +398,16 @@ public struct HuggingFaceRuntimeCompatibility: Sendable, Hashable {
         return hasConfig && hasWeights && hasTokenizer
     }
 
-    private static func hasRequiredImageRuntimeFiles(siblingFilenames: [String]) -> Bool {
+    private static func hasRequiredImageRuntimeFiles(
+        runtimeName: String,
+        siblingFilenames: [String]
+    ) -> Bool {
+        if runtimeName == "krea-2-turbo" {
+            return siblingFilenames.contains("turbo.safetensors")
+                && siblingFilenames.contains("vae/diffusion_pytorch_model.safetensors")
+                && siblingFilenames.contains("text_encoder/model.safetensors")
+                && siblingFilenames.contains("tokenizer/tokenizer.json")
+        }
         let hasWeights = siblingFilenames.contains { $0.hasSuffix(".safetensors") }
         let hasTransformer = siblingFilenames.contains { file in
             file.hasPrefix("transformer/") && file.hasSuffix(".safetensors")
@@ -437,6 +453,12 @@ public struct HuggingFaceRuntimeCompatibility: Sendable, Hashable {
 
         if text.contains("z-image") && text.contains("turbo") {
             return "z-image-turbo"
+        }
+        if text.contains("krea-2") || text.contains("krea2") {
+            return "krea-2-turbo"
+        }
+        if text.contains("krea") {
+            return "flux-krea-dev"
         }
         if text.contains("qwen-image") || text.contains("qwen image") {
             return "qwen-image"

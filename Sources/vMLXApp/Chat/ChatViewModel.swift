@@ -27,6 +27,7 @@ final class ChatViewModel {
     /// video_url ContentPart) consumes the URL directly; InputBar
     /// shows a thumbnail via AVAssetImageGenerator.
     var pendingVideos: [URL] = []
+    var pendingDocuments: [ChatDocumentAttachment] = []
     var inputText: String = ""
     var bannerMessage: String? = nil
 
@@ -35,11 +36,7 @@ final class ChatViewModel {
     /// pending state under the outgoing sessionId here. Switching back
     /// restores it so the user doesn't lose their in-progress turn.
     /// Cleared when `send()` actually dispatches the draft (iter-22).
-    private struct ChatDraft {
-        var inputText: String
-        var pendingImages: [Data]
-        var pendingVideos: [URL]
-    }
+    private typealias ChatDraft = Database.ChatDraftPayload
     private var drafts: [UUID: ChatDraft] = [:]
 
     /// iter-110 §136: snapshot cache for ChatSettings captured at
@@ -110,6 +107,106 @@ final class ChatViewModel {
     /// menu item.
     var topUndoLabel: String? { undoStack.last?.label }
 
+    // MARK: - Durable composer and stream recovery
+
+    /// Persist the active compose state immediately. InputBar calls this for
+    /// every text/media/document mutation so a normal quit, crash, or window
+    /// restart preserves the unsent turn instead of relying on a later
+    /// session-switch side effect.
+    func persistActiveDraft() {
+        guard let sessionId = activeSessionId else { return }
+        let draft = ChatDraft(
+            inputText: inputText,
+            pendingImages: pendingImages,
+            pendingVideoPaths: pendingVideos.map(\.absoluteString),
+            pendingDocuments: pendingDocuments
+        )
+        if draft.isEmpty {
+            drafts.removeValue(forKey: sessionId)
+            Database.shared.deleteDraft(for: sessionId)
+        } else {
+            drafts[sessionId] = draft
+            Database.shared.upsertDraft(draft, for: sessionId)
+        }
+    }
+
+    private func restoreDraft(for sessionId: UUID) {
+        let draft = drafts[sessionId] ?? Database.shared.draft(for: sessionId)
+        guard let draft else {
+            clearComposer()
+            return
+        }
+        drafts[sessionId] = draft
+        inputText = draft.inputText
+        pendingImages = draft.pendingImages
+        pendingVideos = draft.pendingVideoPaths.compactMap { path in
+            if path.hasPrefix("file://") { return URL(string: path) }
+            return URL(fileURLWithPath: path)
+        }
+        pendingDocuments = draft.pendingDocuments
+    }
+
+    private func clearComposer() {
+        inputText = ""
+        pendingImages = []
+        pendingVideos = []
+        pendingDocuments = []
+    }
+
+    private func clearDraft(for sessionId: UUID) {
+        drafts.removeValue(forKey: sessionId)
+        Database.shared.deleteDraft(for: sessionId)
+    }
+
+    private func persistSelection(_ id: UUID?) {
+        if app?.selectedStudioChatSessionID != id {
+            app?.selectedStudioChatSessionID = id
+        }
+        StudioChatHistoryMigration.saveSelectedSessionID(id)
+    }
+
+    /// Stop the backing engine and finalize partial text synchronously before
+    /// changing chats. This prevents an old stream from remaining marked live
+    /// in SQLite until a full app relaunch, and gives users an honest marker
+    /// when a switch interrupted a response.
+    private func cancelActiveGeneration(marking marker: String?) {
+        guard isGenerating || activeGenerationID != nil else { return }
+        streamTask?.cancel()
+        streamTask = nil
+        activeGenerationID = nil
+        isGenerating = false
+
+        if let appRef = app {
+            let engine: Engine = {
+                if let sid = serverSessionId { return appRef.engine(for: sid) }
+                return appRef.engine
+            }()
+            Task { await engine.cancelStream() }
+        }
+
+        guard let index = messages.indices.last,
+              messages[index].role == .assistant,
+              messages[index].isStreaming
+        else { return }
+        var message = messages[index]
+        if let marker, !message.content.hasSuffix(marker) {
+            if !message.content.isEmpty && !message.content.hasSuffix("\n") {
+                message.content += "\n"
+            }
+            message.content += marker
+        }
+        message.isStreaming = false
+        if marker == "[stopped]" {
+            message.generationState = .stopped
+        } else if marker == "[interrupted]" {
+            message.generationState = .interrupted
+        } else {
+            message.generationState = .stopped
+        }
+        messages[index] = message
+        Database.shared.upsertMessage(message)
+    }
+
     private weak var app: AppState?
 
     /// Test-friendly accessor used by `MicRecorderButton` (and any other
@@ -121,17 +218,15 @@ final class ChatViewModel {
         return await app.engine.settings.global()
     }
     private var streamTask: Task<Void, Never>? = nil
+    /// Invalidates callbacks from a cancelled/replaced stream. Without this
+    /// token, a late cancellation from chat A can mark chat B as failed after
+    /// the user switches sessions or starts a new generation.
+    private var activeGenerationID: UUID? = nil
 
     /// Optional server-session id — when set, `send()` targets the engine
     /// owned by that specific server session instead of `app.engine`. Used
     /// by future multi-session chat pinning; default nil = use active engine.
     var serverSessionId: UUID? = nil
-
-    /// Set to `true` by `stop()` so the cancellation thrown from the
-    /// streaming task is recognized as user-intentional and renders as
-    /// "[stopped]" instead of a red error banner. Mirrors Electron's
-    /// `intentionalStopRef` in `ChatInterface.tsx`.
-    private var intentionalStop: Bool = false
 
     /// Convenience alias used by Chat views — `isStreaming` reads better in
     /// view code, and the audit/UX-AUDIT items 9/13 spec their guards by name.
@@ -203,10 +298,26 @@ final class ChatViewModel {
 
     func attach(_ app: AppState) {
         self.app = app
+        let migratedSelection = StudioChatHistoryMigration.migrateIfNeeded()
+        // Consume the old Studio-history preference once. It can remain in
+        // UserDefaults after a prior migration, but is only a first-run
+        // fallback; the durable unified selection below must win thereafter.
+        let migrationSelection = StudioChatHistoryMigration.consumePreferredSessionID()
+            ?? migratedSelection
+        let durableSelection = StudioChatHistoryMigration.loadSelectedSessionID()
         reload()
-        if activeSessionId == nil, let first = sessions.first {
-            activeSessionId = first.id
-            messages = Database.shared.messages(for: first.id)
+        let requestedSelection = StudioChatHistoryMigration.resolvedSelectionID(
+            appSelection: app.selectedStudioChatSessionID,
+            durableSelection: durableSelection,
+            migrationSelection: migrationSelection
+        )
+        if activeSessionId == nil,
+           let selected = requestedSelection.flatMap({ id in sessions.first { $0.id == id } })
+                ?? sessions.first {
+            activeSessionId = selected.id
+            messages = Database.shared.messages(for: selected.id)
+            restoreDraft(for: selected.id)
+            persistSelection(selected.id)
         } else if sessions.isEmpty {
             newSession()
         }
@@ -230,7 +341,14 @@ final class ChatViewModel {
     var filteredSessions: [ChatSession] {
         guard !searchQuery.isEmpty else { return sessions }
         let q = searchQuery.lowercased()
-        return sessions.filter { $0.title.lowercased().contains(q) }
+        return sessions.filter { session in
+            session.title.lowercased().contains(q)
+                || (session.modelName?.lowercased().contains(q) ?? false)
+                || (session.collectionName?.lowercased().contains(q) ?? false)
+                || Database.shared.messages(for: session.id).contains {
+                    $0.content.lowercased().contains(q)
+                }
+        }
     }
 
     func reload() {
@@ -238,39 +356,24 @@ final class ChatViewModel {
     }
 
     func newSession() {
+        cancelActiveGeneration(marking: "[interrupted]")
+        persistActiveDraft()
         let s = ChatSession()
         Database.shared.upsertSession(s)
         sessions.insert(s, at: 0)
         activeSessionId = s.id
         messages = []
+        clearComposer()
+        persistSelection(s.id)
     }
 
     func selectSession(_ id: UUID) {
-        // If we're mid-stream on the old chat, cancel cleanly so the
-        // running Task doesn't write deltas into the new chat's
-        // messages array. The assistant message on the old chat stays
-        // in SQLite with whatever it had collected so far.
-        if isGenerating {
-            streamTask?.cancel()
-            streamTask = nil
-            isGenerating = false
-        }
-        // 2026-04-18 iter-22: save the outgoing chat's compose state
-        // so it survives a round-trip. Pre-fix, switching away mid-
-        // compose and back discarded the user's half-typed text +
-        // attached images/videos, OR worse: kept them attached and
-        // accidentally sent them to the new chat. Now the draft is
-        // keyed per-session.
-        if let outgoing = activeSessionId {
-            if !inputText.isEmpty || !pendingImages.isEmpty || !pendingVideos.isEmpty {
-                drafts[outgoing] = ChatDraft(
-                    inputText: inputText,
-                    pendingImages: pendingImages,
-                    pendingVideos: pendingVideos)
-            } else {
-                drafts.removeValue(forKey: outgoing)
-            }
-        }
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        guard id != activeSessionId else { return }
+        cancelActiveGeneration(marking: "[interrupted]")
+        // Save the outgoing compose state before changing `activeSessionId`
+        // so text, attachments, and documents stay with the correct chat.
+        persistActiveDraft()
         activeSessionId = id
         messages = Database.shared.messages(for: id)
         // Hydrate chat-level UI preferences from SettingsStore so the
@@ -292,27 +395,30 @@ final class ChatViewModel {
                 }
             }
         }
-        // Restore (or zero) the incoming chat's draft.
-        if let draft = drafts[id] {
-            inputText = draft.inputText
-            pendingImages = draft.pendingImages
-            pendingVideos = draft.pendingVideos
-        } else {
-            inputText = ""
-            pendingImages = []
-            pendingVideos = []
-        }
+        restoreDraft(for: id)
+        persistSelection(id)
     }
 
     /// Cmd-W: remove a chat from the sidebar without touching the DB.
     /// Pushes the row onto `recentlyClosed` so Cmd-Shift-T can undo.
     func closeSession(_ id: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        if activeSessionId == id {
+            cancelActiveGeneration(marking: "[interrupted]")
+            persistActiveDraft()
+        }
         let closed = sessions.remove(at: idx)
         recentlyClosed.append(closed)
         if activeSessionId == id {
             activeSessionId = sessions.first?.id
-            messages = activeSessionId.map { Database.shared.messages(for: $0) } ?? []
+            if let next = activeSessionId {
+                messages = Database.shared.messages(for: next)
+                restoreDraft(for: next)
+            } else {
+                messages = []
+                clearComposer()
+            }
+            persistSelection(activeSessionId)
         }
     }
 
@@ -349,6 +455,10 @@ final class ChatViewModel {
         // (which only holds the currently-active session) — otherwise
         // undo-deleting a background chat would resurrect it empty.
         guard let snapshot = sessions.first(where: { $0.id == id }) else { return }
+        if activeSessionId == id {
+            cancelActiveGeneration(marking: "[interrupted]")
+            persistActiveDraft()
+        }
         let snapshotMessages = Database.shared.messages(for: id)
         let priorActive = activeSessionId
         // **iter-70 (§99)**: snapshot the draft BEFORE the dict drop so
@@ -359,7 +469,7 @@ final class ChatViewModel {
         // slow memory leak if the user deletes lots of chats without
         // ever re-opening). Clearing the stash here means undo must
         // also re-seat it, handled below.
-        let snapshotDraft = drafts[id]
+        let snapshotDraft = drafts[id] ?? Database.shared.draft(for: id)
         Database.shared.deleteSession(id)
         // iter-110 §136: close the ChatSettings row leak on permanent
         // delete. Snapshot + delete async; undo closure reads the
@@ -378,6 +488,7 @@ final class ChatViewModel {
         }
         sessions.removeAll { $0.id == id }
         drafts.removeValue(forKey: id)
+        Database.shared.deleteDraft(for: id)
         // iter-113 §139: strip the session from `recentlyClosed` if it was
         // previously closed via Cmd-W. Without this, the sequence
         //   Cmd-W (close) → right-click Delete → Cmd-Shift-T (reopen)
@@ -389,7 +500,14 @@ final class ChatViewModel {
         recentlyClosed.removeAll { $0.id == id }
         if activeSessionId == id {
             activeSessionId = sessions.first?.id
-            messages = activeSessionId.map { Database.shared.messages(for: $0) } ?? []
+            if let next = activeSessionId {
+                messages = Database.shared.messages(for: next)
+                restoreDraft(for: next)
+            } else {
+                messages = []
+                clearComposer()
+            }
+            persistSelection(activeSessionId)
         }
         pushUndo("Delete chat \"\(snapshot.title)\"") { [weak self] in
             guard let self else { return }
@@ -413,6 +531,7 @@ final class ChatViewModel {
             self.sessions = Database.shared.allSessions()
             if let d = snapshotDraft {
                 self.drafts[id] = d
+                Database.shared.upsertDraft(d, for: id)
             }
             if priorActive == id {
                 self.activeSessionId = id
@@ -424,8 +543,14 @@ final class ChatViewModel {
                 if let d = snapshotDraft {
                     self.inputText = d.inputText
                     self.pendingImages = d.pendingImages
-                    self.pendingVideos = d.pendingVideos
+                    self.pendingVideos = d.pendingVideoPaths.compactMap { path in
+                        path.hasPrefix("file://") ? URL(string: path) : URL(fileURLWithPath: path)
+                    }
+                    self.pendingDocuments = d.pendingDocuments
+                } else {
+                    self.clearComposer()
                 }
+                self.persistSelection(id)
             }
         }
     }
@@ -445,6 +570,98 @@ final class ChatViewModel {
         Database.shared.upsertSession(s)
     }
 
+    func togglePinned(_ id: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        var session = sessions[idx]
+        session.isPinned.toggle()
+        session.updatedAt = Date()
+        Database.shared.upsertSession(session)
+        reload()
+    }
+
+    @discardableResult
+    func duplicateSession(_ id: UUID) -> UUID? {
+        guard let source = sessions.first(where: { $0.id == id }) else { return nil }
+        let sourceMessages = Database.shared.messages(for: id)
+        let now = Date()
+        let copy = ChatSession(
+            title: "\(source.title) copy",
+            modelPath: source.modelPath,
+            modelName: source.modelName,
+            isPinned: false,
+            collectionName: source.collectionName,
+            createdAt: now,
+            updatedAt: now
+        )
+        Database.shared.withTransaction {
+            Database.shared.upsertSession(copy)
+            for (offset, original) in sourceMessages.enumerated() {
+                var message = original
+                message.id = UUID()
+                message.sessionId = copy.id
+                message.isStreaming = false
+                message.createdAt = now.addingTimeInterval(Double(offset) * 0.000_001)
+                Database.shared.upsertMessage(message)
+            }
+        }
+        // Settings are keyed by chat UUID rather than the session row, so a
+        // transcript-only duplicate would silently lose its model alias,
+        // sampling controls, tools, and system prompt. Clone them alongside
+        // the messages.
+        if let engine = app?.engine {
+            let sourceID = id
+            let copyID = copy.id
+            Task {
+                if let settings = await engine.settings.chat(sourceID) {
+                    await engine.settings.setChat(copyID, settings)
+                }
+            }
+        }
+        reload()
+        selectSession(copy.id)
+        return copy.id
+    }
+
+    func moveSession(_ id: UUID, toCollection rawName: String?) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var session = sessions[idx]
+        session.collectionName = (trimmed?.isEmpty == false) ? trimmed : nil
+        session.updatedAt = Date()
+        Database.shared.upsertSession(session)
+        reload()
+    }
+
+    func updateModelIdentity(_ id: UUID, name: String, path: String?) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        var session = sessions[idx]
+        session.modelName = name
+        session.modelPath = path
+        session.updatedAt = Date()
+        Database.shared.upsertSession(session)
+        sessions[idx] = session
+    }
+
+    func continueResponse() {
+        guard !isGenerating else { return }
+        inputText = "Continue from the last useful point without repeating yourself."
+        send()
+    }
+
+    @discardableResult
+    func importConversation(_ data: Data) throws -> UUID {
+        let imported = try ChatImporter.decode(data)
+        Database.shared.withTransaction {
+            Database.shared.upsertSession(imported.session)
+            for message in imported.messages {
+                Database.shared.upsertMessage(message)
+            }
+        }
+        reload()
+        selectSession(imported.session.id)
+        return imported.session.id
+    }
+
     /// Wipe every chat from SQLite and the sidebar in one go. Used by the
     /// "Clear all chats" footer button — the caller must already have
     /// shown a confirmation dialog. After the wipe a fresh empty session
@@ -455,6 +672,8 @@ final class ChatViewModel {
         // resurrect the whole set. Wipe runs first so the fresh session
         // `newSession()` creates at the end doesn't appear in the
         // snapshot (otherwise undo would also recreate + then delete it).
+        cancelActiveGeneration(marking: "[interrupted]")
+        persistActiveDraft()
         let snapshotSessions = sessions
         var snapshotMessages: [UUID: [ChatMessage]] = [:]
         for s in sessions {
@@ -480,6 +699,8 @@ final class ChatViewModel {
         drafts.removeAll(keepingCapacity: false)
         activeSessionId = nil
         messages = []
+        clearComposer()
+        persistSelection(nil)
         if let engine = app?.engine {
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
@@ -531,6 +752,7 @@ final class ChatViewModel {
             // the pre-wipe compose state across all chats.
             for (id, d) in snapshotDrafts {
                 self.drafts[id] = d
+                Database.shared.upsertDraft(d, for: id)
             }
             if let first = self.sessions.first {
                 self.activeSessionId = first.id
@@ -538,8 +760,14 @@ final class ChatViewModel {
                 if let d = snapshotDrafts[first.id] {
                     self.inputText = d.inputText
                     self.pendingImages = d.pendingImages
-                    self.pendingVideos = d.pendingVideos
+                    self.pendingVideos = d.pendingVideoPaths.compactMap { path in
+                        path.hasPrefix("file://") ? URL(string: path) : URL(fileURLWithPath: path)
+                    }
+                    self.pendingDocuments = d.pendingDocuments
+                } else {
+                    self.clearComposer()
                 }
+                self.persistSelection(first.id)
             }
         }
     }
@@ -562,8 +790,7 @@ final class ChatViewModel {
         // the stream; the engine's prompt context was already consumed
         // at prefill so they can continue cleanly.
         if isGenerating && idx == messages.count - 1 {
-            intentionalStop = true
-            streamTask?.cancel()
+            cancelActiveGeneration(marking: nil)
         }
         let snapshot = messages[idx]
         Database.shared.deleteMessage(id)
@@ -592,6 +819,30 @@ final class ChatViewModel {
         Database.shared.upsertMessage(messages[idx])
     }
 
+    func editAndRegenerate(_ id: UUID, newContent: String) {
+        guard !isGenerating else {
+            app?.flashBanner("Stop the current response before editing")
+            return
+        }
+        guard let sessionId = activeSessionId,
+              let idx = messages.firstIndex(where: { $0.id == id }),
+              messages[idx].role == .user
+        else { return }
+        let trimmed = newContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            app?.flashBanner("A prompt cannot be empty")
+            return
+        }
+        messages[idx].content = trimmed
+        Database.shared.upsertMessage(messages[idx])
+        let anchor = messages[idx]
+        Database.shared.deleteMessages(after: anchor.createdAt, in: sessionId)
+        if idx + 1 < messages.count {
+            messages.removeSubrange((idx + 1)...)
+        }
+        send()
+    }
+
     /// Regenerate: drop everything from `messageId` forward, resend the prior user turn.
     func regenerate(from messageId: UUID) {
         // iter-109 §135: VM-level guard. Same reasoning as editMessage —
@@ -607,9 +858,19 @@ final class ChatViewModel {
         }
         guard let sessionId = activeSessionId else { return }
         guard let idx = messages.firstIndex(where: { $0.id == messageId }) else { return }
-        let anchor = messages[idx]
+        let userIndex: Int? = {
+            if messages[idx].role == .user { return idx }
+            return messages[..<idx].lastIndex(where: { $0.role == .user })
+        }()
+        guard let userIndex else {
+            app?.flashBanner("No user prompt is available to regenerate from")
+            return
+        }
+        let anchor = messages[userIndex]
         Database.shared.deleteMessages(after: anchor.createdAt, in: sessionId)
-        messages.removeSubrange(idx...)
+        if userIndex + 1 < messages.count {
+            messages.removeSubrange((userIndex + 1)...)
+        }
         send()
     }
 
@@ -654,6 +915,9 @@ final class ChatViewModel {
         let fork = ChatSession(
             id: UUID(), title: forkTitle,
             modelPath: source.modelPath,
+            modelName: source.modelName,
+            isPinned: false,
+            collectionName: source.collectionName,
             createdAt: now, updatedAt: now
         )
         // Iter-27: wrap fork creation + message copy in a single
@@ -719,6 +983,7 @@ final class ChatViewModel {
 
     func send() {
         guard let sessionId = activeSessionId else { return }
+        guard !isGenerating else { return }
         // No-model guard. User complaint: "model loading does not work" —
         // root cause was that this guard hard-required `selectedModelPath
         // != nil`, but `selectedModelPath` is ONLY set by the cmd+k quick
@@ -764,11 +1029,18 @@ final class ChatViewModel {
             }
         }
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
+        let documentTitleSeed = pendingDocuments.first?.name
+        // Injected retrieval stays off the visible user bubble (requestContext).
+        let documentContext = ChatDocumentContext.render(
+            documents: pendingDocuments,
+            query: trimmed
+        )
+        if !trimmed.isEmpty || !documentContext.isEmpty || !pendingImages.isEmpty || !pendingVideos.isEmpty {
             let user = ChatMessage(
                 sessionId: sessionId,
                 role: .user,
                 content: trimmed,
+                requestContext: documentContext,
                 imageData: pendingImages,
                 videoPaths: pendingVideos.map { $0.absoluteString }
             )
@@ -782,10 +1054,11 @@ final class ChatViewModel {
             inputText = ""
             pendingImages = []
             pendingVideos = []
+            pendingDocuments = []
             // iter-22: dispatched the draft — clear its stashed copy
             // under the active session so a selectSession() round-trip
             // doesn't silently resurrect the already-sent content.
-            drafts.removeValue(forKey: sessionId)
+            clearDraft(for: sessionId)
 
             // Bump session updatedAt so the sidebar reorders this chat
             // to the top (allSessions ORDERs BY updated_at DESC).
@@ -794,8 +1067,11 @@ final class ChatViewModel {
                 bumped.updatedAt = Date()
                 // First message in a new session → derive the title
                 // from the user text (first ~40 chars, trimmed at word).
-                if bumped.title == "New Chat" || bumped.title.isEmpty {
-                    let candidate = String(trimmed.prefix(40))
+                if bumped.hasPlaceholderTitle {
+                    let titleSeed = trimmed.isEmpty
+                        ? (documentTitleSeed ?? "Document chat")
+                        : trimmed
+                    let candidate = String(titleSeed.prefix(40))
                     bumped.title = candidate.isEmpty ? "New Chat" : candidate
                 }
                 sessions[idx] = bumped
@@ -811,8 +1087,9 @@ final class ChatViewModel {
         messages.append(assistant)
         Database.shared.upsertMessage(assistant)
         isGenerating = true
+        let generationID = UUID()
+        activeGenerationID = generationID
 
-        streamTask?.cancel()
         let app = self.app
         let engine: Engine? = {
             if let sid = serverSessionId { return app?.engine(for: sid) }
@@ -847,11 +1124,14 @@ final class ChatViewModel {
             let content: ChatRequest.ContentValue
             let hasMedia = m.role == .user &&
                 (!m.imageData.isEmpty || !m.videoPaths.isEmpty)
+            // Always send modelPayloadContent so document requestContext
+            // reaches the model without appearing in the user bubble.
+            let textPayload = m.modelPayloadContent
             if hasMedia {
                 var parts: [ChatRequest.ContentPart] = []
-                if !m.content.isEmpty {
+                if !textPayload.isEmpty {
                     parts.append(ChatRequest.ContentPart(
-                        type: "text", text: m.content))
+                        type: "text", text: textPayload))
                 }
                 for data in m.imageData {
                     let b64 = data.base64EncodedString()
@@ -871,7 +1151,7 @@ final class ChatViewModel {
                 }
                 content = .parts(parts)
             } else {
-                content = .string(m.content)
+                content = .string(textPayload)
             }
             return ChatRequest.Message(
                 role: m.role.rawValue,
@@ -897,7 +1177,16 @@ final class ChatViewModel {
         // engine.settings.session(_:) lookup asynchronously.
         let serverSid = serverSessionId
         streamTask = Task { [weak self] in
-            guard let engine = engine else { return }
+            guard let engine = engine else {
+                await MainActor.run {
+                    self?.finishWithError(
+                        assistantId,
+                        "No chat engine is available for the selected model.",
+                        generationID: generationID
+                    )
+                }
+                return
+            }
             // Pull the 4-tier-resolved settings snapshot for this chat. The
             // session-level `modelAlias` (when set) wins over whatever the
             // selected model path is, mirroring vmlx-engine HTTP dispatch.
@@ -907,6 +1196,24 @@ final class ChatViewModel {
             let r = resolved.settings
             let chatOverrides = await engine.settings.chat(chatId)
             let modelField = chatOverrides?.modelAlias ?? fallbackModelPath
+
+            // Record the actual request identity even when the user never
+            // opened the model picker. Resolve a raw HF snapshot path back
+            // through ModelLibrary first: its leaf is usually `main`, while
+            // the sidebar needs the human-readable `org/repo` display name.
+            let modelLibrary = await engine.modelLibrary
+            let modelEntries = await modelLibrary.entries()
+            let identity = ChatModelEntryResolver.persistedIdentity(
+                alias: modelField.isEmpty ? nil : modelField,
+                fallbackModelPath: fallbackModelPath.isEmpty ? nil : fallbackModelPath,
+                in: modelEntries
+            )
+            if let identity {
+                await MainActor.run {
+                    guard let self, self.activeGenerationID == generationID else { return }
+                    self.updateModelIdentity(chatId, name: identity.name, path: identity.path)
+                }
+            }
 
             // Tool execution: if the chat has any tool flag enabled we
             // pass BashTool + MCP through to the engine. Stream.swift
@@ -1104,6 +1411,7 @@ final class ChatViewModel {
                     try Task.checkCancellation()
                     await MainActor.run {
                         guard let self,
+                              self.activeGenerationID == generationID,
                               let i = self.messages.firstIndex(where: { $0.id == assistantId })
                         else { return }
                         Self.applyChunk(chunk,
@@ -1114,60 +1422,23 @@ final class ChatViewModel {
                 }
             } catch let err as EngineError {
                 await MainActor.run {
-                    guard let self else { return }
-                    if self.intentionalStop {
-                        self.intentionalStop = false
-                        self.finishOk(assistantId)
-                    } else {
-                        self.finishWithError(assistantId, err.description)
-                    }
+                    self?.finishWithError(assistantId, err.description, generationID: generationID)
                 }
                 return
             } catch {
                 await MainActor.run {
-                    guard let self else { return }
-                    if self.intentionalStop {
-                        self.intentionalStop = false
-                        self.finishOk(assistantId)
-                    } else {
-                        self.finishWithError(assistantId, "\(error)")
-                    }
+                    self?.finishWithError(assistantId, "\(error)", generationID: generationID)
                 }
                 return
             }
-            await MainActor.run { self?.finishOk(assistantId) }
+            await MainActor.run { self?.finishOk(assistantId, generationID: generationID) }
         }
 
         assistant.isStreaming = false
     }
 
     func stop() {
-        intentionalStop = true
-        streamTask?.cancel()
-        // Also reach into the Engine actor to cancel the in-flight
-        // generation directly. `streamTask.cancel()` alone won't
-        // interrupt a blocking prefill (vmlx-swift-lm runs prefill
-        // synchronously inside TokenIterator.init), so we bypass the
-        // AsyncStream layer via `Engine.cancelStream()`.
-        if let appRef = app {
-            let engine: Engine = {
-                if let sid = serverSessionId { return appRef.engine(for: sid) }
-                return appRef.engine
-            }()
-            Task { await engine.cancelStream() }
-        }
-        isGenerating = false
-        if let sid = activeSessionId, let last = messages.last, last.role == .assistant {
-            var m = messages[messages.count - 1]
-            if !m.content.hasSuffix("[stopped]") {
-                if !m.content.isEmpty && !m.content.hasSuffix("\n") { m.content += "\n" }
-                m.content += "[stopped]"
-            }
-            m.isStreaming = false
-            messages[messages.count - 1] = m
-            Database.shared.upsertMessage(m)
-            _ = sid
-        }
+        cancelActiveGeneration(marking: "[stopped]")
     }
 
     private func isErrorState(_ s: EngineState) -> Bool {
@@ -1175,21 +1446,29 @@ final class ChatViewModel {
         return false
     }
 
-    private func finishOk(_ id: UUID) {
+    private func finishOk(_ id: UUID, generationID: UUID) {
+        guard activeGenerationID == generationID else { return }
+        activeGenerationID = nil
+        streamTask = nil
         isGenerating = false
         if let i = messages.firstIndex(where: { $0.id == id }) {
             messages[i].isStreaming = false
+            messages[i].generationState = .complete
             Database.shared.upsertMessage(messages[i])
         }
     }
 
-    private func finishWithError(_ id: UUID, _ msg: String) {
+    private func finishWithError(_ id: UUID, _ msg: String, generationID: UUID) {
+        guard activeGenerationID == generationID else { return }
+        activeGenerationID = nil
+        streamTask = nil
         isGenerating = false
         if let i = messages.firstIndex(where: { $0.id == id }) {
             if messages[i].content.isEmpty {
                 messages[i].content = "[engine error] \(msg)"
             }
             messages[i].isStreaming = false
+            messages[i].generationState = .failed
             Database.shared.upsertMessage(messages[i])
         }
         // Audit 2026-04-16 UX: was "Engine not yet wired: …" — leftover

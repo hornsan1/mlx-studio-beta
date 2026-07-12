@@ -12,10 +12,12 @@
 #   tests/e2e/model-route-verify.sh <chat-model-path> [whisper-hint]
 #
 # Requires: a chat model dir (safetensors) and, for MED-12, a whisper model in
-# the HF cache (e.g. `vmlxctl pull mlx-community/whisper-tiny-mlx`; the npz→
-# safetensors transcode needs Python `mlx` + a tokenizer.json). Verified
-# passing on 2026-07-01 with mlx-community/Qwen3.5-27B-4bit + whisper-tiny-mlx
-# on an M4 Pro (see REVIEW-2026-07-01.md §0).
+# the HF cache (e.g. `vmlxctl pull mlx-community/whisper-tiny-mlx`). MLX
+# Whisper repos ship weights/config while DownloadManager supplements tokenizer
+# sidecars from the matching upstream OpenAI Whisper repo; the npz→safetensors
+# transcode needs Python `mlx`. Verified passing on 2026-07-01 with
+# mlx-community/Qwen3.5-27B-4bit + whisper-tiny-mlx on an M4 Pro
+# (see REVIEW-2026-07-01.md §0).
 set -uo pipefail
 
 MODEL="${1:?usage: model-route-verify.sh <chat-model-path> [whisper-hint]}"

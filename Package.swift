@@ -586,6 +586,7 @@ let package = Package(
                 "DeepseekV4CapabilityTests.swift",
                 "DeepseekV4MultiTurnTests.swift",
                 "DownloadManagerJobCodableTests.swift",
+                "DownloadManagerResumeTests.swift",
                 "Flux1WeightApplicationTests.swift",
                 "FluxEngineCancellationTests.swift",
                 "GenerationConfigDefaultsTests.swift",

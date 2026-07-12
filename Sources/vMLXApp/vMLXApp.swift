@@ -740,6 +740,7 @@ final class AppState {
     func openStudioChatSession(_ id: UUID) {
         mode = .chat
         selectedStudioChatSessionID = id
+        StudioChatHistoryMigration.saveSelectedSessionID(id)
         StudioChatHistoryStore.saveSelectedSessionID(id)
     }
 
@@ -1307,7 +1308,10 @@ struct RootView: View {
                     Group {
                         switch state.mode {
                         case .chat:
-                            StudioChatScreen()
+                            // One production Chat path. The redesigned
+                            // Studio history is migrated into this capable
+                            // SQLite-backed runtime on first open.
+                            ChatScreen()
                         case .create, .image:
                             StudioCreateScreen()
                         case .models:
@@ -1601,6 +1605,7 @@ private struct Sidebar: View {
     @Binding var mode: AppState.Mode
     @Environment(AppState.self) private var appState
     @Environment(\.appLocale) private var appLocale: AppLocale
+    @State private var hoveredMode: AppState.Mode?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -1617,32 +1622,42 @@ private struct Sidebar: View {
             .padding(.bottom, Theme.Spacing.lg)
 
             ForEach(appState.visibleModes) { m in
+                let isSelected = mode == m
+                let isHovered = hoveredMode == m
                 Button {
                     mode = m
                 } label: {
                     HStack(spacing: Theme.Spacing.sm) {
                         Image(systemName: icon(for: m))
                             .frame(width: 16)
-                            .foregroundStyle(mode == m ? Theme.Colors.textHigh : Theme.Colors.textMid)
+                            .foregroundStyle(isSelected || isHovered ? Theme.Colors.textHigh : Theme.Colors.textMid)
                         Text(label(for: m))
                             .font(Theme.Typography.bodyHi)
-                            .foregroundStyle(mode == m ? Theme.Colors.textHigh : Theme.Colors.textMid)
+                            .foregroundStyle(isSelected || isHovered ? Theme.Colors.textHigh : Theme.Colors.textMid)
                             .tracking(0.2)
                         Spacer()
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Theme.Spacing.md)
                     .padding(.vertical, Theme.Spacing.sm)
                     .background(
                         RoundedRectangle(cornerRadius: Theme.Radius.md)
-                            .fill(mode == m ? Theme.Colors.surfaceHi.opacity(0.92) : Color.clear)
+                            .fill(sidebarRowFill(isSelected: isSelected, isHovered: isHovered))
                             .overlay(
                                 RoundedRectangle(cornerRadius: Theme.Radius.md)
-                                    .stroke(mode == m ? Theme.Colors.border : Color.clear, lineWidth: 1)
+                                    .stroke(sidebarRowStroke(isSelected: isSelected, isHovered: isHovered), lineWidth: 1)
                             )
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
                     .padding(.horizontal, Theme.Spacing.sm)
+                    .animation(.easeInOut(duration: 0.12), value: isHovered)
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    hoveredMode = hovering ? m : (hoveredMode == m ? nil : hoveredMode)
+                }
             }
 
             Spacer()
@@ -1694,6 +1709,20 @@ private struct Sidebar: View {
         case .terminal: return "terminal"
         case .api: return "network"
         }
+    }
+
+    private func sidebarRowFill(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected {
+            return Theme.Colors.surfaceHi.opacity(0.92)
+        }
+        return isHovered ? Theme.Colors.surfaceHi.opacity(0.28) : .clear
+    }
+
+    private func sidebarRowStroke(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected {
+            return Theme.Colors.border
+        }
+        return isHovered ? Theme.Colors.border.opacity(0.42) : .clear
     }
 
     private func label(for m: AppState.Mode) -> String {

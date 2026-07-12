@@ -107,6 +107,12 @@ struct StudioChatScreen: View {
     @State private var streamTask: Task<Void, Never>?
     @State private var streamingAssistantID: UUID?
     @State private var preSessionModelPath: URL?
+    @State private var systemPrompt = ""
+    @State private var maxResponseTokens = StudioChatRuntime.defaultMaxResponseTokens
+    @State private var contextLimitTokens = StudioChatRuntime.defaultContextLimitTokens
+    @State private var defaultContextLimitTokens = StudioChatRuntime.defaultContextLimitTokens
+    @State private var liveUsage: StreamChunk.Usage?
+    @State private var lastUsage: StreamChunk.Usage?
 
     private struct ComposerSuggestion: Identifiable {
         let id: String
@@ -159,6 +165,89 @@ struct StudioChatScreen: View {
 
     private var activeReplyModelName: String? {
         selectedReplyModelName ?? recordedSessionModelName
+    }
+
+    private var sanitizedMaxResponseTokens: Int {
+        StudioChatRuntime.sanitizedMaxResponseTokens(maxResponseTokens)
+    }
+
+    private var sanitizedContextLimitTokens: Int {
+        StudioChatRuntime.sanitizedContextLimitTokens(contextLimitTokens)
+    }
+
+    private var currentUsage: StreamChunk.Usage? {
+        liveUsage ?? lastUsage
+    }
+
+    private var estimatedContextTokens: Int {
+        StudioChatRuntime.estimatedContextTokens(
+            systemPrompt: systemPrompt,
+            turns: turns,
+            draftPrompt: prompt
+        )
+    }
+
+    private var contextTokenText: String {
+        if let promptTokens = currentUsage?.promptTokens, promptTokens > 0 {
+            return Self.formatTokenCount(promptTokens)
+        }
+        return estimatedContextTokens > 0
+            ? "≈\(Self.formatTokenCount(estimatedContextTokens))"
+            : "0"
+    }
+
+    private var contextLoadText: String {
+        "\(contextTokenText) / \(Self.formatTokenCount(sanitizedContextLimitTokens))"
+    }
+
+    private var outputTokenText: String {
+        let completion = currentUsage?.completionTokens ?? 0
+        return "\(Self.formatTokenCount(completion)) / \(Self.formatTokenCount(sanitizedMaxResponseTokens))"
+    }
+
+    private var totalTokenText: String {
+        guard let currentUsage else { return contextTokenText }
+        return Self.formatTokenCount(StudioChatRuntime.totalTokens(currentUsage))
+    }
+
+    private var decodeSpeedText: String {
+        Self.formatTokensPerSecond(currentUsage?.tokensPerSecond)
+    }
+
+    private var prefillSpeedText: String {
+        Self.formatTokensPerSecond(currentUsage?.promptTokensPerSecond)
+    }
+
+    private var ttftText: String {
+        guard let ttftMs = currentUsage?.ttftMs, ttftMs.isFinite, ttftMs >= 0 else {
+            return "Waiting"
+        }
+        return Self.formatMilliseconds(ttftMs)
+    }
+
+    private var cacheMetricText: String {
+        guard let usage = currentUsage else {
+            return L10n.Studio.noUsageYet.render(AppLocalePreference.current)
+        }
+        if let detail = usage.cacheDetail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return detail
+        }
+        return L10n.Studio.cachedTokensFormat.render(
+            AppLocalePreference.current,
+            Self.formatTokenCount(usage.cachedTokens)
+        )
+    }
+
+    private var metricsFreshnessText: String {
+        guard let usage = currentUsage else {
+            return L10n.Studio.noStreamMetricsYet.render(AppLocalePreference.current)
+        }
+        if isStreaming && usage.isPartial {
+            return L10n.Studio.livePartial.render(AppLocalePreference.current)
+        }
+        return usage.isPartial
+            ? L10n.Studio.lastPartial.render(AppLocalePreference.current)
+            : L10n.Studio.finalUsage.render(AppLocalePreference.current)
     }
 
     private var sessionModelMismatch: (recorded: String, selected: String)? {
@@ -238,6 +327,7 @@ struct StudioChatScreen: View {
         .accessibilityIdentifier("MLX Studio Chat Workspace")
         .task {
             await refreshModels()
+            await hydrateRuntimeDefaults()
             loadSessions(selecting: app.selectedStudioChatSessionID)
             consumePendingPromptHandoff()
             consumeStudioChatCommand()
@@ -301,6 +391,9 @@ struct StudioChatScreen: View {
                 activeReplyModelName ?? "No model selected",
                 systemImage: "cpu"
             )
+            metadataChip("\(L10n.Studio.context.render(AppLocalePreference.current)) \(contextLoadText)", systemImage: "text.justify.left")
+            metadataChip("\(L10n.Studio.output.render(AppLocalePreference.current)) \(outputTokenText)", systemImage: "number")
+            metadataChip(decodeSpeedText, systemImage: "speedometer")
             if let mismatch = sessionModelMismatch {
                 metadataChip("Saved as \(mismatch.recorded)", systemImage: "clock.arrow.circlepath")
             }
@@ -399,16 +492,16 @@ struct StudioChatScreen: View {
                     tint: selectedModel?.isLoaded == true ? Theme.Colors.success : Theme.Colors.accent
                 )
                 runwayMetric(
-                    "Session memory",
-                    activeSession?.isPinned == true ? "Pinned in Library" : "Saved to Library",
-                    systemImage: activeSession?.isPinned == true ? "pin.fill" : "books.vertical",
-                    tint: activeSession?.isPinned == true ? Theme.Colors.warning : Theme.Colors.textMid
+                    L10n.Studio.context.render(AppLocalePreference.current),
+                    contextLoadText,
+                    systemImage: "text.justify.left",
+                    tint: Theme.Colors.warning
                 )
                 runwayMetric(
-                    "Next action",
-                    failedTurnCount > 0 ? "Explain or retry" : "Continue, summarize, or branch",
-                    systemImage: failedTurnCount > 0 ? "arrow.clockwise.circle" : "arrow.turn.down.right",
-                    tint: failedTurnCount > 0 ? Theme.Colors.danger : Theme.Colors.creative
+                    L10n.Studio.speed.render(AppLocalePreference.current),
+                    decodeSpeedText,
+                    systemImage: "speedometer",
+                    tint: Theme.Colors.creative
                 )
             }
 
@@ -433,50 +526,43 @@ struct StudioChatScreen: View {
     }
 
     private var sessionTrail: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            HStack(alignment: .center, spacing: Theme.Spacing.sm) {
-                Label(L10n.Studio.sessionTrail.render(AppLocalePreference.current), systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(Theme.Typography.captionHi)
-                    .foregroundStyle(Theme.Colors.textHigh)
-                Spacer(minLength: Theme.Spacing.sm)
-                Text(sessionHealthText)
+        HStack(alignment: .center, spacing: Theme.Spacing.md) {
+            Label(L10n.Studio.sessionTrail.render(AppLocalePreference.current), systemImage: "point.3.connected.trianglepath.dotted")
+                .font(Theme.Typography.captionHi)
+                .foregroundStyle(Theme.Colors.textHigh)
+                .lineLimit(1)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sessionTrailStatusLine)
                     .font(Theme.Typography.captionHi)
                     .foregroundStyle(failedTurnCount > 0 ? Theme.Colors.danger : Theme.Colors.success)
+                    .lineLimit(1)
+                Text(sessionTrailPreviewLine)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.textLow)
+                    .lineLimit(1)
             }
 
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 198), spacing: Theme.Spacing.sm)],
-                spacing: Theme.Spacing.sm
-            ) {
-                trailCard(
-                    "Prompt",
-                    value: lastUserPrompt ?? "No prompt yet",
-                    caption: "Last user turn",
-                    systemImage: "text.quote",
-                    tint: Theme.Colors.accent
-                )
-                trailCard(
-                    "Latest response",
-                    value: lastAssistantResponse ?? "No response yet",
-                    caption: failedTurnCount > 0 ? "Needs attention" : "Ready to continue",
-                    systemImage: failedTurnCount > 0 ? "exclamationmark.triangle" : "sparkles",
-                    tint: failedTurnCount > 0 ? Theme.Colors.danger : Theme.Colors.success
-                )
-                trailCard(
-                    "Next move",
-                    value: failedTurnCount > 0 ? "Explain failure" : "Continue answer",
-                    caption: "Prepared in composer",
-                    systemImage: failedTurnCount > 0 ? "arrow.clockwise.circle" : "arrow.turn.down.right",
-                    tint: failedTurnCount > 0 ? Theme.Colors.danger : Theme.Colors.creative,
-                    action: {
-                        prompt = failedTurnCount > 0
-                            ? "Explain why the last response failed and suggest the shortest fix."
-                            : "Continue from the last useful point, keeping the answer concise."
-                    }
-                )
+            Spacer(minLength: Theme.Spacing.sm)
+
+            Button {
+                prompt = nextMovePrompt
+            } label: {
+                Label(nextMoveTitle, systemImage: nextMoveIcon)
+                    .font(Theme.Typography.captionHi)
+                    .lineLimit(1)
+                    .padding(.horizontal, Theme.Spacing.sm)
+                    .padding(.vertical, Theme.Spacing.xs)
+                    .background(nextMoveTint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(nextMoveTint)
+            .accessibilityIdentifier("Session trail next move")
+            .accessibilityHint(nextMovePrompt)
         }
-        .padding(Theme.Spacing.md)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.Colors.surface.opacity(0.42))
         .overlay(
@@ -486,53 +572,37 @@ struct StudioChatScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
     }
 
-    @ViewBuilder
-    private func trailCard(
-        _ title: String,
-        value: String,
-        caption: String,
-        systemImage: String,
-        tint: Color,
-        action: (() -> Void)? = nil
-    ) -> some View {
-        let content = HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-            Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textLow)
-                Text(value)
-                    .font(Theme.Typography.captionHi)
-                    .foregroundStyle(Theme.Colors.textHigh)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
-                Text(caption)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textMid)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(Theme.Spacing.sm)
-        .frame(maxWidth: .infinity, minHeight: 74, alignment: .topLeading)
-        .background(tint.opacity(0.10))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                .stroke(tint.opacity(0.24), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+    private var sessionTrailStatusLine: String {
+        if failedTurnCount > 0 { return sessionHealthText }
+        return lastAssistantResponse == nil ? "Waiting for first reply" : "Ready to continue"
+    }
 
-        if let action {
-            Button(action: action) {
-                content
-            }
-            .buttonStyle(.plain)
-        } else {
-            content
+    private var sessionTrailPreviewLine: String {
+        if let prompt = lastUserPrompt, lastAssistantResponse == nil {
+            return prompt
         }
+        if let response = lastAssistantResponse {
+            return response
+        }
+        return activeReplyModelName ?? "Select a model"
+    }
+
+    private var nextMoveTitle: String {
+        failedTurnCount > 0 ? "Explain" : "Continue"
+    }
+
+    private var nextMoveIcon: String {
+        failedTurnCount > 0 ? "arrow.clockwise.circle" : "arrow.turn.down.right"
+    }
+
+    private var nextMoveTint: Color {
+        failedTurnCount > 0 ? Theme.Colors.danger : Theme.Colors.creative
+    }
+
+    private var nextMovePrompt: String {
+        failedTurnCount > 0
+            ? "Explain why the last response failed and suggest the shortest fix."
+            : "Continue from the last useful point, keeping the answer concise."
     }
 
     private var runwaySubtitle: String {
@@ -642,42 +712,154 @@ struct StudioChatScreen: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.ProNoirPanelBackground(active: activeSession?.isPinned == true))
 
+                runtimeControlsPanel
+
                 sessionBriefPanel
 
                 sessionStatGrid
-
-                if let prompt = lastUserPrompt {
-                    sessionSnippet(
-                        title: "Last prompt",
-                        value: prompt,
-                        systemImage: "text.quote"
-                    )
-                }
-
-                if let response = lastAssistantResponse {
-                    sessionSnippet(
-                        title: "Latest response",
-                        value: response,
-                        systemImage: failedTurnCount > 0 ? "exclamationmark.triangle" : "sparkles"
-                    )
-                }
-
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    Text(L10n.Studio.nextMove.render(AppLocalePreference.current))
-                        .font(Theme.Typography.captionHi)
-                        .foregroundStyle(Theme.Colors.textLow)
-                    if failedTurnCount > 0 {
-                        quickPromptButton("Explain failure", "Explain why the last response failed and suggest the shortest fix.")
-                    } else {
-                        quickPromptButton("Make practical", "Turn the last answer into concrete next steps with tradeoffs.")
-                    }
-                    quickPromptButton("Continue", "Continue from the last useful point, keeping the answer concise.")
-                    quickPromptButton("Summarize", "Summarize this session into decisions, open questions, and next actions.")
-                }
             }
             .padding(Theme.Spacing.md)
         }
         .background(Theme.Colors.surface.opacity(0.64))
+    }
+
+    private var runtimeControlsPanel: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                Label(L10n.Studio.contextControls.render(AppLocalePreference.current), systemImage: "slider.horizontal.3")
+                    .font(Theme.Typography.captionHi)
+                    .foregroundStyle(Theme.Colors.textMid)
+                Spacer(minLength: 0)
+                Text(metricsFreshnessText)
+                    .font(Theme.Typography.monoCaption)
+                    .foregroundStyle(Theme.Colors.textLow)
+                    .lineLimit(1)
+            }
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Label(L10n.Studio.systemPrompt.render(AppLocalePreference.current), systemImage: "text.badge.star")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.textLow)
+                TextEditor(text: $systemPrompt)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.textHigh)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 76, maxHeight: 112)
+                    .padding(6)
+                    .background(Theme.Colors.surface.opacity(0.72))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                            .stroke(Theme.Colors.border.opacity(0.72), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                    .disabled(isStreaming)
+                    .accessibilityIdentifier("Chat system prompt")
+            }
+
+            HStack(spacing: Theme.Spacing.sm) {
+                runtimeNumberField(
+                    L10n.Studio.contextLimit.render(AppLocalePreference.current),
+                    value: $contextLimitTokens,
+                    systemImage: "text.justify.left",
+                    caption: L10n.Studio.promptCeiling.render(AppLocalePreference.current),
+                    accessibilityIdentifier: "Chat Context limit"
+                )
+                runtimeNumberField(
+                    L10n.Studio.maxResponse.render(AppLocalePreference.current),
+                    value: $maxResponseTokens,
+                    systemImage: "number",
+                    caption: L10n.Studio.outputCap.render(AppLocalePreference.current),
+                    accessibilityIdentifier: "Chat Max response"
+                )
+            }
+
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: Theme.Spacing.xs), GridItem(.flexible(), spacing: Theme.Spacing.xs)],
+                spacing: Theme.Spacing.xs
+            ) {
+                runtimeMetricPill(L10n.Studio.context.render(AppLocalePreference.current), contextLoadText, systemImage: "text.justify.left", tint: Theme.Colors.warning)
+                runtimeMetricPill(L10n.Studio.output.render(AppLocalePreference.current), outputTokenText, systemImage: "number", tint: Theme.Colors.accent)
+                runtimeMetricPill(L10n.Studio.total.render(AppLocalePreference.current), totalTokenText, systemImage: "sum", tint: Theme.Colors.textMid)
+                runtimeMetricPill(L10n.Studio.decode.render(AppLocalePreference.current), decodeSpeedText, systemImage: "speedometer", tint: Theme.Colors.creative)
+                runtimeMetricPill(L10n.Studio.prefill.render(AppLocalePreference.current), prefillSpeedText, systemImage: "gauge.with.dots.needle.33percent", tint: Theme.Colors.success)
+                runtimeMetricPill(L10n.Studio.ttft.render(AppLocalePreference.current), ttftText, systemImage: "timer", tint: Theme.Colors.textMid)
+            }
+
+            Text(cacheMetricText)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textLow)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(Theme.Spacing.md)
+        .background(Theme.Colors.surfaceHi.opacity(0.42))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.md)
+                .stroke(Theme.Colors.border.opacity(0.72), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+    }
+
+    private func runtimeNumberField(
+        _ title: String,
+        value: Binding<Int>,
+        systemImage: String,
+        caption: String,
+        accessibilityIdentifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Label(title, systemImage: systemImage)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textLow)
+                .lineLimit(1)
+            TextField(title, value: value, formatter: Self.integerFormatter)
+                .textFieldStyle(.plain)
+                .font(Theme.Typography.monoCaption)
+                .foregroundStyle(Theme.Colors.textHigh)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .background(Theme.Colors.surface.opacity(0.72))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .stroke(Theme.Colors.border.opacity(0.72), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .disabled(isStreaming)
+                .accessibilityIdentifier(accessibilityIdentifier)
+            Text(caption)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textLow)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func runtimeMetricPill(
+        _ title: String,
+        _ value: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(title, systemImage: systemImage)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textLow)
+                .lineLimit(1)
+            Text(value)
+                .font(Theme.Typography.monoCaption)
+                .foregroundStyle(Theme.Colors.textHigh)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .padding(.horizontal, Theme.Spacing.sm)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 54, alignment: .topLeading)
+        .background(tint.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                .stroke(tint.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
     }
 
     private var sessionBriefPanel: some View {
@@ -776,6 +958,24 @@ struct StudioChatScreen: View {
                 tint: Theme.Colors.textMid
             )
             sessionStatTile(
+                title: L10n.Studio.context.render(AppLocalePreference.current),
+                value: contextLoadText,
+                systemImage: "text.justify.left",
+                tint: Theme.Colors.warning
+            )
+            sessionStatTile(
+                title: L10n.Studio.output.render(AppLocalePreference.current),
+                value: outputTokenText,
+                systemImage: "number",
+                tint: Theme.Colors.accent
+            )
+            sessionStatTile(
+                title: L10n.Studio.speed.render(AppLocalePreference.current),
+                value: decodeSpeedText,
+                systemImage: "speedometer",
+                tint: Theme.Colors.creative
+            )
+            sessionStatTile(
                 title: "State",
                 value: failedTurnCount > 0 ? "\(failedTurnCount) failed" : "Clean",
                 systemImage: failedTurnCount > 0 ? "exclamationmark.triangle" : "checkmark.circle",
@@ -817,52 +1017,6 @@ struct StudioChatScreen: View {
                 .padding(Theme.Spacing.sm)
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-    }
-
-    private func sessionSnippet(title: String, value: String, systemImage: String) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            Label(title, systemImage: systemImage)
-                .font(Theme.Typography.captionHi)
-                .foregroundStyle(Theme.Colors.textLow)
-            Text(value)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.textMid)
-                .lineLimit(5)
-                .textSelection(.enabled)
-        }
-        .padding(Theme.Spacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.Colors.surfaceHi.opacity(0.46))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-    }
-
-    private func quickPromptButton(_ title: String, _ text: String) -> some View {
-        Button {
-            prompt = text
-        } label: {
-            HStack(spacing: Theme.Spacing.sm) {
-                Image(systemName: "arrow.turn.down.right")
-                    .foregroundStyle(Theme.Colors.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(Theme.Typography.captionHi)
-                        .foregroundStyle(Theme.Colors.textHigh)
-                    Text(text)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.textLow)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(Theme.Spacing.sm)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.Colors.surfaceHi.opacity(0.42))
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("Session quick prompt \(title)")
-        .accessibilityLabel(title)
-        .accessibilityHint(text)
     }
 
     private var failedTurnCount: Int {
@@ -975,6 +1129,7 @@ struct StudioChatScreen: View {
         selectedModelID = model.id
         app.selectedModelPath = model.ref.localURL
         guard let activeSessionID, !turns.isEmpty else { return }
+        persistCurrentSession(modelNameOverride: model.ref.displayName)
         StudioChatHistoryStore.updateSessionModelName(activeSessionID, modelName: model.ref.displayName)
         loadSessions(selecting: activeSessionID)
         status = "Session model set: \(model.ref.displayName)"
@@ -1013,8 +1168,9 @@ struct StudioChatScreen: View {
                             systemImage: "internaldrive",
                             tint: Theme.Colors.textMid
                         )
+                        runtimeControlsPanel
                     }
-                    .frame(width: 280)
+                    .frame(width: 304)
                 }
 
                 if chatCapableModels.isEmpty {
@@ -1376,6 +1532,8 @@ struct StudioChatScreen: View {
             draftHandoffTitle = nil
         }
         turns = selectedSession?.turns ?? []
+        applySavedRuntimeControls(for: selectedSession)
+        resetRuntimeMetrics()
         applySavedModelSelection(for: selectedSession)
         if app.selectedStudioChatSessionID != selectedSession?.id {
             app.selectedStudioChatSessionID = selectedSession?.id
@@ -1392,6 +1550,8 @@ struct StudioChatScreen: View {
         app.selectedStudioChatSessionID = session.id
         StudioChatHistoryStore.saveSelectedSessionID(session.id)
         turns = session.turns
+        applySavedRuntimeControls(for: session)
+        resetRuntimeMetrics()
         applySavedModelSelection(for: session)
         status = "Opened \(session.title)"
     }
@@ -1421,6 +1581,8 @@ struct StudioChatScreen: View {
         draftHandoffTitle = nil
         turns = []
         prompt = ""
+        resetRuntimeControls()
+        resetRuntimeMetrics()
         status = "Draft chat"
         StudioChatHistoryStore.saveSelectedSessionID(nil)
         app.selectedStudioChatSessionID = nil
@@ -1454,6 +1616,8 @@ struct StudioChatScreen: View {
         activeSessionID = session.id
         draftHandoffTitle = nil
         turns = session.turns
+        applySavedRuntimeControls(for: session)
+        resetRuntimeMetrics()
         applySavedModelSelection(for: session)
         app.selectedStudioChatSessionID = session.id
         StudioChatHistoryStore.saveSelectedSessionID(session.id)
@@ -1468,6 +1632,35 @@ struct StudioChatScreen: View {
         selectedModelID = model.id
         if app.selectedModelPath != model.ref.localURL {
             app.selectedModelPath = model.ref.localURL
+        }
+    }
+
+    private func applySavedRuntimeControls(for session: StudioChatSession?) {
+        guard let session else {
+            resetRuntimeControls()
+            return
+        }
+        systemPrompt = session.systemPrompt ?? ""
+        maxResponseTokens = session.maxResponseTokens ?? StudioChatRuntime.defaultMaxResponseTokens
+        contextLimitTokens = session.contextLimitTokens ?? defaultContextLimitTokens
+    }
+
+    private func resetRuntimeControls() {
+        systemPrompt = ""
+        maxResponseTokens = StudioChatRuntime.defaultMaxResponseTokens
+        contextLimitTokens = defaultContextLimitTokens
+    }
+
+    private func resetRuntimeMetrics() {
+        liveUsage = nil
+        lastUsage = nil
+    }
+
+    private func hydrateRuntimeDefaults() async {
+        let global = await app.engine.settings.global()
+        defaultContextLimitTokens = StudioChatRuntime.sanitizedContextLimitTokens(global.maxPromptTokens)
+        if activeSessionID == nil && turns.isEmpty {
+            contextLimitTokens = defaultContextLimitTokens
         }
     }
 
@@ -1515,6 +1708,8 @@ struct StudioChatScreen: View {
         draftHandoffTitle = handoff.title
         turns = []
         prompt = handoff.prompt
+        resetRuntimeControls()
+        resetRuntimeMetrics()
         status = handoff.status
         StudioChatHistoryStore.saveSelectedSessionID(nil)
         app.selectedStudioChatSessionID = nil
@@ -1580,6 +1775,8 @@ struct StudioChatScreen: View {
             return
         }
         prompt = ""
+        liveUsage = nil
+        lastUsage = nil
         let userTurn = ChatTurn(role: .user, content: text)
         let assistant = ChatTurn(role: .assistant, content: "", streamState: .streaming)
         let shouldTitleSession = turns.isEmpty
@@ -1610,6 +1807,9 @@ struct StudioChatScreen: View {
                 let request = StudioChatRequest(
                     model: selectedModel.ref,
                     messages: turns.filter { !$0.content.isEmpty || $0.role != .assistant },
+                    maxTokens: sanitizedMaxResponseTokens,
+                    systemPrompt: systemPrompt,
+                    contextLimitTokens: sanitizedContextLimitTokens,
                     enableThinking: app.experienceMode == .advanced
                 )
                 let stream = try await StudioChatService(app: app).streamMessage(request)
@@ -1619,8 +1819,11 @@ struct StudioChatScreen: View {
                         await MainActor.run {
                             append(token, to: assistantID)
                         }
-                    case .usage:
-                        break
+                    case .usage(let usage):
+                        await MainActor.run {
+                            liveUsage = usage
+                            lastUsage = usage
+                        }
                     case .finished:
                         break
                     }
@@ -1630,6 +1833,7 @@ struct StudioChatScreen: View {
                     status = "Ready"
                     isStreaming = false
                     streamingAssistantID = nil
+                    liveUsage = nil
                     persistCurrentSession()
                 }
             } catch {
@@ -1653,6 +1857,7 @@ struct StudioChatScreen: View {
                     }
                     isStreaming = false
                     streamingAssistantID = nil
+                    liveUsage = nil
                     persistCurrentSession()
                 }
             }
@@ -1673,6 +1878,7 @@ struct StudioChatScreen: View {
                 }
                 isStreaming = false
                 streamingAssistantID = nil
+                liveUsage = nil
                 status = "Stopped"
                 persistCurrentSession()
             }
@@ -1728,6 +1934,38 @@ struct StudioChatScreen: View {
         return formatter
     }()
 
+    private static let integerFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimum = NSNumber(value: StudioChatRuntime.minTokenLimit)
+        formatter.maximum = NSNumber(value: StudioChatRuntime.maxTokenLimit)
+        formatter.generatesDecimalNumbers = false
+        return formatter
+    }()
+
+    private static func formatTokenCount(_ value: Int) -> String {
+        let clamped = max(0, value)
+        if clamped >= 1_000_000 {
+            return String(format: "%.1fM", Double(clamped) / 1_000_000.0)
+        }
+        if clamped >= 10_000 {
+            return "\(clamped / 1_000)k"
+        }
+        return integerFormatter.string(from: NSNumber(value: clamped)) ?? "\(clamped)"
+    }
+
+    private static func formatTokensPerSecond(_ value: Double?) -> String {
+        guard let value, value.isFinite, value > 0 else { return "Waiting" }
+        return String(format: "%.1f tok/s", value)
+    }
+
+    private static func formatMilliseconds(_ value: Double) -> String {
+        if value >= 1_000 {
+            return String(format: "%.2fs", value / 1_000.0)
+        }
+        return String(format: "%.0f ms", value)
+    }
+
     private func persistCurrentSession(
         titleSeed: String? = nil,
         modelNameOverride: String? = nil
@@ -1752,15 +1990,23 @@ struct StudioChatScreen: View {
             ?? normalizedModelName(prior?.modelName)
             ?? selectedReplyModelName
         let turnsChanged = prior?.turns != cleanedTurns
-        let resolvedUpdatedAt = turnsChanged ? now : prior?.updatedAt ?? now
         let modelChanged = prior.map { normalizedModelName($0.modelName) != resolvedModelName } ?? false
-        let resolvedSummaryExportPath = turnsChanged || modelChanged ? nil : prior?.summaryExportPath
-        let resolvedSummaryExportedAt = turnsChanged || modelChanged ? nil : prior?.summaryExportedAt
+        let runtimeChanged = prior.map {
+            ($0.systemPrompt ?? "") != (StudioChatRuntime.normalizedSystemPrompt(systemPrompt) ?? "")
+                || ($0.maxResponseTokens ?? StudioChatRuntime.defaultMaxResponseTokens) != sanitizedMaxResponseTokens
+                || ($0.contextLimitTokens ?? StudioChatRuntime.defaultContextLimitTokens) != sanitizedContextLimitTokens
+        } ?? false
+        let resolvedUpdatedAt = turnsChanged || modelChanged || runtimeChanged ? now : prior?.updatedAt ?? now
+        let resolvedSummaryExportPath = turnsChanged || modelChanged || runtimeChanged ? nil : prior?.summaryExportPath
+        let resolvedSummaryExportedAt = turnsChanged || modelChanged || runtimeChanged ? nil : prior?.summaryExportedAt
         let updated = StudioChatSession(
             id: sessionID,
             title: resolvedTitle,
             modelName: resolvedModelName,
             turns: cleanedTurns,
+            systemPrompt: StudioChatRuntime.normalizedSystemPrompt(systemPrompt),
+            maxResponseTokens: sanitizedMaxResponseTokens,
+            contextLimitTokens: sanitizedContextLimitTokens,
             createdAt: prior?.createdAt ?? cleanedTurns.first?.createdAt ?? now,
             updatedAt: resolvedUpdatedAt,
             isPinned: prior?.isPinned ?? false,
@@ -7475,10 +7721,27 @@ private struct ChatTurnBubble: View {
                 Spacer()
             }
             let content = StudioChatText.cleanForDisplay(turn.content)
-            Text(content.isEmpty ? "Thinking" : content)
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.Colors.textHigh)
-                .textSelection(.enabled)
+            if content.isEmpty {
+                Text("Thinking")
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.textHigh)
+            } else if turn.role == .assistant {
+                // Shared Markdown document model (same as production ChatScreen).
+                if turn.streamState == .streaming {
+                    MarkdownStreamingView(
+                        text: content,
+                        messageID: turn.id,
+                        isStreaming: true
+                    )
+                } else {
+                    MarkdownView(text: content, messageID: turn.id)
+                }
+            } else {
+                Text(content)
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.textHigh)
+                    .textSelection(.enabled)
+            }
 
             HStack(spacing: Theme.Spacing.sm) {
                 Button(action: copy) {

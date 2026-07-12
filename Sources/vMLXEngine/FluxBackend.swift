@@ -130,7 +130,34 @@ extension Engine {
         )
         let requestedRegistryName = canonicalFluxRegistryName(for: model, entry: libraryEntry)
         if MFluxImageBackend.shouldUse(for: requestedRegistryName) {
-            guard let modelPath = libraryEntry?.canonicalPath ?? self.lastImageModelPath else {
+            let candidatePaths = Self.uniqueImageModelCandidatePaths([
+                self.lastImageModelPath,
+                libraryEntry?.canonicalPath,
+            ].compactMap { $0 } + Self.fallbackImageModelCandidatePaths(
+                runtimeName: requestedRegistryName
+            ))
+            var validationErrors: [String] = []
+            var selectedModelPath: URL?
+            for candidate in candidatePaths {
+                do {
+                    try ImageModelInstallVerifier.validate(
+                        runtimeName: requestedRegistryName,
+                        repo: model,
+                        localPath: candidate
+                    )
+                    selectedModelPath = candidate
+                    break
+                } catch {
+                    validationErrors.append("\(candidate.path): \(error.localizedDescription)")
+                }
+            }
+            guard let modelPath = selectedModelPath else {
+                if !validationErrors.isEmpty {
+                    throw EngineError.notImplemented(
+                        "mflux image backend — no verified local model path for '\(model)'. "
+                        + validationErrors.joined(separator: " ")
+                    )
+                }
                 throw EngineError.notImplemented(
                     "mflux image backend — no local model path for '\(model)'. "
                     + "Download the model first or preload with `vmlxctl images --model <path>`."
@@ -389,6 +416,12 @@ extension Engine {
         if comparable.contains("z-image") && comparable.contains("turbo") {
             return "z-image-turbo"
         }
+        if comparable.contains("krea-2") || comparable.contains("krea2") {
+            return "krea-2-turbo"
+        }
+        if comparable.contains("krea") {
+            return "flux-krea-dev"
+        }
         if comparable.contains("qwen-image") || comparable.contains("qwen/image") {
             return "qwen-image"
         }
@@ -402,6 +435,39 @@ extension Engine {
             return "flux1-schnell"
         }
         return requestedModel.lowercased()
+    }
+
+    private static func uniqueImageModelCandidatePaths(_ paths: [URL]) -> [URL] {
+        var seen = Set<String>()
+        var result: [URL] = []
+        for path in paths {
+            let standardized = path.standardizedFileURL
+            guard seen.insert(standardized.path).inserted else { continue }
+            result.append(standardized)
+        }
+        return result
+    }
+
+    private static func fallbackImageModelCandidatePaths(runtimeName: String) -> [URL] {
+        guard runtimeName == "krea-2-turbo" else { return [] }
+        let snapshots = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".cache/huggingface/hub/models--krea--Krea-2-Turbo/snapshots",
+                isDirectory: true
+            )
+        var candidates = [
+            snapshots.appendingPathComponent("main", isDirectory: true),
+        ]
+        if let contents = try? FileManager.default.contentsOfDirectory(
+            at: snapshots,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            candidates.append(contentsOf: contents.filter { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            })
+        }
+        return uniqueImageModelCandidatePaths(candidates)
     }
 
     private func canonicalFluxRegistryName(forModelPath modelPath: URL) -> String {
@@ -423,6 +489,12 @@ extension Engine {
             let comparable = imageComparableName(candidate)
             if comparable.contains("z-image") && comparable.contains("turbo") {
                 return "z-image-turbo"
+            }
+            if comparable.contains("krea-2") || comparable.contains("krea2") {
+                return "krea-2-turbo"
+            }
+            if comparable.contains("krea") {
+                return "flux-krea-dev"
             }
             if comparable.contains("qwen-image") || comparable.contains("qwen/image") {
                 return "qwen-image"
@@ -452,10 +524,13 @@ extension Engine {
         return entries.first { entry in
             guard entry.modality == .image
                     || entry.family.lowercased().contains("flux")
+                    || entry.family.lowercased().contains("krea")
                     || entry.displayName.lowercased().contains("flux")
+                    || entry.displayName.lowercased().contains("krea")
                     || entry.displayName.lowercased().contains("z-image")
                     || entry.displayName.lowercased().contains("qwen-image")
                     || entry.canonicalPath.path.lowercased().contains("flux")
+                    || entry.canonicalPath.path.lowercased().contains("krea")
                     || entry.canonicalPath.path.lowercased().contains("z-image")
                     || entry.canonicalPath.path.lowercased().contains("qwen-image")
             else { return false }
@@ -485,6 +560,14 @@ extension Engine {
                 }
                 if requestedRegistry == "z-image-turbo",
                    comparable.contains("z-image") && comparable.contains("turbo") {
+                    return true
+                }
+                if requestedRegistry == "krea-2-turbo",
+                   comparable.contains("krea-2") || comparable.contains("krea2") {
+                    return true
+                }
+                if requestedRegistry == "flux-krea-dev",
+                   comparable.contains("krea") {
                     return true
                 }
                 if requestedRegistry == "qwen-image",

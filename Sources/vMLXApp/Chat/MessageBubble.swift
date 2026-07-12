@@ -1,6 +1,9 @@
 import SwiftUI
 import vMLXTheme
 import vMLXEngine
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct MessageBubble: View {
     let message: ChatMessage
@@ -22,6 +25,7 @@ struct MessageBubble: View {
     let onDelete: () -> Void
     let onEdit: (String) -> Void
     let onRegenerate: () -> Void
+    var onContinue: (() -> Void)? = nil
     /// Fork this chat from the current message into a new session, keeping
     /// everything strictly BEFORE the anchor. `nil` hides the button (for
     /// the first message, where branching is equivalent to New Chat).
@@ -174,25 +178,37 @@ struct MessageBubble: View {
         }
     }
 
-    /// Streaming + empty assistant → typing dots. Otherwise either a streaming
-    /// `StreamingTextView` (typewriter applies) or the full `MarkdownView`.
-    /// Markdown is only used for finalized assistant messages — during the
-    /// stream we keep the simple text path so the typewriter stays smooth.
+    /// Streaming + empty assistant → typing dots. Otherwise progressive
+    /// Markdown (`MarkdownStreamingView`) while streaming, full `MarkdownView`
+    /// when complete. User bubbles show display content only; request context
+    /// is indicated separately so documents never look user-authored.
     @ViewBuilder
     private var contentView: some View {
         if message.role == .assistant && message.isStreaming && message.content.isEmpty {
             TypingDots()
-        } else if message.isStreaming {
-            StreamingTextView(text: message.content, isStreaming: true)
+        } else if message.role == .assistant && message.isStreaming {
+            MarkdownStreamingView(
+                text: message.content,
+                messageID: message.id,
+                isStreaming: true
+            )
         } else if message.role == .assistant {
-            MarkdownView(text: message.content)
+            MarkdownView(text: message.content, messageID: message.id)
         } else {
-            // User / system / tool — plain text, selectable.
-            Text(message.content)
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.Colors.textHigh)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Text(message.content)
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.textHigh)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !message.requestContext.isEmpty {
+                    Label("Document context sent to model", systemImage: "doc.text")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.textLow)
+                        .accessibilityIdentifier("message.request-context.\(message.id.uuidString.lowercased())")
+                        .help("Extracted document text was included for the model but is not shown as part of your message.")
+                }
+            }
         }
     }
 
@@ -230,6 +246,20 @@ struct MessageBubble: View {
 
     private var actionBar: some View {
         HStack(spacing: Theme.Spacing.sm) {
+            if message.role == .assistant && !message.content.isEmpty {
+                Menu {
+                    Button("Copy Markdown") { copyResponse(plain: false) }
+                    Button("Copy plain text") { copyResponse(plain: true) }
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Colors.textLow)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Copy response")
+                .accessibilityIdentifier("message.copy.\(message.id.uuidString.lowercased())")
+            }
             if message.role == .user {
                 Button {
                     draft = message.content
@@ -254,13 +284,21 @@ struct MessageBubble: View {
                 .buttonStyle(.plain)
                 .disabled(isGenerating)
                 .help(isGenerating ? "Stop generating to regenerate" : "Regenerate response")
+                if let onContinue {
+                    Button(action: onContinue) {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.system(size: 10))
+                            .foregroundStyle(isGenerating ? Theme.Colors.textLow.opacity(0.4)
+                                                          : Theme.Colors.textLow)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isGenerating)
+                    .help(isGenerating ? "Stop generating to continue" : "Continue response")
+                }
             }
-            // TTS playback — parity with panel TTSPlayer in MessageBubble.tsx.
-            // Renders only on assistant messages; tap streams audio bytes
-            // from /v1/audio/speech (Kokoro) into AVAudioPlayer.
-            if message.role == .assistant && !message.content.isEmpty {
-                TTSPlaybackButton(text: message.content, isGenerating: isGenerating)
-            }
+            // Neural TTS remains intentionally unadvertised here. The
+            // current endpoint can fall back to a placeholder tone; exposing
+            // a read-aloud control would overstate that capability.
             if let onBranch {
                 Button(action: onBranch) {
                     Image(systemName: "arrow.triangle.branch")
@@ -284,6 +322,23 @@ struct MessageBubble: View {
             .buttonStyle(.plain)
             .help(L10n.Tooltip.deleteMessage.render(appLocale))
         }
+    }
+
+    private func copyResponse(plain: Bool) {
+        #if canImport(AppKit)
+        let payload: String
+        if plain {
+            // Strip common Markdown markers for a plain-text pasteboard payload.
+            payload = message.content
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "__", with: "")
+                .replacingOccurrences(of: "```", with: "")
+        } else {
+            payload = message.content
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(payload, forType: .string)
+        #endif
     }
 
     /// Renders a persisted video attachment as a clickable chip. Click

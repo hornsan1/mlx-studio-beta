@@ -20,7 +20,7 @@ final class ImageReuseResolverTests: XCTestCase {
             resolution.warning?.message.contains("Smoke Image Model") == true
         )
         XCTAssertTrue(
-            resolution.warning?.message.contains("Pick a proven image model before generating.") == true
+            resolution.warning?.message.contains("Pick an image model before generating.") == true
         )
     }
 }

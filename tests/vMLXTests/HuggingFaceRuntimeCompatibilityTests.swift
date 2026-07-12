@@ -234,6 +234,32 @@ final class HuggingFaceRuntimeCompatibilityTests: XCTestCase {
         )
     }
 
+    func testKrea2TurboOfficialRepoIsCompatible() {
+        let compatibility = HuggingFaceRuntimeCompatibility.evaluate(
+            modelId: "krea/Krea-2-Turbo",
+            tags: ["mflux", "krea-2", "text-to-image"],
+            pipeline: "text-to-image",
+            libraryName: "mflux",
+            config: [:],
+            siblingFilenames: [
+                "turbo.safetensors",
+                "text_encoder/model.safetensors",
+                "tokenizer/tokenizer.json",
+                "vae/diffusion_pytorch_model.safetensors",
+            ],
+            supportedModelTypes: supported
+        )
+
+        XCTAssertTrue(compatibility.isCompatible)
+        XCTAssertEqual(compatibility.format, .mlx)
+        XCTAssertEqual(compatibility.modelType, "krea-2-turbo")
+        XCTAssertEqual(compatibility.modality, .image)
+        XCTAssertEqual(
+            compatibility.reason,
+            "MLX krea-2-turbo image pipeline is supported by the MLX Studio image backend"
+        )
+    }
+
     func testQwenImageModelIsBlockedUntilPromptProvenRuntimeExists() {
         let compatibility = HuggingFaceRuntimeCompatibility.evaluate(
             modelId: "mlx-community/Qwen-Image-4bit",

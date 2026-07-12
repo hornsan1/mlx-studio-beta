@@ -463,7 +463,15 @@ public func loadWeights(
             // directly with nil biases to avoid "biases must be null" at inference time.
             if (mode == .mxfp4 || mode == .mxfp8), m is Linear {
                 let linear = m as! Linear
-                let (qW, scales, _) = MLX.quantized(linear.weight, groupSize: gs, bits: b)
+                let weightShape = linear.weight.shape
+                guard weightShape.count == 2,
+                      let lastDimension = weightShape.last,
+                      lastDimension >= gs,
+                      lastDimension.isMultiple(of: gs)
+                else {
+                    return nil
+                }
+                let (qW, scales, _) = MLX.quantized(linear.weight, groupSize: gs, bits: b, mode: mode)
                 return (path, QuantizedLinear(
                     weight: qW, bias: linear.bias, scales: scales, biases: nil,
                     groupSize: gs, bits: b, mode: mode))

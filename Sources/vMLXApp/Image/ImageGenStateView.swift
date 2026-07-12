@@ -5,9 +5,9 @@
 // ImageViewModel's published generation fields.
 //
 // Shows:
-//   • Progress bar (0..steps)
-//   • "Step 12 / 30" label
-//   • Optional ETA (derived from elapsed / step)
+//   • Indeterminate progress while the backend runs
+//   • Requested step budget
+//   • Elapsed time
 //   • Optional partial-preview image
 //   • Stop button
 
@@ -15,8 +15,7 @@ import SwiftUI
 import vMLXTheme
 
 struct ImageGenStateView: View {
-    let currentStep: Int
-    let totalSteps: Int
+    let requestedSteps: Int
     let elapsedSeconds: Int
     let preview: Data?
     let onStop: () -> Void
@@ -29,15 +28,15 @@ struct ImageGenStateView: View {
                 Text(L10n.ImageUI.generating.render(appLocale))
                     .font(Theme.Typography.bodyHi)
                     .foregroundStyle(Theme.Colors.textHigh)
-                ProgressView(value: fraction)
+                ProgressView()
                     .tint(Theme.Colors.accent)
                 HStack {
-                    Text(L10n.ImageUI.stepFormat.format(locale: appLocale, Int64(currentStep), Int64(totalSteps)))
+                    Text(L10n.ImageUI.requestedStepsFormat.format(locale: appLocale, Int64(requestedSteps)))
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textMid)
                         .monospacedDigit()
                     Spacer()
-                    Text(L10n.ImageUI.elapsedEtaFormat.format(locale: appLocale, Int64(elapsedSeconds), etaString as NSString))
+                    Text(L10n.ImageUI.elapsedFormat.format(locale: appLocale, Int64(elapsedSeconds)))
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.textLow)
                         .monospacedDigit()
@@ -81,18 +80,5 @@ struct ImageGenStateView: View {
             .fill(Theme.Colors.surface)
             .frame(width: 120, height: 120)
         #endif
-    }
-
-    private var fraction: Double {
-        guard totalSteps > 0 else { return 0 }
-        return min(1.0, Double(currentStep) / Double(totalSteps))
-    }
-
-    private var etaString: String {
-        guard currentStep > 0 else { return "…" }
-        let perStep = Double(elapsedSeconds) / Double(currentStep)
-        let remaining = Int(perStep * Double(max(0, totalSteps - currentStep)))
-        if remaining < 60 { return "\(remaining)s" }
-        return "\(remaining / 60)m \(remaining % 60)s"
     }
 }

@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "session": {
+    "title": "Markdown E2E",
+    "createdAt": "2026-07-11T00:00:00Z",
+    "model": "Local test model",
+    "modelName": "Local test model",
+    "isPinned": false
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Render Markdown and a Swift code block.",
+      "createdAt": "2026-07-11T00:00:01Z"
+    },
+    {
+      "role": "assistant",
+      "content": "**Markdown works.**\n\n| Check | Result |\n| --- | --- |\n| Table | PASS |\n\n```swift\nprint(\"MARKDOWN_E2E\")\n```",
+      "createdAt": "2026-07-11T00:00:02Z"
+    }
+  ]
+}

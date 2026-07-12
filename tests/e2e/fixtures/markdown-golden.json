@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "dialect": "gfm-profile",
+  "parser": "lightweight-gfm-lite",
+  "description": "Single source-of-truth Markdown golden corpus for parser/AST tests. Expand as Milestone 1 covers full GFM.",
+  "cases": [
+    {
+      "id": "basic-bold-code-table",
+      "source": "**Markdown works.**\n\n| Check | Result |\n| --- | --- |\n| Table | PASS |\n\n```swift\nprint(\"MARKDOWN_E2E\")\n```",
+      "expect": {
+        "blockKinds": [
+          "prose",
+          "table",
+          "prose",
+          "code"
+        ],
+        "table": {
+          "headers": [
+            "Check",
+            "Result"
+          ],
+          "alignments": [
+            "leading",
+            "leading"
+          ],
+          "rows": [
+            [
+              "Table",
+              "PASS"
+            ]
+          ]
+        },
+        "code": {
+          "language": "swift",
+          "body": "print(\"MARKDOWN_E2E\")\n",
+          "isClosed": true
+        }
+      }
+    },
+    {
+      "id": "table-alignment-escaped-pipes",
+      "source": "| Expression | Value | Notes |\n| :--- | :---: | ---: |\n| `a|b` | x \\| y | right |",
+      "expect": {
+        "blockKinds": [
+          "table"
+        ],
+        "table": {
+          "headers": [
+            "Expression",
+            "Value",
+            "Notes"
+          ],
+          "alignments": [
+            "leading",
+            "center",
+            "trailing"
+          ],
+          "rows": [
+            [
+              "`a|b`",
+              "x | y",
+              "right"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "id": "pipe-prose-without-delimiter",
+      "source": "This | remains ordinary prose.\nIt has no GFM delimiter row.",
+      "expect": {
+        "blockKinds": [
+          "prose"
+        ]
+      }
+    },
+    {
+      "id": "unclosed-fence-is-code",
+      "source": "Intro\n\n```python\nprint(1)\n",
+      "expect": {
+        "blockKinds": [
+          "prose",
+          "code"
+        ],
+        "code": {
+          "language": "python",
+          "body": "print(1)\n",
+          "isClosed": false
+        }
+      }
+    },
+    {
+      "id": "raw-html-inert-as-prose",
+      "source": "Before\n\n<script>alert(1)</script>\n\nAfter",
+      "expect": {
+        "blockKinds": [
+          "prose"
+        ],
+        "containsLiteral": "<script>alert(1)</script>"
+      }
+    },
+    {
+      "id": "nested-code-then-table",
+      "source": "```\nplain\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |",
+      "expect": {
+        "blockKinds": [
+          "code",
+          "prose",
+          "table"
+        ],
+        "code": {
+          "language": "",
+          "body": "plain\n",
+          "isClosed": true
+        },
+        "table": {
+          "headers": [
+            "A",
+            "B"
+          ],
+          "alignments": [
+            "leading",
+            "leading"
+          ],
+          "rows": [
+            [
+              "1",
+              "2"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "id": "tilde-fence",
+      "source": "~~~\nhello\n~~~",
+      "expect": {
+        "blockKinds": [
+          "code"
+        ],
+        "code": {
+          "language": "",
+          "body": "hello\n",
+          "isClosed": true
+        }
+      }
+    }
+  ],
+  "linkPolicy": {
+    "allowedSchemes": [
+      "https",
+      "http",
+      "mailto"
+    ],
+    "blockedExamples": [
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "vmlx://local",
+      "data:text/html,hi"
+    ],
+    "allowedExamples": [
+      "https://example.com/path",
+      "http://localhost:8080",
+      "mailto:user@example.com"
+    ]
+  }
+}

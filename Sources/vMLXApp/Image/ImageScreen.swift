@@ -134,7 +134,6 @@ struct ImageScreen: View {
     @State private var settings = ImageGenSettings()
     @State private var status: Status = .idle
     @State private var elapsed: Int = 0
-    @State private var currentStep: Int = 0
     @State private var errorBanner: ImageErrorBanner? = nil
     @State private var showSettings = false
     @State private var tickerTask: Task<Void, Never>? = nil
@@ -161,8 +160,7 @@ struct ImageScreen: View {
                         selectedModel: selected,
                         status: status,
                         elapsedSeconds: elapsed,
-                        currentStep: currentStep,
-                        totalSteps: settings.steps,
+                        requestedSteps: settings.steps,
                         onStop: stop,
                         onOpenSettings: { showSettings.toggle() }
                     )
@@ -186,8 +184,7 @@ struct ImageScreen: View {
                         ImageGallery(
                             images: images,
                             isGenerating: status.isActive,
-                            currentStep: currentStep,
-                            totalSteps: settings.steps,
+                            requestedSteps: settings.steps,
                             elapsedSeconds: elapsed,
                             preview: nil,
                             errorBanner: errorBanner,
@@ -337,26 +334,11 @@ struct ImageScreen: View {
         selectedNeedsDownload ? { installSelectedAndGenerate() } : nil
     }
 
-    private var selectedNeedsRuntimeProof: Bool {
-        guard let selected, selected.requiresSmokeVerification else { return false }
-        guard let entry = selectedEntry else { return false }
-        return !ImageRuntimeProofStore.isVerified(
-            runtimeName: selected.runtimeName,
-            modelPath: entry.canonicalPath.path
-        )
-    }
-
     private var promptSubmitLabel: String {
-        if selectedNeedsRuntimeProof && tab == .generate {
-            return "Verify & Generate"
-        }
         return tab == .edit ? "Edit" : "Generate"
     }
 
     private var promptDownloadSubmitLabel: String {
-        if selected?.requiresSmokeVerification == true && tab == .generate {
-            return "Download & Verify"
-        }
         return tab == .edit ? "Download & Edit" : "Download & Generate"
     }
 
@@ -380,7 +362,6 @@ struct ImageScreen: View {
         }
         errorBanner = nil
         status = (tab == .edit) ? .editing : .generating
-        currentStep = 0
         elapsed = 0
         let jobId = UUID()
 
@@ -443,11 +424,11 @@ struct ImageScreen: View {
                         )
                     } catch {
                         await MainActor.run {
-                            let message = "Generated image failed proof verification: \(error.localizedDescription)"
+                            let message = "Generated image could not be saved: \(error.localizedDescription)"
                             errorBanner = ImageErrorBanner(message: message, hfAuth: false)
                             StudioDiagnosticIssueStore.record(
                                 source: .imageGeneration,
-                                title: "Image proof failed",
+                                title: "Image save failed",
                                 message: message,
                                 context: currentDisplay
                             )
@@ -490,12 +471,11 @@ struct ImageScreen: View {
                     let raw = String(describing: error)
                     let hfAuth = raw.contains("401") || raw.contains("403")
 
-                    // Friendly rewrite for any scaffolded image backend
-                    // that still throws `notImplemented`, without pointing
-                    // users at an obsolete model recommendation.
+                    // Friendly rewrite for image backend failures that do not
+                    // produce a user-facing PNG.
                     let text: String
                     if raw.contains("FluxBackend") && raw.contains("not implemented") {
-                        text = "This image model is still scaffolded in the Swift runtime. FLUX.1 Schnell is the beta target; it requires a successful Metal smoke run before we mark output as proven."
+                        text = "This image model did not produce a PNG. Check the selected model files and try again."
                     } else {
                         text = raw
                     }
@@ -659,9 +639,6 @@ struct ImageScreen: View {
                 await MainActor.run {
                     if status.isActive {
                         elapsed += 1
-                        if currentStep < settings.steps - 1 {
-                            currentStep += 1
-                        }
                     }
                 }
             }
@@ -804,7 +781,7 @@ struct ImageScreen: View {
             imageCatalogEntry(for: model, in: entries) != nil
                 && (model.ready || model.requiresSmokeVerification)
         }
-        if let proven = candidates.first(where: { model in
+        if let verified = candidates.first(where: { model in
             guard let entry = imageCatalogEntry(for: model, in: entries) else {
                 return false
             }
@@ -813,7 +790,7 @@ struct ImageScreen: View {
                 modelPath: entry.canonicalPath.path
             )
         }) {
-            return proven
+            return verified
         }
         return candidates.first
     }
@@ -866,7 +843,7 @@ enum ImageReuseResolver {
             tab: .generate,
             warning: ImageErrorBanner(
                 title: "Choose an image model",
-                message: "Reused prompt came from \(sourceName), which is not in the current Create model catalog. Pick a proven image model before generating.",
+                message: "Reused prompt came from \(sourceName), which is not in the current Create model catalog. Pick an image model before generating.",
                 hfAuth: false
             )
         )

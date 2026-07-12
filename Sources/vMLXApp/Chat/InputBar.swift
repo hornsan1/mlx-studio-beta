@@ -13,6 +13,10 @@ struct InputBar: View {
     @Environment(\.appLocale) private var appLocale: AppLocale
     @Bindable var vm: ChatViewModel
     @State private var showImporter = false
+    @State private var documentError: String?
+    /// Advanced: show Markdown preview of the draft using the same renderer
+    /// as message bubbles. Preview never mutates `vm.inputText`.
+    @State private var showMarkdownPreview = false
 
     // iter-140 §214: video first-frame thumbnails. AVAssetImageGenerator
     // blocks the current actor so we run it on a detached Task and
@@ -52,6 +56,7 @@ struct InputBar: View {
         let hasText = !vm.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !vm.pendingImages.isEmpty
             || !vm.pendingVideos.isEmpty
+            || !vm.pendingDocuments.isEmpty
         guard hasText else { return false }
         if isRemoteChat { return true }
         switch app.engineState {
@@ -79,8 +84,8 @@ struct InputBar: View {
         case .loading: return "Loading model…"
         case .standby(.soft): return "Waking up model…"
         case .standby(.deep): return "Wake the model and send…"
-        case .stopped: return "Load a model in the Server tab to chat"
-        case .error: return "Engine error — retry in the Server tab"
+        case .stopped: return "Select and load a model above to chat"
+        case .error: return "Engine error — use Retry above"
         }
     }
 
@@ -92,13 +97,13 @@ struct InputBar: View {
     /// Esc-in-error since no button on the card mentions it.
     private var helpText: String {
         if vm.isGenerating { return "Stop (Esc)" }
-        if canSend { return "Send (↵)" }
+        if canSend { return "Send (⌘↩)" }
         if isRemoteChat { return "Enter a message" }
         switch app.engineState {
-        case .stopped: return "Load a model first"
+        case .stopped: return "Select a model above, then choose Load Model"
         case .loading: return "Wait for the model to finish loading"
         case .error(let msg):
-            return "Engine error: \(msg) — use the Server tab to restart (Esc to clear input)"
+            return "Engine error: \(msg) — use Retry above (Esc to clear input)"
         default: return "Enter a message"
         }
     }
@@ -233,6 +238,46 @@ struct InputBar: View {
     }
 
     @ViewBuilder
+    private var attachedDocuments: some View {
+        if !vm.pendingDocuments.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    ForEach(Array(vm.pendingDocuments.enumerated()), id: \.element.id) { index, document in
+                    HStack(spacing: Theme.Spacing.xs) {
+                        Image(systemName: "doc.text.fill")
+                            .foregroundStyle(Theme.Colors.accent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(document.name)
+                                .font(Theme.Typography.captionHi)
+                                .lineLimit(1)
+                            Text(document.text.count <= ChatDocumentContext.directCharacterLimit
+                                 ? "Full text will be included"
+                                 : "Large document · local excerpts will be selected")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.textLow)
+                                .lineLimit(1)
+                        }
+                        Button {
+                            vm.pendingDocuments.remove(at: index)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove document \(document.name)")
+                    }
+                    .padding(.horizontal, Theme.Spacing.sm)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                            .fill(Theme.Colors.surfaceHi)
+                    )
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private func videoChip(url: URL, index: Int) -> some View {
         HStack(spacing: Theme.Spacing.xs) {
             // iter-140 §214: show a real first-frame thumbnail when
@@ -345,7 +390,7 @@ struct InputBar: View {
 
     private var attachButton: some View {
         Button { showImporter = true } label: {
-            Image(systemName: "photo.badge.plus")
+            Image(systemName: "paperclip")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Theme.Colors.accent)
                 .frame(width: 28, height: 28)
@@ -355,9 +400,9 @@ struct InputBar: View {
                 )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Attach images")
-        .accessibilityHint("Opens a file picker to attach images to the next message")
-        .help(L10n.Tooltip.attachImages.render(appLocale))
+        .accessibilityLabel("Attach media or document")
+        .accessibilityHint("Attach an image, video, PDF, DOCX, or text document to the next message")
+        .help("Attach image, video, PDF, DOCX, or text")
     }
 
     /// Microphone button — records via AVAudioRecorder, posts the resulting
@@ -397,12 +442,15 @@ struct InputBar: View {
     }
 
     private var textField: some View {
+        // Source-first composer: plain Return inserts a newline (vertical
+        // TextField). ⌘↩ sends. Preview uses the same Markdown renderer as
+        // messages so preview never mutates outgoing bytes.
         TextField(placeholderText, text: $vm.inputText, axis: .vertical)
             .textFieldStyle(.plain)
             .font(Theme.Typography.body)
             .foregroundStyle(Theme.Colors.textHigh)
-            .lineLimit(1...8)
-            .onSubmit { if canSend { vm.send() } }
+            .lineLimit(1...12)
+            // Do not send on Return — multiline authoring is the default.
             .onChange(of: vm.inputText) { _, _ in handleTextChange() }
             .onKeyPress(.upArrow) { handleUpArrow() }
             .onKeyPress(.downArrow) { handleDownArrow() }
@@ -414,6 +462,7 @@ struct InputBar: View {
                 }
                 return .ignored
             }
+            .accessibilityHint("Press Command-Return to send")
     }
 
     private func handleTextChange() {
@@ -430,6 +479,7 @@ struct InputBar: View {
         // it on every change is cheap. Gated via `vm.bumpIdleTimer()`
         // which hops to the Engine actor and calls `bumpIdleTimer()`.
         vm.bumpIdleTimer()
+        vm.persistActiveDraft()
     }
 
     private var inputRow: some View {
@@ -448,6 +498,54 @@ struct InputBar: View {
                         .stroke(Theme.Colors.border, lineWidth: 1)
                 )
         )
+    }
+
+    private var composerChrome: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            Button {
+                showMarkdownPreview.toggle()
+            } label: {
+                Label(
+                    showMarkdownPreview ? "Hide preview" : "Preview",
+                    systemImage: showMarkdownPreview ? "eye.slash" : "eye"
+                )
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textMid)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("composer.markdown-preview.toggle")
+            .accessibilityLabel(showMarkdownPreview ? "Hide Markdown preview" : "Show Markdown preview")
+            .help("Preview uses the same renderer as chat messages and does not change what you send")
+            Text("⌘↩ send · ↩ newline")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.textLow)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.Spacing.md)
+    }
+
+    private var markdownPreviewPane: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Text("Preview")
+                .font(Theme.Typography.captionHi)
+                .foregroundStyle(Theme.Colors.textLow)
+            ScrollView {
+                MarkdownView(text: vm.inputText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 160)
+        }
+        .padding(Theme.Spacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.md)
+                .fill(Theme.Colors.surfaceHi)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.md)
+                        .stroke(Theme.Colors.border, lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, Theme.Spacing.md)
+        .accessibilityIdentifier("composer.markdown-preview")
     }
 
     /// Rough token count (≈ chars / 4, matching OpenAI's ballpark guidance
@@ -481,16 +579,27 @@ struct InputBar: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             attachedImages
             attachedVideos
+            attachedDocuments
             inputRow
+            composerChrome
+            if showMarkdownPreview, !vm.inputText.isEmpty {
+                markdownPreviewPane
+            }
             tokenCountHint
         }
         .padding(Theme.Spacing.lg)
+        // Media/document changes do not flow through the text field, so save
+        // them independently. Together with `handleTextChange`, every part
+        // of an unsent turn is recoverable after relaunch.
+        .onChange(of: vm.pendingImages) { _, _ in vm.persistActiveDraft() }
+        .onChange(of: vm.pendingVideos) { _, _ in vm.persistActiveDraft() }
+        .onChange(of: vm.pendingDocuments) { _, _ in vm.persistActiveDraft() }
         .fileImporter(
             isPresented: $showImporter,
             // Iter-15: accept both images and videos. The engine/VL path
             // already supports video_url ContentParts; the gap was UI-
             // only. Route based on UTI below.
-            allowedContentTypes: [.image, .movie, .mpeg4Movie, .quickTimeMovie],
+            allowedContentTypes: Self.attachmentTypes,
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
@@ -504,6 +613,12 @@ struct InputBar: View {
                         if Self.isVideoURL(url) {
                             if let staged = Self.stageVideoIntoTemp(url) {
                                 vm.pendingVideos.append(staged)
+                            }
+                        } else if Self.isDocumentURL(url) {
+                            do {
+                                vm.pendingDocuments.append(try ChatDocumentExtractor.extract(from: url))
+                            } catch {
+                                documentError = error.localizedDescription
                             }
                         } else if let data = try? Data(contentsOf: url) {
                             vm.pendingImages.append(data)
@@ -540,6 +655,14 @@ struct InputBar: View {
                             if let staged = Self.stageVideoIntoTemp(url) {
                                 Task { @MainActor in vm.pendingVideos.append(staged) }
                             }
+                        } else if Self.isDocumentURL(url) {
+                            do {
+                                let attachment = try ChatDocumentExtractor.extract(from: url)
+                                Task { @MainActor in vm.pendingDocuments.append(attachment) }
+                            } catch {
+                                let message = error.localizedDescription
+                                Task { @MainActor in documentError = message }
+                            }
                         } else if let data = try? Data(contentsOf: url) {
                             Task { @MainActor in vm.pendingImages.append(data) }
                         }
@@ -548,6 +671,25 @@ struct InputBar: View {
             }
             return true
         }
+        .alert("Document attachment failed", isPresented: Binding(
+            get: { documentError != nil },
+            set: { if !$0 { documentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { documentError = nil }
+        } message: {
+            Text(documentError ?? "The document could not be attached.")
+        }
+    }
+
+    private static var attachmentTypes: [UTType] {
+        var types: [UTType] = [.image, .movie, .mpeg4Movie, .quickTimeMovie, .pdf, .plainText]
+        if let docx = UTType(filenameExtension: "docx") { types.append(docx) }
+        return types
+    }
+
+    private static func isDocumentURL(_ url: URL) -> Bool {
+        ["pdf", "docx", "txt", "md", "text", "csv", "tsv", "json"]
+            .contains(url.pathExtension.lowercased())
     }
 
     /// True when `url` looks like a video the engine's video_url

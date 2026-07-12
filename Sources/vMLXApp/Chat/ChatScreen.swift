@@ -111,6 +111,12 @@ struct ChatScreen: View {
         .onDisappear {
             if app.chatViewModelRef === vm { app.chatViewModelRef = nil }
         }
+        .onChange(of: app.selectedStudioChatSessionID) { _, requestedID in
+            guard let requestedID,
+                  vm.sessions.contains(where: { $0.id == requestedID })
+            else { return }
+            vm.selectSession(requestedID)
+        }
         // Esc stops the current generation. We intentionally attach at
         // the ChatScreen level so any focus state inside the pane (other
         // than the TextField in InputBar, which handles Esc itself first)
@@ -506,10 +512,7 @@ private struct ChatModelPicker: View {
     /// them apart; the alias persisted to DB uses this
     /// disambiguated string too so selection is deterministic.
     private func labelForEntry(_ e: ModelLibrary.ModelEntry) -> String {
-        let dupeCount = entries.filter { $0.displayName == e.displayName }.count
-        guard dupeCount > 1 else { return e.displayName }
-        let parent = e.canonicalPath.deletingLastPathComponent().lastPathComponent
-        return "\(e.displayName) (\(parent))"
+        ChatModelEntryResolver.pickerLabel(for: e, in: entries)
     }
 
     /// Repeated user ask: "there needs to be a way to directly easily
@@ -776,7 +779,14 @@ private struct ChatModelPicker: View {
 
     private func currentEntry() -> ModelLibrary.ModelEntry? {
         guard !currentAlias.isEmpty else { return nil }
-        return entries.first(where: { $0.displayName == currentAlias })
+        let storedPath = vm.activeSessionId
+            .flatMap { id in vm.sessions.first(where: { $0.id == id })?.modelPath }
+            ?? app.selectedModelPath?.path
+        return ChatModelEntryResolver.resolve(
+            alias: currentAlias,
+            modelPath: storedPath,
+            in: entries
+        )
     }
 
     private func currentEntryState() -> LoadState {
@@ -797,11 +807,55 @@ private struct ChatModelPicker: View {
     @MainActor
     private func loadCurrentAlias() async {
         guard let chatId = vm.activeSessionId else {
-            currentAlias = app.selectedModelPath?.lastPathComponent ?? ""
+            if let path = app.selectedModelPath,
+               let entry = ChatModelEntryResolver.resolve(
+                   alias: path.lastPathComponent,
+                   modelPath: path.path,
+                   in: entries
+               ) {
+                currentAlias = labelForEntry(entry)
+            } else {
+                currentAlias = app.selectedModelPath?.lastPathComponent ?? ""
+            }
             return
         }
+        let storedSession = vm.sessions.first(where: { $0.id == chatId })
         if let existing = await app.engine.settings.chat(chatId)?.modelAlias {
-            currentAlias = existing
+            if let entry = ChatModelEntryResolver.resolve(
+                alias: existing,
+                modelPath: storedSession?.modelPath,
+                in: entries
+            ) {
+                currentAlias = labelForEntry(entry)
+            } else {
+                currentAlias = existing
+            }
+            return
+        }
+        // A conversation may predate the model-picker alias or have been
+        // imported from another machine. Prefer its persisted identity over
+        // whatever model happens to be globally selected right now.
+        if let session = storedSession {
+            if let entry = ChatModelEntryResolver.resolve(
+                alias: session.modelName,
+                modelPath: session.modelPath,
+                in: entries
+            ) {
+                currentAlias = labelForEntry(entry)
+                return
+            }
+            if let name = session.modelName, !name.isEmpty {
+                currentAlias = name
+                return
+            }
+        }
+        if let path = app.selectedModelPath,
+           let entry = ChatModelEntryResolver.resolve(
+               alias: path.lastPathComponent,
+               modelPath: path.path,
+               in: entries
+           ) {
+            currentAlias = labelForEntry(entry)
         } else {
             currentAlias = app.selectedModelPath?.lastPathComponent ?? ""
         }
@@ -819,6 +873,8 @@ private struct ChatModelPicker: View {
         var chat = await app.engine.settings.chat(chatId) ?? .init()
         chat.modelAlias = alias
         await app.engine.settings.setChat(chatId, chat)
+        let entry = ChatModelEntryResolver.resolve(alias: alias, in: entries)
+        vm.updateModelIdentity(chatId, name: alias, path: entry?.canonicalPath.path)
     }
 
     /// Start / load the model associated with `entry`. Creates a
@@ -902,13 +958,24 @@ private func loadChatModelInline(app: AppState, vm: ChatViewModel) async {
     let entries = await app.engine.modelLibrary.entries()
     var target: ModelLibrary.ModelEntry? = nil
     if let alias = targetAlias, !alias.isEmpty {
-        target = entries.first { $0.displayName == alias }
+        target = ChatModelEntryResolver.resolve(alias: alias, in: entries)
+    }
+    if target == nil,
+       let chatId = vm.activeSessionId,
+       let stored = vm.sessions.first(where: { $0.id == chatId })
+    {
+        target = ChatModelEntryResolver.resolve(
+            alias: stored.modelName,
+            modelPath: stored.modelPath,
+            in: entries
+        )
     }
     if target == nil, let path = app.selectedModelPath {
-        let canonical = path.standardizedFileURL.resolvingSymlinksInPath()
-        target = entries.first {
-            $0.canonicalPath.standardizedFileURL.resolvingSymlinksInPath() == canonical
-        }
+        target = ChatModelEntryResolver.resolve(
+            alias: path.lastPathComponent,
+            modelPath: path.path,
+            in: entries
+        )
     }
     guard let entry = target else {
         // No chat alias, no selectedModelPath — genuinely first-run.

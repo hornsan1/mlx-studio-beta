@@ -71,6 +71,16 @@ public enum MFluxImageBackend {
         if runtime.contains("flux") && runtime.contains("schnell") {
             return RuntimeDescriptor(executableName: "mflux-generate", baseModelName: "schnell")
         }
+        if runtime.contains("krea-2") || runtime.contains("krea2") {
+            return RuntimeDescriptor(
+                executableName: "mflux-generate-krea2",
+                baseModelName: "krea-2",
+                guidanceOverride: 1.0
+            )
+        }
+        if runtime.contains("krea") {
+            return RuntimeDescriptor(executableName: "mflux-generate", baseModelName: "krea-dev")
+        }
         if runtime.contains("flux") && runtime.contains("dev") {
             return RuntimeDescriptor(executableName: "mflux-generate", baseModelName: "dev")
         }
@@ -228,6 +238,18 @@ public enum MFluxImageBackend {
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let logHandle = try FileHandle(forWritingTo: logURL)
         defer { try? logHandle.close() }
+        let header = """
+        MLX Studio mflux launch
+        runtime: \(runtimeName)
+        executable: \(executable.path)
+        model: \(modelPath.path)
+        output: \(outputURL.path)
+        argv: \(args.joined(separator: " "))
+
+        """
+        if let data = header.data(using: .utf8) {
+            try? logHandle.write(contentsOf: data)
+        }
         process.standardOutput = logHandle
         process.standardError = logHandle
 

@@ -150,9 +150,28 @@ public actor DownloadManager {
     /// keeps an in-memory copy for the duration of the actor's lifetime.
     private var hfAuthToken: String?
 
-    /// In-flight URLSessionDownloadTask per job id. Used so `pause()`/`cancel()`
-    /// can cancel the native task, not just the Swift Task wrapper.
-    private var liveDataTasks: [UUID: URLSessionDownloadTask] = [:]
+    /// In-flight native HTTP tasks per job. A job may fetch two files in
+    /// parallel, so this is keyed by a transfer UUID rather than keeping only
+    /// the most recently-created task. Retaining the transfer also retains its
+    /// URLSession delegate while it streams bytes into the stable `.part` file.
+    private var liveDataTasks: [UUID: [UUID: LiveDataTransfer]] = [:]
+
+    /// Isolated session-configuration seam for download transport tests.
+    /// Production uses an ephemeral configuration; XCTest can install a
+    /// URLProtocol-backed configuration without touching the network or the
+    /// user's Hugging Face cache.
+    nonisolated(unsafe) static var sessionConfigurationFactory: @Sendable () -> URLSessionConfiguration = {
+        .ephemeral
+    }
+
+    /// Matching isolated filesystem seam. It is intentionally internal so
+    /// tests can prove pause/resume without inspecting or mutating a user's
+    /// real Hugging Face cache.
+    nonisolated(unsafe) static var huggingFaceHubRootProvider: @Sendable () -> URL = {
+        FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub")
+    }
 
     public init() {
         // §252: load any previously-enqueued jobs from the on-disk
@@ -249,7 +268,7 @@ public actor DownloadManager {
         guard var job = _jobs[id], job.status == .downloading else { return }
         workTasks[id]?.cancel()
         workTasks.removeValue(forKey: id)
-        cancelDataTask(jobId: id)
+        cancelDataTasks(jobId: id)
         job.status = .paused
         _jobs[id] = job
         broadcast(.paused(id))
@@ -274,8 +293,12 @@ public actor DownloadManager {
         guard var job = _jobs[id] else { return }
         workTasks[id]?.cancel()
         workTasks.removeValue(forKey: id)
-        cancelDataTask(jobId: id)
+        cancelDataTasks(jobId: id)
         if job.status == .completed { return }
+        // Pause preserves `.part` bytes for a Range resume. Cancel is the
+        // explicit discard action, so reclaim those bytes synchronously after
+        // every live delegate has been told to stop writing.
+        removePartialFiles(for: job)
         job.status = .cancelled
         _jobs[id] = job
         broadcast(.cancelled(id))
@@ -315,7 +338,7 @@ public actor DownloadManager {
 
         do {
             // 1. Enumerate files from HF API.
-            let files = try await fetchSiblings(repo: job.repo)
+            let files = try await fetchDownloadSiblings(repo: job.repo)
             let manifestFiles = files.map {
                 HuggingFaceDownloadSafety.RemoteFile(path: $0.rfilename, size: $0.size)
             }
@@ -350,16 +373,17 @@ public actor DownloadManager {
             // 2b. Seed the progress bar with bytes already on disk from any
             //     prior (paused / crashed / resumed) attempt. This way a
             //     resume doesn't reset the bar to 0 then jump forward.
-            let existingBytes = files.reduce(Int64(0)) { acc, sib in
+            var existingBytes: Int64 = 0
+            for sib in files {
                 guard let dest = HuggingFaceDownloadSafety.destinationURL(
                     forRemotePath: sib.rfilename,
                     under: destDir
-                ) else { return acc }
-                guard FileManager.default.fileExists(atPath: dest.path) else { return acc }
-                let size = (try? FileManager.default
-                    .attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
-                // Skip completed files (full expected size) as well as partial.
-                return acc + size
+                ) else { continue }
+                let state = try Self.prepareDownloadFile(
+                    destination: dest,
+                    expectedSize: sib.size
+                )
+                existingBytes += state.accountedBytes
             }
             if existingBytes > 0 {
                 job.receivedBytes = existingBytes
@@ -377,7 +401,7 @@ public actor DownloadManager {
                 try await withThrowingTaskGroup(of: Int64.self) { group in
                     for sib in slice {
                         guard let url = HuggingFaceDownloadSafety.resolveURL(
-                            repo: job.repo,
+                            repo: sib.sourceRepo ?? job.repo,
                             path: sib.rfilename
                         ),
                               let dest = HuggingFaceDownloadSafety.destinationURL(
@@ -385,13 +409,18 @@ public actor DownloadManager {
                                 under: destDir
                               )
                         else { continue }
-                        // Skip fully complete files entirely.
-                        let existing = (try? FileManager.default
-                            .attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
-                        if let expected = sib.size, expected > 0, existing >= expected {
+                        let state = try Self.prepareDownloadFile(
+                            destination: dest,
+                            expectedSize: sib.size
+                        )
+                        // Only promoted final files are considered complete.
+                        // Bytes in `.part` survive pause/restart but must still
+                        // finish and pass the manifest before they become model
+                        // files visible to the rest of the app.
+                        if state.isComplete {
                             continue
                         }
-                        let resumeFrom = existing
+                        let resumeFrom = state.resumeBytes
                         group.addTask { [weak self] in
                             guard let self else { return 0 }
                             return try await self.downloadFile(
@@ -477,9 +506,52 @@ public actor DownloadManager {
     private struct Sibling: Decodable {
         let rfilename: String
         let size: Int64?
+        let sourceRepo: String?
+
+        init(rfilename: String, size: Int64?, sourceRepo: String? = nil) {
+            self.rfilename = rfilename
+            self.size = size
+            self.sourceRepo = sourceRepo
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case rfilename
+            case size
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            rfilename = try container.decode(String.self, forKey: .rfilename)
+            size = try container.decodeIfPresent(Int64.self, forKey: .size)
+            sourceRepo = nil
+        }
     }
     private struct ModelInfo: Decodable {
         let siblings: [Sibling]
+    }
+
+    private func fetchDownloadSiblings(repo: String) async throws -> [Sibling] {
+        var files = try await fetchSiblings(repo: repo)
+        guard let tokenizerRepo = Self.whisperTokenizerSourceRepo(for: repo) else {
+            return files
+        }
+
+        let existingPaths = Set(files.map { $0.rfilename.lowercased() })
+        let tokenizerFiles = try await fetchSiblings(repo: tokenizerRepo)
+            .filter {
+                Self.isWhisperTokenizerSidecar($0.rfilename)
+                    && !existingPaths.contains($0.rfilename.lowercased())
+            }
+            .map {
+                Sibling(
+                    rfilename: $0.rfilename,
+                    size: $0.size,
+                    sourceRepo: tokenizerRepo
+                )
+            }
+
+        files.append(contentsOf: tokenizerFiles)
+        return files
     }
 
     private func fetchSiblings(repo: String) async throws -> [Sibling] {
@@ -510,14 +582,71 @@ public actor DownloadManager {
         // reject anything that could escape the destination
         // directory on disk.
         return info.siblings.filter { sib in
-            guard Self.isSafeFilename(sib.rfilename) else { return false }
-            let f = sib.rfilename.lowercased()
-            return f.hasSuffix(".safetensors")
-                || f.hasSuffix(".json")
-                || f.hasSuffix(".txt")
-                || f.hasSuffix(".model")
-                || f.hasSuffix(".jinja")
+            Self.shouldDownloadSibling(sib.rfilename, for: repo)
         }
+    }
+
+    internal static func shouldDownloadSibling(_ filename: String) -> Bool {
+        shouldDownloadSibling(filename, for: nil)
+    }
+
+    internal static func shouldDownloadSibling(_ filename: String, for repo: String?) -> Bool {
+        guard isSafeFilename(filename) else { return false }
+        let f = filename.lowercased()
+        if repo?.lowercased() == "krea/krea-2-turbo" {
+            return krea2RequiredDownloadPaths.contains(f)
+        }
+        return f.hasSuffix(".safetensors")
+            || f.hasSuffix(".npz")
+            || f.hasSuffix(".json")
+            || f.hasSuffix(".txt")
+            || f.hasSuffix(".model")
+            || f.hasSuffix(".jinja")
+    }
+
+    private static let krea2RequiredDownloadPaths: Set<String> = [
+        "model_index.json",
+        "scheduler/scheduler_config.json",
+        "turbo.safetensors",
+        "vae/config.json",
+        "vae/diffusion_pytorch_model.safetensors",
+        "text_encoder/config.json",
+        "text_encoder/model.safetensors",
+        "tokenizer/chat_template.jinja",
+        "tokenizer/tokenizer.json",
+        "tokenizer/tokenizer_config.json",
+    ]
+
+    internal static func whisperTokenizerSourceRepo(for repo: String) -> String? {
+        let lowercasedRepo = repo.lowercased()
+        let name = lowercasedRepo.split(separator: "/").last.map(String.init) ?? lowercasedRepo
+        guard name.contains("whisper") else { return nil }
+
+        if name.contains("large-v3") { return "openai/whisper-large-v3" }
+        if name.contains("large-v2") { return "openai/whisper-large-v2" }
+        if name.contains("large") { return "openai/whisper-large" }
+        if name.contains("medium.en") { return "openai/whisper-medium.en" }
+        if name.contains("medium") { return "openai/whisper-medium" }
+        if name.contains("small.en") { return "openai/whisper-small.en" }
+        if name.contains("small") { return "openai/whisper-small" }
+        if name.contains("base.en") { return "openai/whisper-base.en" }
+        if name.contains("base") { return "openai/whisper-base" }
+        if name.contains("tiny.en") { return "openai/whisper-tiny.en" }
+        if name.contains("tiny") { return "openai/whisper-tiny" }
+        return nil
+    }
+
+    internal static func isWhisperTokenizerSidecar(_ filename: String) -> Bool {
+        guard isSafeFilename(filename), !filename.contains("/") else { return false }
+        return [
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "added_tokens.json",
+            "special_tokens_map.json",
+            "normalizer.json",
+            "vocab.json",
+            "merges.txt",
+        ].contains(filename.lowercased())
     }
 
     /// **iter-82 (§110)** — path-traversal guard for the filename
@@ -538,18 +667,12 @@ public actor DownloadManager {
 
     // MARK: - File download
     //
-    // Streams via `URLSessionDownloadTask` so the OS writes directly to a
-    // temp file at its native chunk size (typically 64-128KB). KVO on
-    // `task.progress.completedUnitCount` fires at whatever interval the OS
-    // chooses — usually 10-50 times per second — and forwards the raw byte
-    // delta into the actor. The previous implementation iterated the
-    // `URLSession.AsyncBytes` sequence one byte at a time, which cost one
-    // async hop per byte and capped real throughput well below gigabit.
-    //
-    // Range resume: if `resumeFrom > 0` we send `Range: bytes=<n>-` and
-    // append the 206 Partial Content body to the existing file. On 416 we
-    // treat the file as already complete. On ETag mismatch the caller
-    // should delete the partial file and retry.
+    // Each transfer writes directly to `<file>.part`; only a completed HTTP
+    // response atomically promotes that file to its model-visible name. This
+    // matters because `URLSessionDownloadTask` hides its temporary file until
+    // completion, so cancelling it loses every in-flight byte and makes a
+    // claimed Range resume impossible. A streaming data-task delegate keeps
+    // the partial file durable across pause, app restart, and retry.
 
     private func downloadFile(
         jobId: UUID,
@@ -568,120 +691,136 @@ public actor DownloadManager {
         if resumeFrom > 0 {
             request.setValue("bytes=\(resumeFrom)-", forHTTPHeaderField: "Range")
         }
+        let transferID = UUID()
+        let cancellation = DownloadTransferCancellationBox()
+        let partialURL = Self.partialURL(for: dest)
 
-        // Bridge the delegate-free `downloadTask` callback into async/await
-        // while installing a KVO observer for real-time progress. The
-        // observer runs on an arbitrary queue; we bounce each delta back
-        // into the actor via a detached Task.
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int64, Error>) in
-                let holder = ProgressHolder()
-                let task = URLSession.shared.downloadTask(with: request) { tmpURL, response, error in
-                    holder.observation?.invalidate()
-                    Task { [jobId] in
-                        await self.unregisterDataTask(jobId: jobId)
+        let outcome = try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<StreamingDownloadOutcome, Error>) in
+                let delegate = StreamingDataDelegate(
+                    partialURL: partialURL,
+                    requestedRange: resumeFrom > 0,
+                    onBytes: { [weak self] delta in
+                        Task { await self?.addBytes(jobId: jobId, delta: delta) }
+                    },
+                    onRestartFromZero: { [weak self] in
+                        guard resumeFrom > 0 else { return }
+                        await self?.addBytes(jobId: jobId, delta: -resumeFrom)
+                    },
+                    onFinished: { [weak self] in
+                        Task { await self?.unregisterDataTask(jobId: jobId, transferID: transferID) }
                     }
-                    if let error = error {
-                        cont.resume(throwing: error)
+                )
+                let session = URLSession(
+                    configuration: Self.sessionConfigurationFactory(),
+                    delegate: delegate,
+                    delegateQueue: nil
+                )
+                let task = session.dataTask(with: request)
+                let transfer = LiveDataTransfer(session: session, task: task, delegate: delegate)
+                delegate.begin(continuation)
+
+                // The continuation callback is nonisolated. Register and
+                // start from an actor hop so pause/cancel can see every one
+                // of a job's concurrent file transfers.
+                Task { [weak self] in
+                    guard let self else {
+                        delegate.finishBeforeStart(CancellationError())
                         return
                     }
-                    guard let tmpURL = tmpURL else {
-                        cont.resume(throwing: URLError(.cannotCreateFile))
+                    guard !cancellation.isCancelled else {
+                        delegate.finishBeforeStart(CancellationError())
                         return
                     }
-                    do {
-                        if let http = response as? HTTPURLResponse {
-                            if http.statusCode == 416 {
-                                // Range not satisfiable — partial is already complete.
-                                try? FileManager.default.removeItem(at: tmpURL)
-                                cont.resume(returning: 0)
-                                return
-                            }
-                            if http.statusCode >= 400 {
-                                try? FileManager.default.removeItem(at: tmpURL)
-                                let hint: String
-                                switch http.statusCode {
-                                case 401: hint = "HF file requires authentication."
-                                case 403: hint = "HF file is gated — accept the license and retry."
-                                default:  hint = "HTTP \(http.statusCode) downloading \(url.lastPathComponent)."
-                                }
-                                cont.resume(throwing: NSError(
-                                    domain: "vMLX.DownloadManager",
-                                    code: http.statusCode,
-                                    userInfo: [NSLocalizedDescriptionKey: hint]
-                                ))
-                                return
-                            }
-                        }
-                        let appended: Int64
-                        if resumeFrom > 0,
-                           FileManager.default.fileExists(atPath: dest.path)
-                        {
-                            // Append the 206 body to the existing partial file.
-                            let partData = try Data(contentsOf: tmpURL, options: .mappedIfSafe)
-                            let handle = try FileHandle(forWritingTo: dest)
-                            try handle.seekToEnd()
-                            try handle.write(contentsOf: partData)
-                            try handle.close()
-                            try? FileManager.default.removeItem(at: tmpURL)
-                            appended = Int64(partData.count)
-                        } else {
-                            if FileManager.default.fileExists(atPath: dest.path) {
-                                try FileManager.default.removeItem(at: dest)
-                            }
-                            try FileManager.default.moveItem(at: tmpURL, to: dest)
-                            let size = (try FileManager.default
-                                .attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
-                            appended = size
-                        }
-                        cont.resume(returning: appended)
-                    } catch {
-                        cont.resume(throwing: error)
+                    await self.registerDataTask(
+                        jobId: jobId,
+                        transferID: transferID,
+                        transfer: transfer
+                    )
+                    guard !cancellation.isCancelled else {
+                        await self.unregisterDataTask(jobId: jobId, transferID: transferID)
+                        delegate.finishBeforeStart(CancellationError())
+                        return
                     }
+                    task.resume()
                 }
-
-                // Real-time progress: translate KVO deltas into actor calls.
-                holder.observation = task.progress.observe(\.completedUnitCount) { [jobId] progress, _ in
-                    let current = Int64(progress.completedUnitCount)
-                    let delta = holder.consume(newValue: current)
-                    if delta > 0 {
-                        Task { await self.addBytes(jobId: jobId, delta: delta) }
-                    }
-                }
-
-                Task { [jobId] in
-                    // iter-84: `Task { }` inside an actor method
-                    // inherits the actor's isolation, so
-                    // `self.registerDataTask` doesn't need an actor
-                    // hop. Drop the redundant await to silence
-                    // "no 'async' operations occur" warning.
-                    self.registerDataTask(jobId: jobId, task: task)
-                }
-                task.resume()
             }
-        } onCancel: {
-            Task { [jobId] in await self.cancelDataTask(jobId: jobId) }
+        }, onCancel: {
+            cancellation.cancel()
+            Task { [jobId, transferID] in
+                await self.cancelDataTask(jobId: jobId, transferID: transferID)
+            }
+        })
+
+        if outcome.shouldPromotePartial {
+            try Self.promotePartialFile(partialURL, to: dest)
         }
+        return outcome.bytesWritten
     }
 
     // MARK: - Data-task lifecycle bridging
 
-    private func registerDataTask(jobId: UUID, task: URLSessionDownloadTask) {
-        liveDataTasks[jobId] = task
+    private func registerDataTask(
+        jobId: UUID,
+        transferID: UUID,
+        transfer: LiveDataTransfer
+    ) {
+        liveDataTasks[jobId, default: [:]][transferID] = transfer
     }
 
-    private func unregisterDataTask(jobId: UUID) {
-        liveDataTasks.removeValue(forKey: jobId)
+    private func unregisterDataTask(jobId: UUID, transferID: UUID) {
+        liveDataTasks[jobId]?.removeValue(forKey: transferID)
+        if liveDataTasks[jobId]?.isEmpty == true {
+            liveDataTasks.removeValue(forKey: jobId)
+        }
     }
 
-    private func cancelDataTask(jobId: UUID) {
-        liveDataTasks[jobId]?.cancel()
-        liveDataTasks.removeValue(forKey: jobId)
+    private func cancelDataTask(jobId: UUID, transferID: UUID) {
+        guard let transfer = liveDataTasks[jobId]?[transferID] else { return }
+        transfer.cancel()
+        unregisterDataTask(jobId: jobId, transferID: transferID)
+    }
+
+    private func cancelDataTasks(jobId: UUID) {
+        guard let transfers = liveDataTasks.removeValue(forKey: jobId) else { return }
+        for transfer in transfers.values {
+            transfer.cancel()
+        }
+    }
+
+    private func removePartialFiles(for job: Job) {
+        guard let root = job.localPath else { return }
+        let fm = FileManager.default
+        for file in job.manifestFiles {
+            guard let destination = HuggingFaceDownloadSafety.destinationURL(
+                forRemotePath: file.path,
+                under: root
+            ) else { continue }
+            try? fm.removeItem(at: Self.partialURL(for: destination))
+        }
     }
 
     private func addBytes(jobId: UUID, delta: Int64) {
-        guard var job = _jobs[jobId] else { return }
-        job.receivedBytes += delta
+        guard var job = _jobs[jobId],
+              job.status != .completed,
+              job.status != .cancelled,
+              job.status != .failed,
+              delta != 0
+        else { return }
+        job.receivedBytes = max(0, job.receivedBytes + delta)
+
+        if delta < 0 {
+            // A server that ignores Range returns 200 with the whole file.
+            // Drop the stale partial-file contribution before counting the
+            // fresh response, otherwise progress can exceed 100%.
+            speedSamples[jobId] = []
+            job.bytesPerSecond = 0
+            job.etaSeconds = nil
+            _jobs[jobId] = job
+            broadcast(.progress(job))
+            return
+        }
 
         // 5-second sliding window speed.
         let now = Date()
@@ -705,15 +844,105 @@ public actor DownloadManager {
         broadcast(.progress(job))
     }
 
+    private struct LocalDownloadFileState {
+        let accountedBytes: Int64
+        let resumeBytes: Int64
+        let isComplete: Bool
+    }
+
+    /// Return a stable sidecar name which the model scanner will never treat
+    /// as a loadable weight shard (`model.safetensors.part` has extension
+    /// `part`, not `safetensors`).
+    private static func partialURL(for destination: URL) -> URL {
+        destination.appendingPathExtension("part")
+    }
+
+    /// Normalize legacy direct-to-destination partials into the durable
+    /// `.part` layout. Finished files are always at `destination`; in-flight
+    /// bytes are always at `destination.part`.
+    private static func prepareDownloadFile(
+        destination: URL,
+        expectedSize: Int64?
+    ) throws -> LocalDownloadFileState {
+        let fm = FileManager.default
+        let partial = partialURL(for: destination)
+        let finalSize = fileSize(at: destination, fileManager: fm)
+
+        if let expectedSize, expectedSize > 0, finalSize == expectedSize {
+            // A stale partial from an already-promoted file must not make a
+            // later retry range from unrelated bytes.
+            if fm.fileExists(atPath: partial.path) {
+                try? fm.removeItem(at: partial)
+            }
+            return LocalDownloadFileState(
+                accountedBytes: finalSize,
+                resumeBytes: 0,
+                isComplete: true
+            )
+        }
+
+        var retainedFinalSize = finalSize
+        if let expectedSize, expectedSize > 0, finalSize > expectedSize {
+            // A previous buggy append (or corrupted final file) cannot be
+            // resumed safely. Restart this one file from zero.
+            try? fm.removeItem(at: destination)
+            retainedFinalSize = 0
+        }
+
+        var partialSize = fileSize(at: partial, fileManager: fm)
+        if retainedFinalSize > 0 {
+            // Pre-.part versions wrote incomplete bytes directly to the final
+            // path. Preserve the longer candidate once, then keep future
+            // pauses isolated from model discovery.
+            if retainedFinalSize >= partialSize {
+                if fm.fileExists(atPath: partial.path) {
+                    try? fm.removeItem(at: partial)
+                }
+                try fm.moveItem(at: destination, to: partial)
+                partialSize = retainedFinalSize
+            } else {
+                try? fm.removeItem(at: destination)
+            }
+        }
+
+        return LocalDownloadFileState(
+            accountedBytes: partialSize,
+            resumeBytes: partialSize,
+            isComplete: false
+        )
+    }
+
+    private static func fileSize(at url: URL, fileManager: FileManager) -> Int64 {
+        guard fileManager.fileExists(atPath: url.path),
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber
+        else { return 0 }
+        return size.int64Value
+    }
+
+    private static func promotePartialFile(_ partial: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: partial.path) else {
+            throw URLError(.cannotCreateFile)
+        }
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(
+                destination,
+                withItemAt: partial,
+                backupItemName: nil,
+                options: []
+            )
+        } else {
+            // Same-directory move is an APFS rename and therefore atomic.
+            try fm.moveItem(at: partial, to: destination)
+        }
+    }
+
     // MARK: - Paths
 
     private func cacheDir(for repo: String) throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
         let sanitized = "models--" + repo.replacingOccurrences(of: "/", with: "--")
-        let dir = home
-            .appendingPathComponent(".cache")
-            .appendingPathComponent("huggingface")
-            .appendingPathComponent("hub")
+        let dir = Self.huggingFaceHubRoot()
             .appendingPathComponent(sanitized)
             .appendingPathComponent("snapshots")
             .appendingPathComponent("main")
@@ -829,9 +1058,7 @@ public actor DownloadManager {
     /// Root directory where HuggingFace snapshots land. Used for the
     /// pre-flight disk check so we probe the correct volume.
     static func huggingFaceHubRoot() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub")
+        huggingFaceHubRootProvider()
     }
 
     /// Available free bytes on the volume that hosts `url`. Returns nil
@@ -855,23 +1082,258 @@ public enum DownloadError: Error, LocalizedError {
     }
 }
 
-/// Thread-safe running total for KVO progress observation.
-///
-/// `URLSessionTask.progress.observe(...)` fires from an arbitrary queue, so
-/// we can't close over a captured `var`. This little holder gives us an
-/// NSLock-guarded counter plus a slot for the observation token so the
-/// completion handler can invalidate it once the task finishes.
-private final class ProgressHolder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lastValue: Int64 = 0
-    var observation: NSKeyValueObservation?
+/// One data-task result. `shouldPromotePartial` is true for a successful
+/// 2xx body and for a 416 response, where the persisted `.part` already has
+/// every requested byte and must be promoted before manifest verification.
+private struct StreamingDownloadOutcome: Sendable {
+    let bytesWritten: Int64
+    let shouldPromotePartial: Bool
+}
 
-    /// Returns the delta since the last call, updating the stored value.
-    func consume(newValue: Int64) -> Int64 {
+/// Retains the session + delegate for exactly one native transfer. Several
+/// transfers can belong to the same DownloadManager job concurrently.
+private final class LiveDataTransfer: @unchecked Sendable {
+    let session: URLSession
+    let task: URLSessionDataTask
+    let delegate: StreamingDataDelegate
+
+    init(session: URLSession, task: URLSessionDataTask, delegate: StreamingDataDelegate) {
+        self.session = session
+        self.task = task
+        self.delegate = delegate
+    }
+
+    func cancel() {
+        // Prevent a delegate callback already queued by URLSession from
+        // writing another chunk after a user chose Cancel and the actor has
+        // removed the stable `.part` file.
+        delegate.stopWriting()
+        task.cancel()
+        session.invalidateAndCancel()
+    }
+}
+
+/// Lock-protected cancellation bit used to close the tiny gap between
+/// creating a task and registering it with DownloadManager's actor state.
+private final class DownloadTransferCancellationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
         lock.lock()
         defer { lock.unlock() }
-        let delta = newValue - lastValue
-        if delta > 0 { lastValue = newValue }
-        return delta
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
+
+/// Streams HTTP response chunks into a durable `.part` file. Unlike a
+/// URLSessionDownloadTask temporary location, that file survives task
+/// cancellation and becomes the byte count used by the next Range request.
+private final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let partialURL: URL
+    private let requestedRange: Bool
+    private let onBytes: @Sendable (Int64) -> Void
+    private let onRestartFromZero: @Sendable () async -> Void
+    private let onFinished: @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<StreamingDownloadOutcome, Error>?
+    private var handle: FileHandle?
+    private var statusCode: Int?
+    private var bytesWritten: Int64 = 0
+    private var terminalError: Error?
+    private var finished = false
+
+    init(
+        partialURL: URL,
+        requestedRange: Bool,
+        onBytes: @escaping @Sendable (Int64) -> Void,
+        onRestartFromZero: @escaping @Sendable () async -> Void,
+        onFinished: @escaping @Sendable () -> Void
+    ) {
+        self.partialURL = partialURL
+        self.requestedRange = requestedRange
+        self.onBytes = onBytes
+        self.onRestartFromZero = onRestartFromZero
+        self.onFinished = onFinished
+    }
+
+    func begin(_ continuation: CheckedContinuation<StreamingDownloadOutcome, Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finishBeforeStart(_ error: Error) {
+        finish(error: error)
+    }
+
+    func stopWriting() {
+        finish(error: CancellationError())
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            finish(error: URLError(.badServerResponse))
+            completionHandler(.cancel)
+            return
+        }
+
+        let status = http.statusCode
+        if status == 416 {
+            lock.lock()
+            statusCode = status
+            lock.unlock()
+            completionHandler(.allow)
+            return
+        }
+
+        guard (200..<300).contains(status) else {
+            let hint: String
+            switch status {
+            case 401: hint = "HF file requires authentication."
+            case 403: hint = "HF file is gated — accept the license and retry."
+            default:  hint = "HTTP \(status) downloading \(dataTask.originalRequest?.url?.lastPathComponent ?? "file")."
+            }
+            finish(error: NSError(
+                domain: "vMLX.DownloadManager",
+                code: status,
+                userInfo: [NSLocalizedDescriptionKey: hint]
+            ))
+            completionHandler(.cancel)
+            return
+        }
+
+        let append = requestedRange && status == 206
+        let restartedFromZero = requestedRange && status == 200
+        do {
+            let fm = FileManager.default
+            try fm.createDirectory(
+                at: partialURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !append {
+                if fm.fileExists(atPath: partialURL.path) {
+                    try fm.removeItem(at: partialURL)
+                }
+                fm.createFile(atPath: partialURL.path, contents: nil)
+            } else if !fm.fileExists(atPath: partialURL.path) {
+                fm.createFile(atPath: partialURL.path, contents: nil)
+            }
+
+            let fileHandle = try FileHandle(forWritingTo: partialURL)
+            if append {
+                try fileHandle.seekToEnd()
+            }
+            lock.lock()
+            statusCode = status
+            handle = fileHandle
+            lock.unlock()
+            if restartedFromZero {
+                // URLSession waits for this completion handler before
+                // delivering body bytes, so the actor can subtract the old
+                // partial-file contribution before fresh progress arrives.
+                Task {
+                    await self.onRestartFromZero()
+                    completionHandler(.allow)
+                }
+            } else {
+                completionHandler(.allow)
+            }
+        } catch {
+            finish(error: error)
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        var shouldReport = false
+        lock.lock()
+        if terminalError == nil,
+           !finished,
+           statusCode != 416,
+           let handle
+        {
+            do {
+                try handle.write(contentsOf: data)
+                bytesWritten += Int64(data.count)
+                shouldReport = !data.isEmpty
+            } catch {
+                terminalError = error
+                dataTask.cancel()
+            }
+        }
+        lock.unlock()
+        if shouldReport {
+            onBytes(Int64(data.count))
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        lock.lock()
+        let savedError = terminalError ?? error
+        let status = statusCode
+        let savedBytes = bytesWritten
+        lock.unlock()
+
+        if let savedError {
+            finish(error: savedError)
+            return
+        }
+        guard let status else {
+            finish(error: URLError(.badServerResponse))
+            return
+        }
+        if status == 416 {
+            finish(outcome: StreamingDownloadOutcome(bytesWritten: 0, shouldPromotePartial: true))
+        } else if (200..<300).contains(status) {
+            finish(outcome: StreamingDownloadOutcome(bytesWritten: savedBytes, shouldPromotePartial: true))
+        } else {
+            finish(error: URLError(.badServerResponse))
+        }
+    }
+
+    private func finish(error: Error) {
+        finish(result: .failure(error))
+    }
+
+    private func finish(outcome: StreamingDownloadOutcome) {
+        finish(result: .success(outcome))
+    }
+
+    private func finish(result: Result<StreamingDownloadOutcome, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let handle = self.handle
+        self.handle = nil
+        lock.unlock()
+
+        try? handle?.close()
+        onFinished()
+        switch result {
+        case .success(let outcome): continuation?.resume(returning: outcome)
+        case .failure(let error): continuation?.resume(throwing: error)
+        }
     }
 }

@@ -30,8 +30,11 @@ struct MessageList: View {
                                 isLastAssistant: isLastAssistant(idx),
                                 hideToolStatus: vm.hideToolStatus,
                                 onDelete: { vm.deleteMessage(message.id) },
-                                onEdit: { vm.editMessage(message.id, newContent: $0) },
+                                onEdit: { vm.editAndRegenerate(message.id, newContent: $0) },
                                 onRegenerate: { vm.regenerate(from: message.id) },
+                                onContinue: isLastAssistant(idx)
+                                    ? { vm.continueResponse() }
+                                    : nil,
                                 // Branch is hidden on the first message (idx==0
                                 // branches into an empty chat, equivalent to
                                 // New Chat); ChatViewModel also bails with a

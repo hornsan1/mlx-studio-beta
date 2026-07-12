@@ -11,6 +11,11 @@ LOG="$REPORT_DIR/mlx-studio-install-chat-smoke-$STAMP-$$.log"
 JSON_REPORT="$REPORT_DIR/mlx-studio-install-chat-smoke-$STAMP-$$.json"
 
 REPO="${MLX_STUDIO_E2E_REPO:-LiquidAI/LFM2.5-350M}"
+# Supply an already-verified local model directory to exercise the complete
+# scan → load → chat path without invoking `pull`. This is the safe release
+# smoke mode for machines that already have the starter model cached; it
+# prevents a test run from mutating a shared Hugging Face cache.
+MODEL_PATH_OVERRIDE="${MLX_STUDIO_E2E_MODEL_PATH:-}"
 PROMPT="${MLX_STUDIO_CHAT_E2E_PROMPT:-Reply with exactly one word: pong}"
 EXPECTED="${MLX_STUDIO_CHAT_E2E_EXPECTED_SUBSTRING:-pong}"
 TIMEOUT="${MLX_STUDIO_CHAT_E2E_TIMEOUT:-240}"
@@ -66,20 +71,29 @@ LIST_LOG="$REPORT_DIR/mlx-studio-install-chat-list-$STAMP-$$.log"
 
 note "cli=$CLI_BIN"
 note "repo=$REPO"
-note "pulling/verifying via vmlxctl pull"
-set +e
-"$CLI_BIN" pull "$REPO" 2>&1 | tee "$PULL_LOG" | tee -a "$LOG" >&2
-PULL_STATUS=${PIPESTATUS[0]}
-set -e
-if [[ "$PULL_STATUS" -ne 0 ]]; then
-  note "ERROR: pull failed; see $PULL_LOG"
-  exit "$PULL_STATUS"
-fi
+if [[ -n "$MODEL_PATH_OVERRIDE" ]]; then
+  MODEL_PATH="$(cd "$MODEL_PATH_OVERRIDE" && pwd -P)"
+  note "using supplied local model path; skipping pull: $MODEL_PATH"
+  : > "$PULL_LOG"
+  printf 'Skipped pull; MLX_STUDIO_E2E_MODEL_PATH=%s\n' "$MODEL_PATH" \
+    | tee -a "$PULL_LOG" | tee -a "$LOG" >&2
+else
+  note "pulling/verifying via vmlxctl pull"
+  set +e
+  "$CLI_BIN" pull "$REPO" 2>&1 | tee "$PULL_LOG" | tee -a "$LOG" >&2
+  PULL_STATUS=${PIPESTATUS[0]}
+  set -e
+  if [[ "$PULL_STATUS" -ne 0 ]]; then
+    note "ERROR: pull failed; see $PULL_LOG"
+    exit "$PULL_STATUS"
+  fi
 
-MODEL_PATH="$(awk -F'Done: ' '/Done: / {print $2}' "$PULL_LOG" | tail -1 | tr -d '\r')"
-if [[ -z "$MODEL_PATH" || "$MODEL_PATH" == "(unknown path)" ]]; then
-  note "ERROR: pull did not report a usable Done path"
-  exit 2
+  MODEL_PATH="$(awk -F'Done: ' '/Done: / {print $2}' "$PULL_LOG" | tail -1 | tr -d '\r')"
+  if [[ -z "$MODEL_PATH" || "$MODEL_PATH" == "(unknown path)" ]]; then
+    note "ERROR: pull did not report a usable Done path"
+    exit 2
+  fi
+  MODEL_PATH="$(cd "$MODEL_PATH" && pwd -P)"
 fi
 require_model_files "$MODEL_PATH"
 

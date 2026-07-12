@@ -33,12 +33,35 @@ public func quantizeSingle(
 ) -> Quantized? {
     if layer is Quantized {
         // already quantized
-        nil
+        return nil
     } else if let quantizable = layer as? Quantizable {
-        quantizable.toQuantized(groupSize: groupSize, bits: bits, mode: mode) as? Quantized
+        guard isQuantizationShapeSupported(layer: layer, groupSize: groupSize, bits: bits) else {
+            return nil
+        }
+        return quantizable.toQuantized(groupSize: groupSize, bits: bits, mode: mode) as? Quantized
     } else {
-        nil
+        return nil
     }
+}
+
+private func isQuantizationShapeSupported(layer: Module, groupSize: Int, bits: Int) -> Bool {
+    guard groupSize > 0, [2, 3, 4, 6, 8].contains(bits) else {
+        return false
+    }
+
+    let shape: [Int]
+    if let linear = layer as? Linear {
+        shape = linear.weight.shape
+    } else if let embedding = layer as? Embedding {
+        shape = embedding.weight.shape
+    } else {
+        return true
+    }
+
+    guard shape.count == 2, let lastDimension = shape.last, lastDimension > 0 else {
+        return false
+    }
+    return lastDimension >= groupSize && lastDimension.isMultiple(of: groupSize)
 }
 
 /// Quantize the sub-modules of a module according to a filter.
@@ -317,7 +340,7 @@ open class QuantizedLinear: Linear, Quantized {
         self.mode = mode
 
         let (quantizedWeight, scales, biases) = MLX.quantized(
-            weight, groupSize: groupSize, bits: bits)
+            weight, groupSize: groupSize, bits: bits, mode: mode)
 
         self.scales = scales
         self.biases = biases

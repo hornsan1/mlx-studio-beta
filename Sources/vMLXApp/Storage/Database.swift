@@ -13,6 +13,24 @@ import SQLite3
 final class Database {
     static let shared = Database()
 
+    /// Serialized composer state for a session.  Keeping this beside the
+    /// conversation database (rather than in memory or UserDefaults) makes
+    /// unsent text, media, and extracted document context recoverable after a
+    /// quit or crash without imposing size limits on the draft.
+    struct ChatDraftPayload: Codable, Equatable {
+        var inputText: String
+        var pendingImages: [Data]
+        var pendingVideoPaths: [String]
+        var pendingDocuments: [ChatDocumentAttachment]
+
+        var isEmpty: Bool {
+            inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && pendingImages.isEmpty
+                && pendingVideoPaths.isEmpty
+                && pendingDocuments.isEmpty
+        }
+    }
+
     private var db: OpaquePointer?
 
     private init() {
@@ -104,6 +122,44 @@ final class Database {
             runSQL("ALTER TABLE messages ADD COLUMN is_streaming INTEGER NOT NULL DEFAULT 0;")
             runSQL("PRAGMA user_version = 1;")
         }
+        if version < 2 {
+            // Unified Chat schema. These columns absorb the redesigned
+            // StudioChatScreen's parallel UserDefaults model and make the
+            // capable SQLite chat path the single source of truth.
+            runSQL("ALTER TABLE sessions ADD COLUMN model_name TEXT;")
+            runSQL("ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;")
+            runSQL("ALTER TABLE sessions ADD COLUMN collection_name TEXT;")
+            runSQL("ALTER TABLE messages ADD COLUMN image_data BLOB;")
+            runSQL("ALTER TABLE messages ADD COLUMN video_paths BLOB;")
+            runSQL("ALTER TABLE messages ADD COLUMN tool_statuses BLOB;")
+            runSQL("PRAGMA user_version = 2;")
+        }
+        if version < 3 {
+            // Composer recovery must be durable: process termination during a
+            // draft should not silently discard a user's unsent text, media,
+            // or extracted PDF/DOCX/TXT context.  The session FK means a
+            // permanent chat delete also removes its draft automatically.
+            runSQL("""
+            CREATE TABLE IF NOT EXISTS chat_drafts (
+                session_id TEXT PRIMARY KEY,
+                input_text TEXT NOT NULL DEFAULT '',
+                image_data BLOB,
+                video_paths BLOB,
+                document_data BLOB,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            """)
+            runSQL("PRAGMA user_version = 3;")
+        }
+        if version < 4 {
+            // Split user-visible Markdown (`content`) from model-only document
+            // injection (`request_context`) and persist assistant generation
+            // completion state for export/import fidelity.
+            runSQL("ALTER TABLE messages ADD COLUMN request_context TEXT NOT NULL DEFAULT '';")
+            runSQL("ALTER TABLE messages ADD COLUMN generation_state TEXT;")
+            runSQL("PRAGMA user_version = 4;")
+        }
     }
 
     private func currentUserVersion() -> Int {
@@ -127,7 +183,8 @@ final class Database {
         runSQL("""
         UPDATE messages
            SET is_streaming = 0,
-               content = content || ' [interrupted]'
+               content = content || ' [interrupted]',
+               generation_state = 'interrupted'
          WHERE is_streaming = 1;
         """)
     }
@@ -239,17 +296,26 @@ final class Database {
 
     func allSessions() -> [ChatSession] {
         var results: [ChatSession] = []
-        let sql = "SELECT id, title, model_path, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
+        let sql = """
+        SELECT id, title, model_path, model_name, is_pinned, collection_name,
+               created_at, updated_at
+          FROM sessions
+         ORDER BY is_pinned DESC, updated_at DESC
+        """
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let id = UUID(uuidString: cstr(stmt, 0)) ?? UUID()
                 let title = cstr(stmt, 1)
                 let mp = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : cstr(stmt, 2)
-                let c = sqlite3_column_double(stmt, 3)
-                let u = sqlite3_column_double(stmt, 4)
+                let modelName = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : cstr(stmt, 3)
+                let isPinned = sqlite3_column_int(stmt, 4) != 0
+                let collection = sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : cstr(stmt, 5)
+                let c = sqlite3_column_double(stmt, 6)
+                let u = sqlite3_column_double(stmt, 7)
                 results.append(ChatSession(
-                    id: id, title: title, modelPath: mp,
+                    id: id, title: title, modelPath: mp, modelName: modelName,
+                    isPinned: isPinned, collectionName: collection,
                     createdAt: Date(timeIntervalSince1970: c),
                     updatedAt: Date(timeIntervalSince1970: u)
                 ))
@@ -261,11 +327,15 @@ final class Database {
 
     func upsertSession(_ s: ChatSession) {
         let sql = """
-        INSERT INTO sessions (id, title, model_path, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO sessions
+            (id, title, model_path, model_name, is_pinned, collection_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title=excluded.title,
             model_path=excluded.model_path,
+            model_name=excluded.model_name,
+            is_pinned=excluded.is_pinned,
+            collection_name=excluded.collection_name,
             updated_at=excluded.updated_at;
         """
         var stmt: OpaquePointer?
@@ -277,8 +347,19 @@ final class Database {
         } else {
             sqlite3_bind_null(stmt, 3)
         }
-        sqlite3_bind_double(stmt, 4, s.createdAt.timeIntervalSince1970)
-        sqlite3_bind_double(stmt, 5, s.updatedAt.timeIntervalSince1970)
+        if let modelName = s.modelName {
+            sqlite3_bind_text(stmt, 4, modelName, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 4)
+        }
+        sqlite3_bind_int(stmt, 5, s.isPinned ? 1 : 0)
+        if let collection = s.collectionName {
+            sqlite3_bind_text(stmt, 6, collection, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 6)
+        }
+        sqlite3_bind_double(stmt, 7, s.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 8, s.updatedAt.timeIntervalSince1970)
         sqlite3_step(stmt)
         sqlite3_finalize(stmt)
     }
@@ -292,12 +373,73 @@ final class Database {
         sqlite3_finalize(stmt)
     }
 
+    // MARK: - Composer drafts
+
+    func draft(for sessionId: UUID) -> ChatDraftPayload? {
+        let sql = """
+        SELECT input_text, image_data, video_paths, document_data
+          FROM chat_drafts
+         WHERE session_id=?
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, sessionId.uuidString, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let payload = ChatDraftPayload(
+            inputText: cstr(stmt, 0),
+            pendingImages: decodeBlob([Data].self, statement: stmt, column: 1) ?? [],
+            pendingVideoPaths: decodeBlob([String].self, statement: stmt, column: 2) ?? [],
+            pendingDocuments: decodeBlob([ChatDocumentAttachment].self, statement: stmt, column: 3) ?? []
+        )
+        return payload.isEmpty ? nil : payload
+    }
+
+    func upsertDraft(_ draft: ChatDraftPayload, for sessionId: UUID) {
+        guard !draft.isEmpty else {
+            deleteDraft(for: sessionId)
+            return
+        }
+        let sql = """
+        INSERT INTO chat_drafts
+            (session_id, input_text, image_data, video_paths, document_data, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            input_text=excluded.input_text,
+            image_data=excluded.image_data,
+            video_paths=excluded.video_paths,
+            document_data=excluded.document_data,
+            updated_at=excluded.updated_at;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, sessionId.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, draft.inputText, -1, SQLITE_TRANSIENT)
+        bindBlob(try? JSONEncoder().encode(draft.pendingImages), statement: stmt, index: 3)
+        bindBlob(try? JSONEncoder().encode(draft.pendingVideoPaths), statement: stmt, index: 4)
+        bindBlob(try? JSONEncoder().encode(draft.pendingDocuments), statement: stmt, index: 5)
+        sqlite3_bind_double(stmt, 6, Date().timeIntervalSince1970)
+        sqlite3_step(stmt)
+    }
+
+    func deleteDraft(for sessionId: UUID) {
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM chat_drafts WHERE session_id=?", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, sessionId.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
     // MARK: - Messages
 
     func messages(for sessionId: UUID) -> [ChatMessage] {
         var results: [ChatMessage] = []
         let sql = """
-        SELECT id, session_id, role, content, reasoning, tool_calls_json, created_at, is_streaming
+        SELECT id, session_id, role, content, reasoning, tool_calls_json,
+               created_at, is_streaming, image_data, video_paths, tool_statuses,
+               request_context, generation_state
         FROM messages WHERE session_id=? ORDER BY created_at ASC
         """
         var stmt: OpaquePointer?
@@ -312,11 +454,26 @@ final class Database {
                 let tc = sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : cstr(stmt, 5)
                 let ts = sqlite3_column_double(stmt, 6)
                 let isStreaming = sqlite3_column_int(stmt, 7) != 0
+                let images: [Data] = decodeBlob([Data].self, statement: stmt, column: 8) ?? []
+                let videos: [String] = decodeBlob([String].self, statement: stmt, column: 9) ?? []
+                let statuses: [String: ToolCallStatus] = decodeBlob(
+                    [String: ToolCallStatus].self, statement: stmt, column: 10
+                ) ?? [:]
+                let requestContext = sqlite3_column_type(stmt, 11) == SQLITE_NULL
+                    ? ""
+                    : cstr(stmt, 11)
+                let generationState: ChatGenerationState? = {
+                    guard sqlite3_column_type(stmt, 12) != SQLITE_NULL else { return nil }
+                    return ChatGenerationState(rawValue: cstr(stmt, 12))
+                }()
                 results.append(ChatMessage(
                     id: id, sessionId: sid, role: role, content: content,
-                    reasoning: reasoning, toolCallsJSON: tc,
+                    requestContext: requestContext,
+                    reasoning: reasoning, imageData: images, videoPaths: videos,
+                    toolCallsJSON: tc, toolStatuses: statuses,
                     createdAt: Date(timeIntervalSince1970: ts),
-                    isStreaming: isStreaming
+                    isStreaming: isStreaming,
+                    generationState: generationState
                 ))
             }
         }
@@ -326,13 +483,21 @@ final class Database {
 
     func upsertMessage(_ m: ChatMessage) {
         let sql = """
-        INSERT INTO messages (id, session_id, role, content, reasoning, tool_calls_json, created_at, is_streaming)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages
+            (id, session_id, role, content, reasoning, tool_calls_json, created_at,
+             is_streaming, image_data, video_paths, tool_statuses,
+             request_context, generation_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             content=excluded.content,
             reasoning=excluded.reasoning,
             tool_calls_json=excluded.tool_calls_json,
-            is_streaming=excluded.is_streaming;
+            image_data=excluded.image_data,
+            video_paths=excluded.video_paths,
+            tool_statuses=excluded.tool_statuses,
+            is_streaming=excluded.is_streaming,
+            request_context=excluded.request_context,
+            generation_state=excluded.generation_state;
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -348,8 +513,40 @@ final class Database {
         } else { sqlite3_bind_null(stmt, 6) }
         sqlite3_bind_double(stmt, 7, m.createdAt.timeIntervalSince1970)
         sqlite3_bind_int(stmt, 8, m.isStreaming ? 1 : 0)
+        bindBlob(try? JSONEncoder().encode(m.imageData), statement: stmt, index: 9)
+        bindBlob(try? JSONEncoder().encode(m.videoPaths), statement: stmt, index: 10)
+        bindBlob(try? JSONEncoder().encode(m.toolStatuses), statement: stmt, index: 11)
+        sqlite3_bind_text(stmt, 12, m.requestContext, -1, SQLITE_TRANSIENT)
+        if let state = m.generationState {
+            sqlite3_bind_text(stmt, 13, state.rawValue, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 13)
+        }
         sqlite3_step(stmt)
         sqlite3_finalize(stmt)
+    }
+
+    private func bindBlob(_ data: Data?, statement: OpaquePointer?, index: Int32) {
+        guard let data, !data.isEmpty else {
+            sqlite3_bind_null(statement, index)
+            return
+        }
+        data.withUnsafeBytes { bytes in
+            _ = sqlite3_bind_blob(statement, index, bytes.baseAddress, Int32(data.count), SQLITE_TRANSIENT)
+        }
+    }
+
+    private func decodeBlob<T: Decodable>(
+        _ type: T.Type,
+        statement: OpaquePointer?,
+        column: Int32
+    ) -> T? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let bytes = sqlite3_column_blob(statement, column)
+        else { return nil }
+        let count = Int(sqlite3_column_bytes(statement, column))
+        guard count > 0 else { return nil }
+        return try? JSONDecoder().decode(type, from: Data(bytes: bytes, count: count))
     }
 
     func deleteMessage(_ id: UUID) {

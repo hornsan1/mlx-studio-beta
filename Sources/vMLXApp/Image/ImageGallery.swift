@@ -52,8 +52,7 @@ struct ImageGallery: View {
     @Environment(\.appLocale) private var appLocale: AppLocale
     let images: [GeneratedImage]
     let isGenerating: Bool
-    let currentStep: Int
-    let totalSteps: Int
+    let requestedSteps: Int
     let elapsedSeconds: Int
     let preview: Data?
     let errorBanner: ImageErrorBanner?
@@ -76,8 +75,7 @@ struct ImageGallery: View {
 
                     if isGenerating {
                         ImageGenStateView(
-                            currentStep: currentStep,
-                            totalSteps: totalSteps,
+                            requestedSteps: requestedSteps,
                             elapsedSeconds: elapsedSeconds,
                             preview: preview,
                             onStop: onStop
@@ -560,7 +558,7 @@ struct ImageGallery: View {
             .frame(height: 320)
 
             HStack(spacing: Theme.Spacing.md) {
-                createHint("1", "Pick model", "Downloaded or proof-gated")
+                createHint("1", "Pick model", "Downloaded and ready")
                 createHint("2", "Tune settings", "Steps, size, seed")
                 createHint("3", "Generate", "Saved with provenance")
             }

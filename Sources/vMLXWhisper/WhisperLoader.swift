@@ -1,9 +1,9 @@
 // Copyright © 2026 vMLX. Whisper weight + config loader.
 //
-// Reads `config.json` + `*.safetensors` from a local model directory
-// (e.g. `mlx-community/whisper-tiny` pulled via HF hub), instantiates
-// the `Whisper` module, sanitizes the weight keys, and populates
-// parameters.
+// Reads `config.json` + local Whisper weights from a model directory
+// (e.g. `mlx-community/whisper-tiny-mlx` pulled via DownloadManager),
+// instantiates the `Whisper` module, sanitizes the weight keys, and
+// populates parameters.
 
 import Foundation
 import MLX
@@ -19,8 +19,10 @@ public struct LoadedWhisper {
 public enum WhisperLoader {
 
     /// Load a whisper model + tokenizer from `dir`. The directory must
-    /// contain `config.json`, at least one `.safetensors` file, and a
-    /// `tokenizer.json` (HuggingFace format).
+    /// contain `config.json`, at least one `.safetensors` or `.npz`
+    /// weights file, and a `tokenizer.json` (HuggingFace format).
+    /// DownloadManager supplements MLX Whisper snapshots with tokenizer
+    /// sidecars from the matching upstream OpenAI Whisper repo.
     public static func load(from dir: URL) async throws -> LoadedWhisper {
         let configURL = dir.appendingPathComponent("config.json")
         guard FileManager.default.fileExists(atPath: configURL.path) else {

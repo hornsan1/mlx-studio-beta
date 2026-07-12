@@ -67,13 +67,25 @@ public enum ImageModelInstallVerifier {
 
         let layoutIssues: [String]
         switch normalized {
-        case "flux1-schnell", "flux1-dev":
+        case "flux1-schnell", "flux1-dev", "flux-krea-dev":
             layoutIssues = WeightLoader.componentLayoutIssues(
                 in: localPath,
                 requiredComponents: ["transformer", "text_encoder", "text_encoder_2", "vae"],
                 requiredFiles: [
                     "tokenizer/tokenizer.json",
                     "tokenizer_2/tokenizer.json",
+                ]
+            )
+
+        case "krea-2-turbo":
+            layoutIssues = WeightLoader.componentLayoutIssues(
+                in: localPath,
+                requiredComponents: [],
+                requiredFiles: [
+                    "turbo.safetensors",
+                    "vae/diffusion_pytorch_model.safetensors",
+                    "text_encoder/model.safetensors",
+                    "tokenizer/tokenizer.json",
                 ]
             )
 
@@ -107,6 +119,12 @@ public enum ImageModelInstallVerifier {
 
     private static func normalize(_ value: String) -> String {
         let lower = value.lowercased()
+        if lower.contains("krea-2") || lower.contains("krea2") {
+            return "krea-2-turbo"
+        }
+        if lower.contains("krea") {
+            return "flux-krea-dev"
+        }
         if lower.contains("flux") && lower.contains("schnell") {
             return "flux1-schnell"
         }

@@ -203,6 +203,10 @@ if [[ "$BUNDLE_LFM" == "1" ]]; then
     rm -rf "$LFM_DEST"
     mkdir -p "$(dirname "$LFM_DEST")"
     /usr/bin/ditto --noextattr "$LFM_MODEL_SRC" "$LFM_DEST"
+    # HF-cache files may be owner-only (0600). A packaged starter model must
+    # remain readable after a shared /Applications install under another user
+    # or an administrator-owned deployment.
+    chmod -R a+rX "$LFM_DEST"
 fi
 
 find "$BUILD_PRODUCTS_DIR" -maxdepth 1 -name '*.bundle' -type d -print0 | while IFS= read -r -d '' bundle; do
