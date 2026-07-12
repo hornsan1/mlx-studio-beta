@@ -181,6 +181,119 @@ final class MarkdownStreamingTests: XCTestCase {
         XCTAssertTrue(id.isProvisional)
         XCTAssertTrue(id.accessibilityIdentifier.hasSuffix("-open"))
     }
+
+    /// Regression: throttled `document` lags live stream text. IDs must be
+    /// computed against `document.source` (and last-stable hardening), never
+    /// live text length — otherwise terminal prose flips provisional→frozen→open
+    /// between reparses and remounts ForEach.
+    func testStaleDocumentVsLiveTextKeepsTerminalIDProvisional() throws {
+        let messageID = UUID(uuidString: "CCCCCCCC-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "Hello"
+        let grown = "Hello!"
+
+        let staleDoc = LightweightMarkdownParser.shared.parse(early)
+        XCTAssertEqual(staleDoc.blocks.count, 1)
+        let last = try XCTUnwrap(staleDoc.blocks.last)
+
+        // Correct call site: parse-basis source + last stable while streaming.
+        let idFromDocument = MarkdownBlockID.id(
+            messageID: messageID,
+            block: last,
+            source: staleDoc.source,
+            isStreaming: true,
+            isLastStableBlock: true
+        )
+        XCTAssertTrue(idFromDocument.isProvisional)
+        XCTAssertTrue(idFromDocument.accessibilityIdentifier.hasSuffix("-open"))
+
+        // Bug pattern (live text ahead of reparse) without last-stable flag:
+        // range.end (5) != grown.utf16.count (6) → incorrectly non-provisional.
+        let buggyLive = MarkdownBlockID.id(
+            messageID: messageID,
+            block: last,
+            source: grown,
+            isStreaming: true,
+            isLastStableBlock: false
+        )
+        XCTAssertFalse(
+            buggyLive.isProvisional,
+            "documents the thrash: live source without last-stable de-provisionalises"
+        )
+        XCTAssertNotEqual(buggyLive, idFromDocument)
+
+        // Hardening: even if a caller passes live grown source, last-stable
+        // keeps identity provisional and equal to the document-source ID.
+        let hardenedLive = MarkdownBlockID.id(
+            messageID: messageID,
+            block: last,
+            source: grown,
+            isStreaming: true,
+            isLastStableBlock: true
+        )
+        XCTAssertTrue(hardenedLive.isProvisional)
+        XCTAssertEqual(hardenedLive, idFromDocument)
+        XCTAssertEqual(
+            hardenedLive.accessibilityIdentifier,
+            idFromDocument.accessibilityIdentifier
+        )
+
+        // Streaming split peels live growth into tail; stable last block is
+        // still the stale parse — ID must match document-source provisional ID.
+        let split = StreamingMarkdownSplit.split(document: staleDoc, fullSource: grown)
+        XCTAssertEqual(split.stableBlocks.count, 1)
+        XCTAssertFalse(split.tail.isEmpty)
+        let splitLast = try XCTUnwrap(split.stableBlocks.last)
+        let splitID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: splitLast,
+            source: staleDoc.source,
+            isStreaming: true,
+            isLastStableBlock: true
+        )
+        XCTAssertEqual(splitID, idFromDocument)
+
+        // After reparse of grown text, same start + streaming → still equal.
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+        let reparsedID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(grownDoc.blocks.last),
+            source: grownDoc.source,
+            isStreaming: true,
+            isLastStableBlock: true
+        )
+        XCTAssertTrue(reparsedID.isProvisional)
+        XCTAssertEqual(reparsedID, idFromDocument)
+    }
+
+    func testOpenFenceIDStableWhenLiveSourceGrowsBeforeReparse() throws {
+        let messageID = UUID(uuidString: "DDDDDDDD-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "```swift\nprint(1)\n"
+        let grown = "```swift\nprint(1)\nprint(2)\n"
+        let staleDoc = LightweightMarkdownParser.shared.parse(early)
+        let last = try XCTUnwrap(staleDoc.blocks.last)
+        guard case .code(_, _, _, let closed) = last else {
+            return XCTFail("expected open fence")
+        }
+        XCTAssertFalse(closed)
+
+        let withDoc = MarkdownBlockID.id(
+            messageID: messageID,
+            block: last,
+            source: staleDoc.source,
+            isStreaming: true
+        )
+        // Open fence stays provisional via !isClosed even against live grown source.
+        let withLive = MarkdownBlockID.id(
+            messageID: messageID,
+            block: last,
+            source: grown,
+            isStreaming: true
+        )
+        XCTAssertTrue(withDoc.isProvisional)
+        XCTAssertTrue(withLive.isProvisional)
+        XCTAssertEqual(withDoc, withLive)
+        XCTAssertTrue(withDoc.copyCodeAccessibilityIdentifier.hasSuffix("-open"))
+    }
 }
 
 final class ChatMessageContextSplitTests: XCTestCase {

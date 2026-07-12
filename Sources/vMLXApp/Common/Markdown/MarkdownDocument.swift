@@ -101,16 +101,27 @@ struct MarkdownBlockID: Hashable, Sendable {
 
     /// Normative provisional predicate (K13):
     /// open code fence **or** streaming terminal-growing block.
+    ///
+    /// - Parameter source: **Must** be the parse that produced `block.range`
+    ///   (typically `document.source`), never live stream text ahead of reparse.
+    /// - Parameter isLastStableBlock: when `true` while streaming, treat the
+    ///   last rendered stable block as provisional even if a mismatched source
+    ///   string would fail the `range.end == source.count` check.
     static func isProvisional(
         block: MarkdownBlock,
         source: String,
-        isStreaming: Bool
+        isStreaming: Bool,
+        isLastStableBlock: Bool = false
     ) -> Bool {
         if case .code(_, _, _, let isClosed) = block, !isClosed {
             return true
         }
-        if isStreaming, block.range.end == source.utf16.count {
-            return true
+        if isStreaming {
+            // Terminal-growing against the parse basis, or last stable block
+            // while the stream is still live (defense against source mismatch).
+            if isLastStableBlock || block.range.end == source.utf16.count {
+                return true
+            }
         }
         return false
     }
@@ -118,19 +129,28 @@ struct MarkdownBlockID: Hashable, Sendable {
     /// Build a block ID with the correct provisional flag for streaming.
     ///
     /// - Parameters:
-    ///   - source: normalized document source (UTF-16 length basis for ranges).
+    ///   - source: normalized **document** source that owns `block.range`
+    ///     (UTF-16 length basis). Do not pass live text that outruns the parse.
     ///   - isStreaming: true for in-flight assistant bubbles / MarkdownStreamingView.
+    ///   - isLastStableBlock: true when this is the last entry in the streaming
+    ///     stable-blocks list (keeps terminal identity provisional across throttle).
     static func id(
         messageID: UUID?,
         block: MarkdownBlock,
         source: String,
-        isStreaming: Bool
+        isStreaming: Bool,
+        isLastStableBlock: Bool = false
     ) -> MarkdownBlockID {
         MarkdownBlockID(
             messageID: messageID,
             range: block.range,
             kind: block.kind,
-            isProvisional: isProvisional(block: block, source: source, isStreaming: isStreaming)
+            isProvisional: isProvisional(
+                block: block,
+                source: source,
+                isStreaming: isStreaming,
+                isLastStableBlock: isLastStableBlock
+            )
         )
     }
 }
@@ -183,7 +203,11 @@ enum MarkdownBlock: Hashable, Sendable {
 
     /// Convenience ID for completed (non-streaming) renders.
     /// Open fences still mark provisional so copy IDs stay end-invariant.
-    func blockID(messageID: UUID?, source: String = "", isStreaming: Bool = false) -> MarkdownBlockID {
+    ///
+    /// - Parameter source: parse basis for ranges (`MarkdownDocument.source`).
+    ///   Required so terminal-growing checks are not accidentally evaluated
+    ///   against an empty string.
+    func blockID(messageID: UUID?, source: String, isStreaming: Bool = false) -> MarkdownBlockID {
         MarkdownBlockID.id(
             messageID: messageID,
             block: self,

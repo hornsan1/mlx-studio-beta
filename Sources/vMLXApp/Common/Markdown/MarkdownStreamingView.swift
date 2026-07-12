@@ -44,27 +44,32 @@ struct MarkdownStreamingView: View {
     @ViewBuilder
     private var streamingBody: some View {
         let split = StreamingMarkdownSplit.split(document: document, fullSource: text)
-        let source = MarkdownParserSupport.normalizeNewlines(text)
-        // Key by end-invariant MarkdownBlockID (not raw range) so provisional
-        // blocks keep identity while range.end grows.
+        // Ranges come from the throttled parse. Always key IDs against
+        // `document.source` — never live `text`, which can outrun the parse
+        // between reparses and flip terminal-growing provisionality.
+        let idSource = document.source
+        let lastIndex = split.stableBlocks.indices.last
         ForEach(
-            split.stableBlocks.map { block in
+            Array(split.stableBlocks.enumerated()).map { index, block in
                 IdentifiedMarkdownBlock(
                     id: MarkdownBlockID.id(
                         messageID: messageID,
                         block: block,
-                        source: source,
-                        isStreaming: true
+                        source: idSource,
+                        isStreaming: true,
+                        isLastStableBlock: index == lastIndex
                     ),
-                    block: block
+                    block: block,
+                    isLastStableBlock: index == lastIndex
                 )
             }
         ) { item in
             MarkdownBlockView(
                 block: item.block,
                 messageID: messageID,
-                source: source,
-                isStreaming: true
+                source: idSource,
+                isStreaming: true,
+                isLastStableBlock: item.isLastStableBlock
             )
         }
         if !split.tail.isEmpty {
@@ -107,6 +112,7 @@ struct MarkdownStreamingView: View {
 private struct IdentifiedMarkdownBlock: Identifiable {
     let id: MarkdownBlockID
     let block: MarkdownBlock
+    let isLastStableBlock: Bool
 }
 
 /// Splits a parsed document into finalized blocks plus a mutable tail string.
@@ -149,16 +155,21 @@ enum StreamingMarkdownSplit {
 struct MarkdownBlockView: View {
     let block: MarkdownBlock
     var messageID: UUID? = nil
-    /// Normalized source for provisional ID computation (K13).
+    /// Parse-basis source for provisional ID computation (K13) — must match
+    /// the document that produced `block.range` (`document.source`).
     var source: String = ""
     var isStreaming: Bool = false
+    /// When streaming, mark the last stable block provisional for ForEach/AX
+    /// identity (independent of open-fence UI chrome).
+    var isLastStableBlock: Bool = false
 
     var body: some View {
         let blockID = MarkdownBlockID.id(
             messageID: messageID,
             block: block,
             source: source,
-            isStreaming: isStreaming
+            isStreaming: isStreaming,
+            isLastStableBlock: isLastStableBlock
         )
         switch block {
         case .prose(let s, _):
@@ -172,11 +183,14 @@ struct MarkdownBlockView: View {
                 accessibilityIdentifier: blockID.accessibilityIdentifier
             )
         case .code(let lang, let body, _, let isClosed):
+            // Badge reflects open-fence body only — not terminal-growing ID
+            // provisionality (a closed fence can still be last-stable while
+            // the message streams).
             CodeBlockView(
                 language: lang,
                 code: body,
                 copyButtonAccessibilityIdentifier: blockID.copyCodeAccessibilityIdentifier,
-                isProvisional: !isClosed || blockID.isProvisional
+                isProvisional: !isClosed
             )
         case .fallback(let s, _):
             MarkdownProseView(text: s)
