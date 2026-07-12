@@ -205,6 +205,11 @@ final class ChatViewModel {
         }
         messages[index] = message
         Database.shared.upsertMessage(message)
+        // Warm parse cache so the first completed-message paint is a hit.
+        MarkdownParserSupport.warmRenderCache(
+            source: message.content,
+            messageID: message.id
+        )
     }
 
     private weak var app: AppState?
@@ -656,6 +661,14 @@ final class ChatViewModel {
             for message in imported.messages {
                 Database.shared.upsertMessage(message)
             }
+        }
+        // Prefetch Markdown parses for assistant (and any GFM) bodies so the
+        // first bubble evaluation after import does not cold-parse on main.
+        for message in imported.messages where !message.content.isEmpty {
+            MarkdownParserSupport.warmRenderCache(
+                source: message.content,
+                messageID: message.id
+            )
         }
         reload()
         selectSession(imported.session.id)
@@ -1455,6 +1468,10 @@ final class ChatViewModel {
             messages[i].isStreaming = false
             messages[i].generationState = .complete
             Database.shared.upsertMessage(messages[i])
+            MarkdownParserSupport.warmRenderCache(
+                source: messages[i].content,
+                messageID: messages[i].id
+            )
         }
     }
 
@@ -1470,6 +1487,10 @@ final class ChatViewModel {
             messages[i].isStreaming = false
             messages[i].generationState = .failed
             Database.shared.upsertMessage(messages[i])
+            MarkdownParserSupport.warmRenderCache(
+                source: messages[i].content,
+                messageID: messages[i].id
+            )
         }
         // Audit 2026-04-16 UX: was "Engine not yet wired: …" — leftover
         // scaffold string visible to end users on any stream failure.
