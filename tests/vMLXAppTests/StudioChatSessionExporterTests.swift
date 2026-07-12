@@ -33,7 +33,12 @@ final class StudioChatSessionExporterTests: XCTestCase {
             modelName: "Qwen3-0.6B-8bit",
             turns: [
                 ChatTurn(role: .user, content: "<|user|>Say pong", createdAt: created),
-                ChatTurn(role: .assistant, content: "<|assistant|>pong<|im_end|>", createdAt: updated),
+                ChatTurn(
+                    role: .assistant,
+                    content: "<|assistant|>pong<|im_end|>",
+                    createdAt: updated,
+                    streamState: .complete
+                ),
             ],
             createdAt: created,
             updatedAt: updated,
@@ -51,6 +56,7 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertTrue(markdown.contains("## User"))
         XCTAssertTrue(markdown.contains("Say pong"))
         XCTAssertTrue(markdown.contains("## Assistant"))
+        XCTAssertTrue(markdown.contains("_Generation: complete_"))
         XCTAssertTrue(markdown.contains("pong"))
         XCTAssertFalse(markdown.contains("<|assistant|>"))
         XCTAssertFalse(markdown.contains("<|im_end|>"))
@@ -138,6 +144,36 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertTrue(summary.contains("## Latest Response"))
         XCTAssertTrue(summary.contains("## Purpose"))
         XCTAssertTrue(summary.contains("Write python"))
+    }
+
+    func testSummaryExportFencesMultilinePlainBodiesWithoutBackticks() {
+        let response = """
+        # Not a summary heading
+        ---
+        second line
+        """
+        let session = StudioChatSession(
+            title: "Multiline summary",
+            modelName: "Smoke Model",
+            turns: [
+                ChatTurn(role: .user, content: "Explain"),
+                ChatTurn(role: .assistant, content: response),
+            ]
+        )
+
+        let summary = StudioChatSessionExporter.summaryMarkdown(for: session)
+
+        // Multi-line plain text is fenced so # / --- cannot break section structure.
+        XCTAssertTrue(summary.contains("```text"))
+        XCTAssertTrue(summary.contains("# Not a summary heading"))
+        XCTAssertTrue(summary.contains("---"))
+        XCTAssertTrue(summary.contains("second line"))
+        // Single-line purpose stays unfenced for readability.
+        let purposeRange = try! XCTUnwrap(
+            summary.range(of: "## Purpose\n\n")
+        )
+        let afterPurpose = summary[purposeRange.upperBound...]
+        XCTAssertTrue(afterPurpose.hasPrefix("Explain\n"))
     }
 
     func testJSONExportWrapsSessionWithSchemaAndExportTimestamp() throws {
@@ -295,7 +331,10 @@ final class StudioChatSessionExporterTests: XCTestCase {
             modelName: "Local-Model",
             turns: [
                 ChatTurn(id: turnID, role: .user, content: "<|user|>Hi", createdAt: created),
+                ChatTurn(role: .assistant, content: "Done", streamState: .complete),
                 ChatTurn(role: .assistant, content: "Hello", streamState: .failed),
+                ChatTurn(role: .assistant, content: "Stopped mid-way", streamState: .cancelled),
+                ChatTurn(role: .assistant, content: "Still open", streamState: .streaming),
             ],
             createdAt: created,
             isPinned: true
@@ -308,12 +347,17 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertEqual(chat.title, "Bridge")
         XCTAssertEqual(chat.modelName, "Local-Model")
         XCTAssertTrue(chat.isPinned)
-        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages.count, 5)
         XCTAssertEqual(messages[0].id, turnID)
         XCTAssertEqual(messages[0].role, .user)
         XCTAssertEqual(messages[0].content, "Hi")
         XCTAssertEqual(messages[0].requestContext, "")
+        // User turns never carry generationState (assistant-terminal field).
+        XCTAssertNil(messages[0].generationState)
         XCTAssertEqual(messages[1].role, .assistant)
-        XCTAssertEqual(messages[1].generationState, .failed)
+        XCTAssertEqual(messages[1].generationState, .complete) // production parity
+        XCTAssertEqual(messages[2].generationState, .failed)
+        XCTAssertEqual(messages[3].generationState, .stopped)
+        XCTAssertNil(messages[4].generationState) // streaming omitted
     }
 }

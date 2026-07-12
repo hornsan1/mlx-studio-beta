@@ -42,7 +42,10 @@ enum StudioChatExportBridge {
                 content: StudioChatText.cleanForDisplay(turn.content),
                 requestContext: "",
                 createdAt: turn.createdAt,
-                generationState: generationState(from: turn.streamState)
+                // generationState is an assistant-terminal outcome in production chat.
+                generationState: turn.role == .assistant
+                    ? generationState(from: turn.streamState)
+                    : nil
             )
         }
     }
@@ -63,11 +66,14 @@ enum StudioChatExportBridge {
         }
     }
 
-    /// Map Studio stream state → generation state for export.
-    /// `.streaming` is not expected in durable Library rows and is omitted.
+    /// Map Studio stream state → production generation state for export.
+    /// Matches durable chat: complete/failed/stopped; streaming is omitted
+    /// (Library history converts open streams to cancelled on save).
     private static func generationState(from streamState: ChatTurn.StreamState) -> ChatGenerationState? {
         switch streamState {
-        case .complete, .streaming:
+        case .complete:
+            return .complete
+        case .streaming:
             return nil
         case .failed:
             return .failed
@@ -120,13 +126,19 @@ enum StudioChatSessionExporter {
 
     /// Library Markdown export: bridges to production `ChatExporter` transcript
     /// (dynamic fences for reasoning/tool bodies; non-lossless header).
+    ///
+    /// **Format note:** uses the ChatExporter non-lossless shape (Created/Model/
+    /// Messages). Legacy Library-only fields (Updated, Pinned, ISO8601+fractional
+    /// timestamps, `"Unknown"` model fallback) are intentionally dropped; prefer
+    /// Studio JSON (`schemaVersion: 1`) for machine-readable metadata.
     static func markdown(for session: StudioChatSession) -> String {
         StudioChatExportBridge.markdownTranscript(for: session)
     }
 
     /// Studio-specific Purpose / Latest Response / Handoff summary.
-    /// Multi-line / fenced model text is embedded via `ChatExporter.fenced`
-    /// so triple-backticks inside content cannot break the summary.
+    /// Multi-line and backtick-containing model text is embedded via
+    /// `ChatExporter.fenced` so headings/`---`/triple-backticks cannot break
+    /// the summary structure.
     static func summaryMarkdown(
         for session: StudioChatSession,
         exportedAt: Date = Date()
@@ -210,10 +222,12 @@ enum StudioChatSessionExporter {
         return cleaned.isEmpty ? "MLX Studio Chat" : cleaned
     }
 
-    /// Embed model text into summary MD. Bodies with backticks use
-    /// `ChatExporter.fenced` so nested ``` cannot close the fence early.
+    /// Embed model text into summary MD. Multi-line bodies and any text with
+    /// backticks are fenced via `ChatExporter.fenced` so nested ``` / headings /
+    /// horizontal rules cannot disturb Purpose / Latest Response structure.
+    /// Single-line plain placeholders stay unfenced for readability.
     private static func embedBody(_ body: String) -> String {
-        if body.contains("`") {
+        if body.contains("`") || body.contains("\n") {
             return ChatExporter.fenced("text", body).trimmingCharacters(in: .newlines)
         }
         return body
