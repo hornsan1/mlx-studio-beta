@@ -140,4 +140,75 @@ final class MarkdownViewTests: XCTestCase {
         )
         XCTAssertEqual(rows.count, 120)
     }
+
+    // MARK: - Table / heading accessibility (PR-8)
+
+    func testTableAccessibilitySummaryAndCellLabels() {
+        XCTAssertEqual(
+            MarkdownTableBlockView.tableAccessibilitySummary(columnCount: 2, rowCount: 3),
+            "Markdown table with 2 columns and 3 rows"
+        )
+
+        XCTAssertEqual(
+            MarkdownTableBlockView.cellAccessibilityLabel(
+                text: "Name",
+                isHeader: true,
+                columnHeader: nil,
+                rowNumber: nil,
+                columnNumber: 1
+            ),
+            "Column 1, Name"
+        )
+
+        XCTAssertEqual(
+            MarkdownTableBlockView.cellAccessibilityLabel(
+                text: "Ada",
+                isHeader: false,
+                columnHeader: "Name",
+                rowNumber: 1,
+                columnNumber: 1
+            ),
+            "Name, Ada, row 1"
+        )
+
+        // Inline markers stripped for VoiceOver.
+        XCTAssertEqual(
+            MarkdownTableBlockView.cellAccessibilityLabel(
+                text: "**bold**",
+                isHeader: false,
+                columnHeader: "`col`",
+                rowNumber: 2,
+                columnNumber: 2
+            ),
+            "col, bold, row 2"
+        )
+
+        // Empty cells remain speakable.
+        XCTAssertEqual(
+            MarkdownTableBlockView.cellAccessibilityLabel(
+                text: "",
+                isHeader: false,
+                columnHeader: "Notes",
+                rowNumber: 3,
+                columnNumber: 3
+            ),
+            "Notes, empty, row 3"
+        )
+    }
+
+    func testTableRowAccessibilityLabelAndSparseCells() {
+        let headers = ["Check", "Result"]
+        let row = ["Table"] // sparse — missing second cell
+        XCTAssertEqual(
+            MarkdownTableBlockView.rowAccessibilityLabel(
+                headers: headers,
+                row: row,
+                rowNumber: 1
+            ),
+            "Row 1: Check Table, Result empty"
+        )
+        XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 0), "Table")
+        XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 1), "")
+        XCTAssertEqual(MarkdownTableBlockView.cellText(row: row, columnIndex: 5), "")
+    }
 }

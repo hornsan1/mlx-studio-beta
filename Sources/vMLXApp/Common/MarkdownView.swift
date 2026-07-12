@@ -170,32 +170,106 @@ struct MarkdownTableBlockView: View {
         return Array(rows.prefix(collapseRowThreshold))
     }
 
+    /// Summary label for the table container (full row count, even when collapsed).
+    static func tableAccessibilitySummary(columnCount: Int, rowCount: Int) -> String {
+        "Markdown table with \(columnCount) columns and \(rowCount) rows"
+    }
+
+    /// VoiceOver label for one cell: column header + value + row index where practical.
+    static func cellAccessibilityLabel(
+        text: String,
+        isHeader: Bool,
+        columnHeader: String?,
+        rowNumber: Int?,
+        columnNumber: Int
+    ) -> String {
+        let value = MarkdownPlainText.stripInlineMarkers(text)
+        let valuePart = value.isEmpty ? "empty" : value
+        if isHeader {
+            return "Column \(columnNumber), \(valuePart)"
+        }
+        let headerRaw = columnHeader.map { MarkdownPlainText.stripInlineMarkers($0) } ?? ""
+        let headerPart = headerRaw.isEmpty ? "Column \(columnNumber)" : headerRaw
+        if let rowNumber {
+            return "\(headerPart), \(valuePart), row \(rowNumber)"
+        }
+        return "\(headerPart), \(valuePart)"
+    }
+
+    /// Combined row label for rotor / combined-row navigation.
+    static func rowAccessibilityLabel(
+        headers: [String],
+        row: [String],
+        rowNumber: Int
+    ) -> String {
+        var parts: [String] = []
+        for index in headers.indices {
+            let header = MarkdownPlainText.stripInlineMarkers(headers[index])
+            let cell = index < row.count
+                ? MarkdownPlainText.stripInlineMarkers(row[index])
+                : ""
+            let valuePart = cell.isEmpty ? "empty" : cell
+            if header.isEmpty {
+                parts.append(valuePart)
+            } else {
+                parts.append("\(header) \(valuePart)")
+            }
+        }
+        let body = parts.isEmpty ? "empty" : parts.joined(separator: ", ")
+        return "Row \(rowNumber): \(body)"
+    }
+
+    /// Safe cell text for sparse rows shorter than the header width.
+    static func cellText(row: [String], columnIndex: Int) -> String {
+        columnIndex < row.count ? row[columnIndex] : ""
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             ScrollView(.horizontal, showsIndicators: false) {
                 Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                    // Header row — cells expose column labels + isHeader trait.
                     GridRow {
                         ForEach(headers.indices, id: \.self) { index in
                             MarkdownTableCell(
                                 text: headers[index],
-                                alignment: alignments[index],
-                                isHeader: true
+                                alignment: alignment(at: index),
+                                isHeader: true,
+                                columnHeader: nil,
+                                rowNumber: nil,
+                                columnNumber: index + 1
                             )
                         }
                     }
+
                     ForEach(visibleRows.indices, id: \.self) { rowIndex in
+                        let row = visibleRows[rowIndex]
+                        // Cell labels carry column header + row index (GridRow must stay a bare Grid child).
                         GridRow {
                             ForEach(headers.indices, id: \.self) { columnIndex in
                                 MarkdownTableCell(
-                                    text: visibleRows[rowIndex][columnIndex],
-                                    alignment: alignments[columnIndex],
-                                    isHeader: false
+                                    text: Self.cellText(row: row, columnIndex: columnIndex),
+                                    alignment: alignment(at: columnIndex),
+                                    isHeader: false,
+                                    columnHeader: headers[columnIndex],
+                                    rowNumber: rowIndex + 1,
+                                    columnNumber: columnIndex + 1
                                 )
                             }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            Self.rowAccessibilityLabel(
+                                headers: headers,
+                                row: row,
+                                rowNumber: rowIndex + 1
+                            )
+                        )
                     }
                 }
                 .fixedSize(horizontal: false, vertical: true)
+                // Prefer contained children so VoiceOver can move header/rows/cells.
+                .accessibilityElement(children: .contain)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -231,14 +305,22 @@ struct MarkdownTableBlockView: View {
                     Text(copiedLabel)
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.success)
+                        .accessibilityHidden(true)
                 }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(accessibilityIdentifier)
         .accessibilityLabel(
-            "Markdown table with \(headers.count) columns and \(rows.count) rows"
+            Self.tableAccessibilitySummary(
+                columnCount: headers.count,
+                rowCount: rows.count
+            )
         )
+    }
+
+    private func alignment(at index: Int) -> MarkdownTableAlignment {
+        index < alignments.count ? alignments[index] : .leading
     }
 
     /// Always copies the full table (headers + all rows), even when collapsed.
@@ -280,6 +362,12 @@ private struct MarkdownTableCell: View {
     let text: String
     let alignment: MarkdownTableAlignment
     let isHeader: Bool
+    /// Column header text for body-cell VoiceOver labels (nil on header cells).
+    var columnHeader: String? = nil
+    /// 1-based row number for body cells; nil for header row.
+    var rowNumber: Int? = nil
+    /// 1-based column number.
+    var columnNumber: Int = 1
 
     private var frameAlignment: Alignment {
         switch alignment {
@@ -297,6 +385,16 @@ private struct MarkdownTableCell: View {
         }
     }
 
+    private var accessibilityLabel: String {
+        MarkdownTableBlockView.cellAccessibilityLabel(
+            text: text,
+            isHeader: isHeader,
+            columnHeader: columnHeader,
+            rowNumber: rowNumber,
+            columnNumber: columnNumber
+        )
+    }
+
     var body: some View {
         Group {
             if let attributed = MarkdownAttributed.inline(text) {
@@ -306,8 +404,10 @@ private struct MarkdownTableCell: View {
                 Text(text)
             }
         }
+        // Theme body scales when Dynamic Type / text-size preferences change via Theme tokens.
         .font(Theme.Typography.body)
         .fontWeight(isHeader ? .semibold : .regular)
+        // Semantic Theme colors (high-contrast dynamic provider aware).
         .foregroundStyle(Theme.Colors.textHigh)
         .textSelection(.enabled)
         .multilineTextAlignment(textAlignment)
@@ -319,6 +419,8 @@ private struct MarkdownTableCell: View {
             Rectangle()
                 .stroke(Theme.Colors.border, lineWidth: 0.5)
         )
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(isHeader ? .isHeader : [])
     }
 }
 
@@ -510,21 +612,22 @@ struct CodeBlockView: View {
 
     @ViewBuilder
     private var codeBody: some View {
+        // Prefer Theme mono token (semantic text/colors) over hardcoded system sizes.
         if showLineNumbers {
             HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                 Text(lineNumberGutter)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(Theme.Typography.mono)
                     .foregroundStyle(Theme.Colors.textLow)
                     .multilineTextAlignment(.trailing)
                     .accessibilityHidden(true)
                 Text(displayCode)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(Theme.Typography.mono)
                     .foregroundStyle(Theme.Colors.textHigh)
                     .textSelection(.enabled)
             }
         } else {
             Text(displayCode)
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .font(Theme.Typography.mono)
                 .foregroundStyle(Theme.Colors.textHigh)
                 .textSelection(.enabled)
         }

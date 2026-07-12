@@ -57,26 +57,28 @@ public enum Theme {
     }
 
     // MARK: Typography
+    /// Text styles (not fixed point sizes) so Dynamic Type / larger text preferences scale.
+    /// Visual density stays chat-oriented via compact style choices (body/callout/caption).
     public enum Typography {
-        public static let display  = Font.system(size: 30, weight: .semibold, design: .default)
-        public static let title    = Font.system(size: 18, weight: .semibold, design: .default)
-        public static let body     = Font.system(size: 13, weight: .regular, design: .default)
-        public static let bodyHi   = Font.system(size: 13, weight: .medium,  design: .default)
-        public static let caption  = Font.system(size: 11, weight: .regular, design: .default)
-        public static let captionHi = Font.system(size: 11, weight: .medium, design: .default)
-        public static let mono     = Font.system(size: 12, weight: .regular, design: .monospaced)
-        public static let monoCaption = Font.system(size: 11, weight: .regular, design: .monospaced)
+        public static let display  = Font.system(.largeTitle, design: .default).weight(.semibold)
+        public static let title    = Font.system(.title3, design: .default).weight(.semibold)
+        public static let body     = Font.system(.body, design: .default)
+        public static let bodyHi   = Font.system(.body, design: .default).weight(.medium)
+        public static let caption  = Font.system(.caption, design: .default)
+        public static let captionHi = Font.system(.caption, design: .default).weight(.medium)
+        public static let mono     = Font.system(.body, design: .monospaced)
+        public static let monoCaption = Font.system(.caption, design: .monospaced)
 
         /// Hierarchy fonts for ATX Markdown headings (`#`…`######`).
-        /// Sized relative to chat body (13pt) so messages stay compact.
+        /// Text-style based so VoiceOver Dynamic Type scales with the rest of the UI.
         public static func markdownHeading(level: Int) -> Font {
             switch max(1, min(level, 6)) {
-            case 1: return .system(size: 22, weight: .semibold, design: .default)
-            case 2: return .system(size: 18, weight: .semibold, design: .default)
-            case 3: return .system(size: 15, weight: .semibold, design: .default)
-            case 4: return .system(size: 13, weight: .semibold, design: .default)
-            case 5: return .system(size: 13, weight: .medium, design: .default)
-            default: return .system(size: 12, weight: .medium, design: .default)
+            case 1: return .system(.title2, design: .default).weight(.semibold)
+            case 2: return .system(.title3, design: .default).weight(.semibold)
+            case 3: return .system(.headline, design: .default)
+            case 4: return .system(.body, design: .default).weight(.semibold)
+            case 5: return .system(.callout, design: .default).weight(.medium)
+            default: return .system(.caption, design: .default).weight(.medium)
             }
         }
     }

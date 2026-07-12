@@ -47,11 +47,18 @@ struct MarkdownHeadingView: View {
         }
     }
 
+    private var plainLabel: String {
+        MarkdownPlainText.stripInlineMarkers(text)
+    }
+
     var body: some View {
         MarkdownInlineBody(
             text: text,
             font: Theme.Typography.markdownHeading(level: clampedLevel)
         )
+        // Single VoiceOver element with header trait + heading level (rotor).
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(plainLabel)
         .accessibilityAddTraits(.isHeader)
         .accessibilityHeading(headingLevel)
     }
@@ -120,7 +127,8 @@ struct MarkdownTaskItemView: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
             Image(systemName: checked ? "checkmark.square.fill" : "square")
-                .font(.system(size: 13))
+                // Theme body tracks Dynamic Type; avoid hardcoded point sizes.
+                .font(Theme.Typography.body)
                 .foregroundStyle(checked ? Theme.Colors.accent : Theme.Colors.textMid)
                 .accessibilityHidden(true)
             MarkdownInlineBody(
