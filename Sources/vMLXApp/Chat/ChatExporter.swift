@@ -90,6 +90,8 @@ enum ChatExporter {
     }
 
     /// Fence long enough that embedded backticks cannot close early.
+    /// Shared by production chat export and Studio Library export
+    /// (`StudioChatSessionExporter` / `StudioChatExportBridge` summaries).
     static func fenced(_ language: String, _ body: String) -> String {
         var ticks = 3
         while body.contains(String(repeating: "`", count: ticks)) {

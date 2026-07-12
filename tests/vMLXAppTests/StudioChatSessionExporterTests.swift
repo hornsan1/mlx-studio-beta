@@ -43,10 +43,11 @@ final class StudioChatSessionExporterTests: XCTestCase {
         let data = try StudioChatSessionExporter.data(for: session, format: .markdown)
         let markdown = String(decoding: data, as: UTF8.self)
 
+        // Bridged ChatExporter transcript header + cleaned turn bodies.
         XCTAssertTrue(markdown.contains("# Smoke chat session"))
-        XCTAssertTrue(markdown.contains("- Model: Qwen3-0.6B-8bit"))
-        XCTAssertTrue(markdown.contains("- Turns: 2"))
-        XCTAssertTrue(markdown.contains("- Pinned: yes"))
+        XCTAssertTrue(markdown.contains("MLX Studio Markdown transcript"))
+        XCTAssertTrue(markdown.contains("Model: Qwen3-0.6B-8bit"))
+        XCTAssertTrue(markdown.contains("Messages: 2"))
         XCTAssertTrue(markdown.contains("## User"))
         XCTAssertTrue(markdown.contains("Say pong"))
         XCTAssertTrue(markdown.contains("## Assistant"))
@@ -70,10 +71,73 @@ final class StudioChatSessionExporterTests: XCTestCase {
         let markdown = String(decoding: data, as: UTF8.self)
 
         XCTAssertTrue(markdown.contains("## User"))
-        XCTAssertTrue(markdown.contains("## Assistant (Failed)"))
+        XCTAssertTrue(markdown.contains("## Assistant"))
+        XCTAssertTrue(markdown.contains("_Generation: failed_"))
         XCTAssertTrue(markdown.contains("Load failed"))
-        XCTAssertTrue(markdown.contains("## Assistant (Stopped)"))
+        XCTAssertTrue(markdown.contains("_Generation: stopped_"))
         XCTAssertTrue(markdown.contains("Stopped before completion."))
+    }
+
+    func testMarkdownExportSurvivesEmbeddedTripleBackticks() throws {
+        let bodyWithFence = """
+        Here is a sample:
+        ```swift
+        let x = 1
+        ```
+        trailing prose
+        """
+        let session = StudioChatSession(
+            title: "Fence safety",
+            modelName: "Smoke Model",
+            turns: [
+                ChatTurn(role: .user, content: "Show code"),
+                ChatTurn(role: .assistant, content: bodyWithFence),
+            ]
+        )
+
+        let data = try StudioChatSessionExporter.data(for: session, format: .markdown)
+        let markdown = String(decoding: data, as: UTF8.self)
+
+        // Content is preserved intact (ChatExporter dumps body; no fixed outer ``` wrapper).
+        XCTAssertTrue(markdown.contains("```swift"))
+        XCTAssertTrue(markdown.contains("let x = 1"))
+        XCTAssertTrue(markdown.contains("trailing prose"))
+        XCTAssertTrue(markdown.contains("MLX Studio Markdown transcript"))
+
+        // Dynamic fence helper itself upgrades past embedded triple-backticks.
+        let fenced = ChatExporter.fenced("text", bodyWithFence)
+        XCTAssertTrue(fenced.hasPrefix("````"))
+        XCTAssertTrue(fenced.contains("```swift"))
+        XCTAssertTrue(fenced.hasSuffix("````\n") || fenced.contains("\n````\n"))
+    }
+
+    func testSummaryExportUsesDynamicFencesForEmbeddedBackticks() {
+        let response = """
+        Use this snippet:
+        ```python
+        print("hi")
+        ```
+        """
+        let session = StudioChatSession(
+            title: "Summary fence",
+            modelName: "Smoke Model",
+            turns: [
+                ChatTurn(role: .user, content: "Write python"),
+                ChatTurn(role: .assistant, content: response),
+            ]
+        )
+
+        let summary = StudioChatSessionExporter.summaryMarkdown(for: session)
+
+        // Summary embeds Latest Response via ChatExporter.fenced → 4+ ticks.
+        XCTAssertTrue(summary.contains("````text"))
+        XCTAssertTrue(summary.contains("```python"))
+        XCTAssertTrue(summary.contains("print(\"hi\")"))
+        // Closing fence is longer than 3 so the inner ```python fence stays open until close.
+        XCTAssertTrue(summary.contains("````"))
+        XCTAssertTrue(summary.contains("## Latest Response"))
+        XCTAssertTrue(summary.contains("## Purpose"))
+        XCTAssertTrue(summary.contains("Write python"))
     }
 
     func testJSONExportWrapsSessionWithSchemaAndExportTimestamp() throws {
@@ -108,6 +172,7 @@ final class StudioChatSessionExporterTests: XCTestCase {
         let encodedSession = try XCTUnwrap(object["session"] as? [String: Any])
         let turns = try XCTUnwrap(encodedSession["turns"] as? [[String: Any]])
 
+        // Studio JSON remains schemaVersion 1 (not ChatExporter v4).
         XCTAssertEqual(object["schemaVersion"] as? Int, 1)
         XCTAssertEqual(exportedDate, exportedAt)
         XCTAssertEqual(encodedSession["id"] as? String, sessionID.uuidString)
@@ -214,8 +279,41 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertEqual(jsonURL.lastPathComponent, "Library export session.json")
         XCTAssertTrue(markdown.contains("# Library export session"))
         XCTAssertTrue(markdown.contains("Export this answer"))
+        XCTAssertTrue(markdown.contains("MLX Studio Markdown transcript"))
         XCTAssertTrue(json.contains("\"schemaVersion\" : 1"))
         XCTAssertTrue(json.contains("\"title\" : \"Library export session\""))
         XCTAssertTrue(json.contains("\"exportedAt\""))
+    }
+
+    func testBridgeMapsStudioSessionToChatTypes() {
+        let sessionID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let turnID = UUID(uuidString: "ffffffff-0000-1111-2222-333333333333")!
+        let created = Date(timeIntervalSince1970: 1_000)
+        let session = StudioChatSession(
+            id: sessionID,
+            title: "Bridge",
+            modelName: "Local-Model",
+            turns: [
+                ChatTurn(id: turnID, role: .user, content: "<|user|>Hi", createdAt: created),
+                ChatTurn(role: .assistant, content: "Hello", streamState: .failed),
+            ],
+            createdAt: created,
+            isPinned: true
+        )
+
+        let chat = StudioChatExportBridge.chatSession(from: session)
+        let messages = StudioChatExportBridge.messages(from: session)
+
+        XCTAssertEqual(chat.id, sessionID)
+        XCTAssertEqual(chat.title, "Bridge")
+        XCTAssertEqual(chat.modelName, "Local-Model")
+        XCTAssertTrue(chat.isPinned)
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0].id, turnID)
+        XCTAssertEqual(messages[0].role, .user)
+        XCTAssertEqual(messages[0].content, "Hi")
+        XCTAssertEqual(messages[0].requestContext, "")
+        XCTAssertEqual(messages[1].role, .assistant)
+        XCTAssertEqual(messages[1].generationState, .failed)
     }
 }
