@@ -90,12 +90,31 @@ struct MarkdownView: View {
 
     /// Compatibility parse used by unit tests. Delegates to
     /// `LightweightMarkdownParser` so grammar stays single-sourced.
+    ///
+    /// Structural blocks (heading/list/task/quote/break) map to `.prose` with
+    /// a plain-source reconstruction so legacy Segment stays three-case.
     static func parse(_ input: String) -> [Segment] {
         let document = LightweightMarkdownParser.shared.parse(input)
         return document.blocks.map { block in
             switch block {
             case .prose(let text, _):
                 return .prose(text)
+            case .heading(let level, let text, _):
+                return .prose(String(repeating: "#", count: level) + " " + text)
+            case .listItem(let ordered, let index, let indentLevel, let text, _):
+                let indent = String(repeating: "  ", count: indentLevel)
+                if ordered {
+                    return .prose(indent + "\(index ?? 1). " + text)
+                }
+                return .prose(indent + "- " + text)
+            case .taskItem(let checked, let indentLevel, let text, _):
+                let indent = String(repeating: "  ", count: indentLevel)
+                let box = checked ? "[x]" : "[ ]"
+                return .prose(indent + "- \(box) " + text)
+            case .blockquote(let text, _, _):
+                return .prose(text)
+            case .thematicBreak:
+                return .prose("---")
             case .table(let headers, let alignments, let rows, _):
                 return .table(
                     headers: headers,

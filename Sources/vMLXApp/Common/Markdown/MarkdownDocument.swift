@@ -19,6 +19,11 @@ struct MarkdownSourceRange: Hashable, Sendable, Codable {
 
 enum MarkdownBlockKind: String, Hashable, Sendable, Codable {
     case prose
+    case heading
+    case listItem
+    case taskItem
+    case blockquote
+    case thematicBreak
     case table
     case code
     case fallback
@@ -167,6 +172,30 @@ enum MarkdownTableAlignment: String, Hashable, Sendable, Codable {
 
 enum MarkdownBlock: Hashable, Sendable {
     case prose(text: String, range: MarkdownSourceRange)
+    /// ATX heading (`#`…`######`). `level` is clamped to 1…6.
+    case heading(level: Int, text: String, range: MarkdownSourceRange)
+    /// Single list item. Nested lists are successive items with higher `indentLevel`.
+    case listItem(
+        ordered: Bool,
+        /// 1-based when ordered; `nil` when unordered.
+        index: Int?,
+        /// 0…5 (depth cap 6, K12).
+        indentLevel: Int,
+        /// Item body Markdown (inline only).
+        text: String,
+        range: MarkdownSourceRange
+    )
+    /// Display-only task row (`- [ ]` / `- [x]`); never mutates stored Markdown.
+    case taskItem(
+        checked: Bool,
+        indentLevel: Int,
+        text: String,
+        range: MarkdownSourceRange
+    )
+    /// Contiguous blockquote run (flat; no nested child blocks).
+    /// `quoteDepth` is the minimum leading `>` count in the run.
+    case blockquote(text: String, quoteDepth: Int, range: MarkdownSourceRange)
+    case thematicBreak(range: MarkdownSourceRange)
     case table(
         headers: [String],
         alignments: [MarkdownTableAlignment],
@@ -185,6 +214,11 @@ enum MarkdownBlock: Hashable, Sendable {
     var kind: MarkdownBlockKind {
         switch self {
         case .prose: return .prose
+        case .heading: return .heading
+        case .listItem: return .listItem
+        case .taskItem: return .taskItem
+        case .blockquote: return .blockquote
+        case .thematicBreak: return .thematicBreak
         case .table: return .table
         case .code: return .code
         case .fallback: return .fallback
@@ -194,6 +228,11 @@ enum MarkdownBlock: Hashable, Sendable {
     var range: MarkdownSourceRange {
         switch self {
         case .prose(_, let range),
+             .heading(_, _, let range),
+             .listItem(_, _, _, _, let range),
+             .taskItem(_, _, _, let range),
+             .blockquote(_, _, let range),
+             .thematicBreak(let range),
              .table(_, _, _, let range),
              .code(_, _, let range, _),
              .fallback(_, let range):

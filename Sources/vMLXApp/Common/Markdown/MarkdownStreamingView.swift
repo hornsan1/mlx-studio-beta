@@ -163,6 +163,28 @@ struct MarkdownBlockView: View {
     /// identity (independent of open-fence UI chrome).
     var isLastStableBlock: Bool = false
 
+    /// Temporary plain-text reconstruction until PR2b native list chrome.
+    private static func listItemPlainText(
+        ordered: Bool,
+        index: Int?,
+        indentLevel: Int,
+        text: String
+    ) -> String {
+        let indent = String(repeating: "  ", count: indentLevel)
+        let marker = ordered ? "\(index ?? 1). " : "- "
+        return indent + marker + text
+    }
+
+    private static func taskItemPlainText(
+        checked: Bool,
+        indentLevel: Int,
+        text: String
+    ) -> String {
+        let indent = String(repeating: "  ", count: indentLevel)
+        let box = checked ? "[x] " : "[ ] "
+        return indent + "- " + box + text
+    }
+
     var body: some View {
         let blockID = MarkdownBlockID.id(
             messageID: messageID,
@@ -174,6 +196,37 @@ struct MarkdownBlockView: View {
         switch block {
         case .prose(let s, _):
             MarkdownProseView(text: s)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .heading(let level, let text, _):
+            // Temporary render until PR2b native heading chrome.
+            MarkdownProseView(text: String(repeating: "#", count: level) + " " + text)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .listItem(let ordered, let index, let indentLevel, let text, _):
+            // Temporary render: indent + marker + body via prose.
+            MarkdownProseView(
+                text: Self.listItemPlainText(
+                    ordered: ordered,
+                    index: index,
+                    indentLevel: indentLevel,
+                    text: text
+                )
+            )
+            .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .taskItem(let checked, let indentLevel, let text, _):
+            MarkdownProseView(
+                text: Self.taskItemPlainText(
+                    checked: checked,
+                    indentLevel: indentLevel,
+                    text: text
+                )
+            )
+            .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .blockquote(let text, _, _):
+            // Temporary render until PR2b blockquote bar chrome.
+            MarkdownProseView(text: text)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .thematicBreak:
+            Divider()
                 .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .table(let headers, let alignments, let rows, _):
             MarkdownTableBlockView(

@@ -33,7 +33,7 @@ final class MarkdownDocumentTests: XCTestCase {
                 table = (headers, alignments, rows)
             case let .code(language, body, _, isClosed):
                 code = (language, body, isClosed)
-            case .prose, .fallback:
+            case .prose, .heading, .listItem, .taskItem, .blockquote, .thematicBreak, .fallback:
                 break
             }
         }
@@ -157,7 +157,111 @@ final class MarkdownDocumentTests: XCTestCase {
             if let literal = expect["containsLiteral"] as? String {
                 XCTAssertTrue(document.source.contains(literal), "case \(id) containsLiteral")
             }
+            if let expectedListItems = expect["listItems"] as? [[String: Any]] {
+                let actual = document.blocks.compactMap { block -> [String: Any]? in
+                    guard case let .listItem(ordered, index, indentLevel, text, _) = block else {
+                        return nil
+                    }
+                    var dict: [String: Any] = [
+                        "ordered": ordered,
+                        "indentLevel": indentLevel,
+                        "text": text
+                    ]
+                    if let index { dict["index"] = index }
+                    return dict
+                }
+                XCTAssertEqual(actual.count, expectedListItems.count, "case \(id) listItems count")
+                for (idx, expected) in expectedListItems.enumerated() where idx < actual.count {
+                    let got = actual[idx]
+                    XCTAssertEqual(got["ordered"] as? Bool, expected["ordered"] as? Bool, "case \(id) listItems[\(idx)].ordered")
+                    XCTAssertEqual(got["indentLevel"] as? Int, expected["indentLevel"] as? Int, "case \(id) listItems[\(idx)].indentLevel")
+                    XCTAssertEqual(got["text"] as? String, expected["text"] as? String, "case \(id) listItems[\(idx)].text")
+                    if let expectedIndex = expected["index"] as? Int {
+                        XCTAssertEqual(got["index"] as? Int, expectedIndex, "case \(id) listItems[\(idx)].index")
+                    }
+                }
+            }
+            if let expectedTasks = expect["taskItems"] as? [[String: Any]] {
+                let actual = document.blocks.compactMap { block -> [String: Any]? in
+                    guard case let .taskItem(checked, indentLevel, text, _) = block else {
+                        return nil
+                    }
+                    return [
+                        "checked": checked,
+                        "indentLevel": indentLevel,
+                        "text": text
+                    ]
+                }
+                XCTAssertEqual(actual.count, expectedTasks.count, "case \(id) taskItems count")
+                for (idx, expected) in expectedTasks.enumerated() where idx < actual.count {
+                    let got = actual[idx]
+                    XCTAssertEqual(got["checked"] as? Bool, expected["checked"] as? Bool, "case \(id) taskItems[\(idx)].checked")
+                    XCTAssertEqual(got["indentLevel"] as? Int, expected["indentLevel"] as? Int, "case \(id) taskItems[\(idx)].indentLevel")
+                    XCTAssertEqual(got["text"] as? String, expected["text"] as? String, "case \(id) taskItems[\(idx)].text")
+                }
+            }
+            if let expectedHeadings = expect["headings"] as? [[String: Any]] {
+                let actual = document.blocks.compactMap { block -> [String: Any]? in
+                    guard case let .heading(level, text, _) = block else { return nil }
+                    return ["level": level, "text": text]
+                }
+                XCTAssertEqual(actual.count, expectedHeadings.count, "case \(id) headings count")
+                for (idx, expected) in expectedHeadings.enumerated() where idx < actual.count {
+                    let got = actual[idx]
+                    XCTAssertEqual(got["level"] as? Int, expected["level"] as? Int, "case \(id) headings[\(idx)].level")
+                    XCTAssertEqual(got["text"] as? String, expected["text"] as? String, "case \(id) headings[\(idx)].text")
+                }
+            }
+            if let expectedQuote = expect["blockquote"] as? [String: Any] {
+                guard case let .blockquote(text, quoteDepth, _) = document.blocks.first(where: {
+                    if case .blockquote = $0 { return true }
+                    return false
+                }) else {
+                    XCTFail("case \(id): missing blockquote")
+                    continue
+                }
+                if let depth = expectedQuote["quoteDepth"] as? Int {
+                    XCTAssertEqual(quoteDepth, depth, "case \(id) quoteDepth")
+                }
+                if let expectedText = expectedQuote["text"] as? String {
+                    XCTAssertEqual(text, expectedText, "case \(id) blockquote text")
+                }
+            }
         }
+    }
+
+    func testStructuralListOrderedNestedContinue() {
+        let source = "1. parent a\n   1. nested\n2. parent b"
+        let document = parser.parse(source)
+        XCTAssertEqual(document.blocks.map(\.kind), [.listItem, .listItem, .listItem])
+        guard case let .listItem(o0, i0, l0, t0, _) = document.blocks[0],
+              case let .listItem(o1, i1, l1, t1, _) = document.blocks[1],
+              case let .listItem(o2, i2, l2, t2, _) = document.blocks[2]
+        else {
+            return XCTFail("expected three list items")
+        }
+        XCTAssertTrue(o0 && o1 && o2)
+        XCTAssertEqual(i0, 1)
+        XCTAssertEqual(l0, 0)
+        XCTAssertEqual(t0, "parent a")
+        XCTAssertEqual(i1, 1)
+        XCTAssertEqual(l1, 1)
+        XCTAssertEqual(t1, "nested")
+        XCTAssertEqual(i2, 2)
+        XCTAssertEqual(l2, 0)
+        XCTAssertEqual(t2, "parent b")
+    }
+
+    func testLooseOrderedListDoesNotResetOnBlankLine() {
+        let document = parser.parse("1. a\n\n2. b")
+        XCTAssertEqual(document.blocks.map(\.kind), [.listItem, .listItem])
+        guard case let .listItem(_, i0, _, _, _) = document.blocks[0],
+              case let .listItem(_, i1, _, _, _) = document.blocks[1]
+        else {
+            return XCTFail("expected list items")
+        }
+        XCTAssertEqual(i0, 1)
+        XCTAssertEqual(i1, 2)
     }
 
     private func goldenCorpusURL() -> URL {

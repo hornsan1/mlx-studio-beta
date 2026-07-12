@@ -113,6 +113,9 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         return out
     }
 
+    /// Max list nesting depth (indentLevel 0…5) — K12.
+    private static let maxListIndentLevel = 5
+
     private static func appendProseBlocks(
         _ text: String,
         from start: String.Index,
@@ -120,10 +123,10 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         into output: inout [MarkdownBlock]
     ) {
         guard start < end else { return }
-        let prose = String(text[start..<end])
-        guard !prose.isEmpty else { return }
+        let region = String(text[start..<end])
+        guard !region.isEmpty else { return }
 
-        let lines = prose.components(separatedBy: "\n")
+        let lines = region.components(separatedBy: "\n")
         // Map each line to its absolute start index in `text`.
         var lineStarts: [String.Index] = []
         var cursor = start
@@ -140,6 +143,15 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
         var proseBufferStart: String.Index?
         var proseBufferEnd: String.Index?
         var index = 0
+        // Per-indentLevel ordered counters; 0 means "unset after reset".
+        var orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
+
+        func lineEndIndex(at lineIndex: Int) -> String.Index {
+            if lineIndex + 1 < lines.count {
+                return lineStarts[lineIndex + 1]
+            }
+            return end
+        }
 
         func flushProse() {
             guard let s = proseBufferStart, let e = proseBufferEnd, s < e else {
@@ -155,12 +167,56 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                         range: MarkdownSourceIndex.range(in: text, from: s, to: e)
                     )
                 )
+                // Non-list interruption → reset ordered counters.
+                orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
             }
             proseBufferStart = nil
             proseBufferEnd = nil
         }
 
+        func resetOrderedCounters() {
+            orderedCounters = Array(repeating: 0, count: maxListIndentLevel + 1)
+        }
+
+        func emitStructural(_ block: MarkdownBlock) {
+            flushProse()
+            output.append(block)
+        }
+
+        func nextNonBlankIndex(from lineIndex: Int) -> Int? {
+            var i = lineIndex
+            while i < lines.count {
+                if !lines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+                    return i
+                }
+                i += 1
+            }
+            return nil
+        }
+
         while index < lines.count {
+            let line = lines[index]
+
+            // Blank line: keep ordered counters when the next non-blank line is
+            // still a list/task item (loose lists). Otherwise fold into prose.
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                if let next = nextNonBlankIndex(from: index + 1),
+                   parseListOrTaskLine(lines[next]) != nil
+                {
+                    index += 1
+                    continue
+                }
+                let lineStart = lineStarts[index]
+                let lineEnd = lineEndIndex(at: index)
+                if proseBufferStart == nil {
+                    proseBufferStart = lineStart
+                }
+                proseBufferEnd = lineEnd
+                index += 1
+                continue
+            }
+
+            // 1. GFM table (header + delimiter)
             if index + 1 < lines.count,
                let headers = parseTableRow(lines[index]),
                let alignments = parseTableDelimiter(
@@ -169,11 +225,16 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                )
             {
                 flushProse()
+                resetOrderedCounters()
                 let tableStart = lineStarts[index]
                 index += 2
 
                 var rows: [[String]] = []
                 while index < lines.count, let cells = parseTableRow(lines[index]) {
+                    // Blank lines end the table.
+                    if lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                        break
+                    }
                     rows.append(normalizeTableRow(cells, columnCount: headers.count))
                     index += 1
                 }
@@ -200,13 +261,133 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                 continue
             }
 
-            let lineStart = lineStarts[index]
-            let lineEnd: String.Index
-            if index + 1 < lines.count {
-                lineEnd = lineStarts[index + 1]
-            } else {
-                lineEnd = end
+            // 2. Thematic break
+            if isThematicBreak(line) {
+                let range = MarkdownSourceIndex.range(
+                    in: text,
+                    from: lineStarts[index],
+                    to: lineEndIndex(at: index)
+                )
+                emitStructural(.thematicBreak(range: range))
+                resetOrderedCounters()
+                index += 1
+                continue
             }
+
+            // 3. ATX heading
+            if let heading = parseATXHeading(line) {
+                let range = MarkdownSourceIndex.range(
+                    in: text,
+                    from: lineStarts[index],
+                    to: lineEndIndex(at: index)
+                )
+                emitStructural(
+                    .heading(level: heading.level, text: heading.text, range: range)
+                )
+                resetOrderedCounters()
+                index += 1
+                continue
+            }
+
+            // 4. Blockquote run
+            if blockquoteDepth(line) != nil {
+                flushProse()
+                resetOrderedCounters()
+                let quoteStart = lineStarts[index]
+                var quoteSourceLines: [String] = []
+                var depths: [Int] = []
+                while index < lines.count, let d = blockquoteDepth(lines[index]) {
+                    quoteSourceLines.append(lines[index])
+                    depths.append(d)
+                    index += 1
+                }
+                let minDepth = depths.min() ?? 1
+                // Strip minDepth `>` markers; deeper nesting remains as text prefixes.
+                let bodies = quoteSourceLines.map {
+                    stripBlockquotePrefix($0, depth: minDepth)
+                }
+                let quoteText = bodies.joined(separator: "\n")
+                let quoteEnd: String.Index
+                if index < lines.count {
+                    quoteEnd = lineStarts[index]
+                } else {
+                    quoteEnd = end
+                }
+                output.append(
+                    .blockquote(
+                        text: quoteText,
+                        quoteDepth: minDepth,
+                        range: MarkdownSourceIndex.range(
+                            in: text,
+                            from: quoteStart,
+                            to: quoteEnd
+                        )
+                    )
+                )
+                continue
+            }
+
+            // 5. List / task item
+            if let item = parseListOrTaskLine(line) {
+                flushProse()
+                let range = MarkdownSourceIndex.range(
+                    in: text,
+                    from: lineStarts[index],
+                    to: lineEndIndex(at: index)
+                )
+                let level = item.indentLevel
+                // Child levels restart when returning to a shallower sibling.
+                if level < maxListIndentLevel {
+                    for i in (level + 1)...maxListIndentLevel {
+                        orderedCounters[i] = 0
+                    }
+                }
+
+                switch item.kind {
+                case .task(let checked):
+                    output.append(
+                        .taskItem(
+                            checked: checked,
+                            indentLevel: level,
+                            text: item.text,
+                            range: range
+                        )
+                    )
+                case .unordered:
+                    output.append(
+                        .listItem(
+                            ordered: false,
+                            index: nil,
+                            indentLevel: level,
+                            text: item.text,
+                            range: range
+                        )
+                    )
+                case .ordered(let sourceIndex):
+                    let assigned: Int
+                    if orderedCounters[level] == 0 {
+                        assigned = max(sourceIndex, 1)
+                    } else {
+                        assigned = orderedCounters[level] + 1
+                    }
+                    orderedCounters[level] = assigned
+                    output.append(
+                        .listItem(
+                            ordered: true,
+                            index: assigned,
+                            indentLevel: level,
+                            text: item.text,
+                            range: range
+                        )
+                    )
+                }
+                index += 1
+                continue
+            }
+
+            // 6. Accumulate prose
+            let lineStart = lineStarts[index]
+            let lineEnd = lineEndIndex(at: index)
             if proseBufferStart == nil {
                 proseBufferStart = lineStart
             }
@@ -214,6 +395,229 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
             index += 1
         }
         flushProse()
+    }
+
+    // MARK: - Structural line detectors
+
+    private static func isThematicBreak(_ line: String) -> Bool {
+        // Optional indent (≤3 spaces), then 3+ of -, *, or _ with optional
+        // spaces between — and nothing else. Must not be a list marker line.
+        var s = line
+        var leadingSpaces = 0
+        while s.first == " " && leadingSpaces < 3 {
+            s.removeFirst()
+            leadingSpaces += 1
+        }
+        // Tabs before a break are uncommon; treat as not a thematic break so
+        // tab-indented list markers are preferred.
+        guard let first = s.first, first == "-" || first == "*" || first == "_" else {
+            return false
+        }
+        let marker = first
+        var count = 0
+        for ch in s {
+            if ch == marker {
+                count += 1
+            } else if ch == " " || ch == "\t" {
+                continue
+            } else {
+                return false
+            }
+        }
+        return count >= 3
+    }
+
+    private static func parseATXHeading(_ line: String) -> (level: Int, text: String)? {
+        var s = line
+        // Allow up to 3 spaces of indent (GFM).
+        var leadingSpaces = 0
+        while s.first == " " && leadingSpaces < 3 {
+            s.removeFirst()
+            leadingSpaces += 1
+        }
+        guard s.first == "#" else { return nil }
+        var level = 0
+        while s.first == "#", level < 6 {
+            s.removeFirst()
+            level += 1
+        }
+        // Must be 1…6 hashes followed by whitespace (or end → empty heading).
+        guard level >= 1, level <= 6 else { return nil }
+        if s.isEmpty {
+            return (level, "")
+        }
+        guard s.first == " " || s.first == "\t" else { return nil }
+        while s.first == " " || s.first == "\t" {
+            s.removeFirst()
+        }
+        // Strip optional closing sequence of trailing hashes.
+        var text = String(s)
+        if let hashRange = text.range(of: #"\s+#+\s*$"#, options: .regularExpression) {
+            text = String(text[..<hashRange.lowerBound])
+        }
+        text = text.trimmingCharacters(in: .whitespaces)
+        return (level, text)
+    }
+
+    private static func blockquoteDepth(_ line: String) -> Int? {
+        var s = line
+        // Optional up to 3 leading spaces before first `>`.
+        var leadingSpaces = 0
+        while s.first == " " && leadingSpaces < 3 {
+            s.removeFirst()
+            leadingSpaces += 1
+        }
+        guard s.first == ">" else { return nil }
+        var depth = 0
+        while s.first == ">" {
+            depth += 1
+            s.removeFirst()
+            // Optional single space after each `>` (GFM).
+            if s.first == " " {
+                s.removeFirst()
+            }
+        }
+        return depth > 0 ? depth : nil
+    }
+
+    /// Strip `depth` levels of `>` markers from a blockquote line for body text.
+    private static func stripBlockquotePrefix(_ line: String, depth: Int) -> String {
+        var s = line
+        var leadingSpaces = 0
+        while s.first == " " && leadingSpaces < 3 {
+            s.removeFirst()
+            leadingSpaces += 1
+        }
+        var remaining = depth
+        while remaining > 0, s.first == ">" {
+            s.removeFirst()
+            if s.first == " " {
+                s.removeFirst()
+            }
+            remaining -= 1
+        }
+        return String(s)
+    }
+
+    private enum ListItemKind {
+        case unordered
+        case ordered(sourceIndex: Int)
+        case task(checked: Bool)
+    }
+
+    private struct ParsedListLine {
+        var kind: ListItemKind
+        var indentLevel: Int
+        var text: String
+    }
+
+    private static func parseListOrTaskLine(_ line: String) -> ParsedListLine? {
+        let (indentLevel, rest) = splitListIndent(line)
+        guard !rest.isEmpty else { return nil }
+
+        // Ordered: digits + `.` or `)` + whitespace + content
+        if let ordered = parseOrderedMarker(rest) {
+            return ParsedListLine(
+                kind: .ordered(sourceIndex: ordered.index),
+                indentLevel: indentLevel,
+                text: ordered.text
+            )
+        }
+
+        // Unordered / task: -, *, or + followed by whitespace
+        guard let marker = rest.first,
+              marker == "-" || marker == "*" || marker == "+"
+        else {
+            return nil
+        }
+        var after = rest.dropFirst()
+        guard let sp = after.first, sp == " " || sp == "\t" else { return nil }
+        after = after.dropFirst()
+        // Consume extra spaces after marker.
+        while after.first == " " || after.first == "\t" {
+            after = after.dropFirst()
+        }
+        let content = String(after)
+
+        // Task checkbox: [ ] / [x] / [X]
+        if content.count >= 3,
+           content.first == "[",
+           let closeIdx = content.index(content.startIndex, offsetBy: 2, limitedBy: content.endIndex),
+           content[closeIdx] == "]"
+        {
+            let mid = content[content.index(after: content.startIndex)]
+            if mid == " " || mid == "x" || mid == "X" {
+                var body = content[content.index(after: closeIdx)...]
+                if body.first == " " || body.first == "\t" {
+                    body = body.dropFirst()
+                }
+                while body.first == " " || body.first == "\t" {
+                    body = body.dropFirst()
+                }
+                let checked = (mid == "x" || mid == "X")
+                return ParsedListLine(
+                    kind: .task(checked: checked),
+                    indentLevel: indentLevel,
+                    text: String(body)
+                )
+            }
+        }
+
+        return ParsedListLine(
+            kind: .unordered,
+            indentLevel: indentLevel,
+            text: content
+        )
+    }
+
+    /// 2 spaces or 1 tab → +1 indentLevel; depth capped at `maxListIndentLevel`.
+    /// Odd leftover spaces are absorbed (model-output tolerant) so markers
+    /// still parse after 3-space indents common in LLM output.
+    private static func splitListIndent(_ line: String) -> (level: Int, rest: String) {
+        var level = 0
+        var i = line.startIndex
+        while i < line.endIndex {
+            let ch = line[i]
+            if ch == "\t" {
+                level += 1
+                i = line.index(after: i)
+            } else if ch == " " {
+                var spaces = 0
+                var j = i
+                while j < line.endIndex, line[j] == " " {
+                    spaces += 1
+                    j = line.index(after: j)
+                }
+                level += spaces / 2
+                i = j
+            } else {
+                break
+            }
+        }
+        let capped = min(level, maxListIndentLevel)
+        return (capped, String(line[i...]))
+    }
+
+    private static func parseOrderedMarker(
+        _ rest: String
+    ) -> (index: Int, text: String)? {
+        var i = rest.startIndex
+        var digits = ""
+        while i < rest.endIndex, rest[i].isNumber, digits.count < 9 {
+            digits.append(rest[i])
+            i = rest.index(after: i)
+        }
+        guard !digits.isEmpty, i < rest.endIndex else { return nil }
+        let punct = rest[i]
+        guard punct == "." || punct == ")" else { return nil }
+        i = rest.index(after: i)
+        guard i < rest.endIndex, rest[i] == " " || rest[i] == "\t" else { return nil }
+        i = rest.index(after: i)
+        while i < rest.endIndex, rest[i] == " " || rest[i] == "\t" {
+            i = rest.index(after: i)
+        }
+        guard let value = Int(digits), value >= 0 else { return nil }
+        return (value, String(rest[i...]))
     }
 
     private struct FenceMarker {
