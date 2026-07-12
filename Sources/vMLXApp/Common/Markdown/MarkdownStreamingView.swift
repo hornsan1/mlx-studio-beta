@@ -176,37 +176,28 @@ struct MarkdownBlockView: View {
             MarkdownProseView(text: s)
                 .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .heading(let level, let text, _):
-            // Temporary render until PR2b native heading chrome.
-            MarkdownProseView(
-                text: MarkdownStructuralPlainText.heading(level: level, text: text)
-            )
-            .accessibilityIdentifier(blockID.accessibilityIdentifier)
+            MarkdownHeadingView(level: level, text: text)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .listItem(let ordered, let index, let indentLevel, let text, _):
-            // Temporary render: indent + marker + body via prose.
-            MarkdownProseView(
-                text: MarkdownStructuralPlainText.listItem(
-                    ordered: ordered,
-                    index: index,
-                    indentLevel: indentLevel,
-                    text: text
-                )
+            MarkdownListItemView(
+                ordered: ordered,
+                index: index,
+                indentLevel: indentLevel,
+                text: text
             )
             .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .taskItem(let checked, let indentLevel, let text, _):
-            MarkdownProseView(
-                text: MarkdownStructuralPlainText.taskItem(
-                    checked: checked,
-                    indentLevel: indentLevel,
-                    text: text
-                )
+            MarkdownTaskItemView(
+                checked: checked,
+                indentLevel: indentLevel,
+                text: text
             )
             .accessibilityIdentifier(blockID.accessibilityIdentifier)
-        case .blockquote(let text, _, _):
-            // Temporary render until PR2b blockquote bar chrome.
-            MarkdownProseView(text: MarkdownStructuralPlainText.blockquote(text))
+        case .blockquote(let text, let quoteDepth, _):
+            MarkdownBlockquoteView(text: text, quoteDepth: quoteDepth)
                 .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .thematicBreak:
-            Divider()
+            MarkdownThematicBreakView()
                 .accessibilityIdentifier(blockID.accessibilityIdentifier)
         case .table(let headers, let alignments, let rows, _):
             MarkdownTableBlockView(

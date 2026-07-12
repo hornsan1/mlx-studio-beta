@@ -2,20 +2,27 @@ import Foundation
 
 /// Structure-aware plain-text rendering of a `MarkdownDocument` for copy/paste.
 ///
-/// Phase A covers existing block kinds only (`prose`, `table`, `code`, `fallback`).
-/// Heading / list / quote / task / break rules land in a later phase after the
-/// structural document model expands.
+/// Phase A: `prose`, `table`, `code`, `fallback`.
+/// Phase B: `heading`, `listItem`, `taskItem`, `blockquote`, `thematicBreak`
+/// as a linear walk (no second grammar). List/task runs join with a single
+/// newline; other block boundaries use a blank line.
 enum MarkdownPlainText {
     /// Walk document blocks and emit a plain-text pasteboard payload.
     static func render(_ document: MarkdownDocument) -> String {
         var chunks: [String] = []
+        var previousWasListLike = false
         for block in document.blocks {
             let piece = render(block)
             let trimmed = trimBlockEdges(piece)
             if trimmed.isEmpty { continue }
+            let listLike = isListLike(block)
+            if !chunks.isEmpty {
+                chunks.append(previousWasListLike && listLike ? "\n" : "\n\n")
+            }
             chunks.append(trimmed)
+            previousWasListLike = listLike
         }
-        return chunks.joined(separator: "\n\n")
+        return chunks.joined()
     }
 
     /// Parse `source` with the production lightweight parser, then render.
@@ -25,12 +32,40 @@ enum MarkdownPlainText {
 
     // MARK: - Blocks
 
+    private static func isListLike(_ block: MarkdownBlock) -> Bool {
+        switch block {
+        case .listItem, .taskItem: return true
+        default: return false
+        }
+    }
+
     private static func render(_ block: MarkdownBlock) -> String {
         switch block {
         case let .prose(text, _):
             return stripInlineMarkers(text)
         case let .fallback(text, _):
             return stripInlineMarkers(text)
+        case let .heading(_, text, _):
+            // Plain: heading body only (no ATX hashes). Level is a UI concern.
+            return stripInlineMarkers(text)
+        case let .listItem(ordered, index, indentLevel, text, _):
+            let indent = String(repeating: "  ", count: max(indentLevel, 0))
+            let marker: String
+            if ordered {
+                marker = "\(index ?? 1). "
+            } else {
+                marker = "- "
+            }
+            return indent + marker + stripInlineMarkers(text)
+        case let .taskItem(checked, indentLevel, text, _):
+            let indent = String(repeating: "  ", count: max(indentLevel, 0))
+            let box = checked ? "[x]" : "[ ]"
+            return indent + "- \(box) " + stripInlineMarkers(text)
+        case let .blockquote(text, _, _):
+            // Body text only; leading `>` chrome is a UI concern.
+            return stripInlineMarkers(text)
+        case .thematicBreak:
+            return "---"
         case let .table(headers, _, rows, _):
             // Whole-message plain copy strips cell inline markers so TSV matches
             // the prose surface (per-table “Copy TSV” chrome still uses raw cells).

@@ -66,6 +66,19 @@ public enum Theme {
         public static let captionHi = Font.system(size: 11, weight: .medium, design: .default)
         public static let mono     = Font.system(size: 12, weight: .regular, design: .monospaced)
         public static let monoCaption = Font.system(size: 11, weight: .regular, design: .monospaced)
+
+        /// Hierarchy fonts for ATX Markdown headings (`#`…`######`).
+        /// Sized relative to chat body (13pt) so messages stay compact.
+        public static func markdownHeading(level: Int) -> Font {
+            switch max(1, min(level, 6)) {
+            case 1: return .system(size: 22, weight: .semibold, design: .default)
+            case 2: return .system(size: 18, weight: .semibold, design: .default)
+            case 3: return .system(size: 15, weight: .semibold, design: .default)
+            case 4: return .system(size: 13, weight: .semibold, design: .default)
+            case 5: return .system(size: 13, weight: .medium, design: .default)
+            default: return .system(size: 12, weight: .medium, design: .default)
+            }
+        }
     }
 
     public struct ProNoirBackground: View {

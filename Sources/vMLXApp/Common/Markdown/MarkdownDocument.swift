@@ -288,11 +288,12 @@ struct MarkdownDocument: Hashable, Sendable {
     }
 }
 
-// MARK: - Temporary plain reconstruction (compat Segment + interim views)
+// MARK: - Structural plain reconstruction (compat Segment API)
 
-/// Shared plain-text reconstruction for structural blocks until PR2b ships
-/// native heading/list/task chrome. Used by `MarkdownView.parse` and
-/// `MarkdownBlockView` so marker formatting cannot drift.
+/// Shared plain-source reconstruction for structural blocks.
+/// Used by the legacy `MarkdownView.parse` Segment API so coarse splits
+/// remain stable. Live UI uses native structural views; whole-message
+/// plain copy uses `MarkdownPlainText`.
 enum MarkdownStructuralPlainText {
     static func heading(level: Int, text: String) -> String {
         String(repeating: "#", count: max(level, 1)) + " " + text

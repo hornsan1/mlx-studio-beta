@@ -328,7 +328,8 @@ struct MessageBubble: View {
         #if canImport(AppKit)
         let payload: String
         if plain {
-            // Structure-aware plain text: tables → TSV, code → body, prose stripped.
+            // Structure-aware plain text: tables → TSV, code → body, structural
+            // markers linearized, inline emphasis/links stripped.
             payload = MarkdownPlainText.render(source: message.content)
         } else {
             payload = message.content

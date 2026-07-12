@@ -207,4 +207,89 @@ final class MarkdownPlainTextTests: XCTestCase {
         )
         XCTAssertEqual(MarkdownPlainText.render(document), "x and y")
     }
+
+    // MARK: - Phase B structural blocks
+
+    func testHeadingIsPlainBodyWithoutHashes() {
+        let plain = MarkdownPlainText.render(source: "# Hello **World**\n\n## Sub")
+        XCTAssertEqual(plain, "Hello World\n\nSub")
+        XCTAssertFalse(plain.contains("#"))
+    }
+
+    func testUnorderedListItemsJoinTightly() {
+        let source = #"""
+        - **alpha**
+        - beta
+        - gamma
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "- alpha\n- beta\n- gamma")
+    }
+
+    func testOrderedListShowsIndex() {
+        let source = #"""
+        1. first
+        2. second
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "1. first\n2. second")
+    }
+
+    func testNestedListIndent() {
+        let source = #"""
+        - outer
+          - inner
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "- outer\n  - inner")
+    }
+
+    func testTaskItemsAreDisplayMarkersOnly() {
+        let source = #"""
+        - [x] done **task**
+        - [ ] open
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "- [x] done task\n- [ ] open")
+    }
+
+    func testBlockquoteIsBodyOnly() {
+        let source = #"""
+        > quote **line**
+        > second
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "quote line\nsecond")
+        XCTAssertFalse(plain.contains(">"))
+    }
+
+    func testThematicBreakIsDashes() {
+        let source = "Above\n\n---\n\nBelow"
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(plain, "Above\n\n---\n\nBelow")
+    }
+
+    func testStructuralMixedDocumentWalk() {
+        let source = #"""
+        # Title
+
+        Intro **text**.
+
+        - one
+        - two
+
+        > quote
+
+        ---
+
+        ```swift
+        print(1)
+        ```
+        """#
+        let plain = MarkdownPlainText.render(source: source)
+        XCTAssertEqual(
+            plain,
+            "Title\n\nIntro text.\n\n- one\n- two\n\nquote\n\n---\n\nprint(1)"
+        )
+    }
 }
