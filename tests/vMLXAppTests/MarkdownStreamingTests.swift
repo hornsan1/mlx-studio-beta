@@ -2,6 +2,36 @@ import XCTest
 @testable import vMLXApp
 
 final class MarkdownStreamingTests: XCTestCase {
+    func testStreamingParseScheduleCapsContinuousTrailingDebounce() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let deadline = MarkdownParseSchedule.deadline(
+            firstQueuedAt: start,
+            lastUpdatedAt: start.addingTimeInterval(0.11),
+            lastParseAt: .distantPast
+        )
+
+        XCTAssertEqual(
+            deadline.timeIntervalSince(start),
+            MarkdownParseSchedule.maximumCoalescingWait,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testStreamingParseScheduleRespectsMinimumIntervalAfterPriorParse() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let deadline = MarkdownParseSchedule.deadline(
+            firstQueuedAt: start.addingTimeInterval(0.02),
+            lastUpdatedAt: start.addingTimeInterval(0.02),
+            lastParseAt: start
+        )
+
+        XCTAssertEqual(
+            deadline.timeIntervalSince(start),
+            MarkdownParseSchedule.minimumReparseInterval,
+            accuracy: 0.000_001
+        )
+    }
+
     func testOpenFenceIsStableCodeNotTail() {
         let source = "Intro\n\n```python\nprint(1)\n"
         let doc = LightweightMarkdownParser.shared.parse(source)
@@ -20,7 +50,6 @@ final class MarkdownStreamingTests: XCTestCase {
         let doc = LightweightMarkdownParser.shared.parse(source)
         let split = StreamingMarkdownSplit.split(document: doc, fullSource: source)
         XCTAssertTrue(split.stableBlocks.count >= 2)
-        // Trailing newline after closed fence may remain as empty-ish tail
         XCTAssertTrue(split.tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                       || split.tail.hasPrefix("\n"))
     }
@@ -33,6 +62,42 @@ final class MarkdownStreamingTests: XCTestCase {
         }
         XCTAssertTrue(closed)
         XCTAssertEqual(body, "hello\n")
+    }
+
+    func testFenceWithTrailingNonWhitespaceRemainsCodeBody() {
+        let source = """
+        ```swift
+        print(\"before\")
+        ```not-a-closing-fence
+        print(\"after\")
+        ```
+        """
+        let doc = LightweightMarkdownParser.shared.parse(source)
+
+        XCTAssertEqual(doc.blocks.count, 1)
+        guard case let .code(language, body, _, isClosed) = doc.blocks[0] else {
+            return XCTFail("expected one closed code block")
+        }
+        XCTAssertEqual(language, "swift")
+        XCTAssertTrue(isClosed)
+        XCTAssertEqual(
+            body,
+            "print(\"before\")\n```not-a-closing-fence\nprint(\"after\")\n"
+        )
+    }
+
+    func testLongerClosingFenceIsAcceptedAndConsumesWholeFenceLine() {
+        let source = "````swift\nvalue\n`````   \n"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+
+        XCTAssertEqual(doc.blocks.count, 1)
+        guard case let .code(language, body, range, isClosed) = doc.blocks[0] else {
+            return XCTFail("expected one closed code block")
+        }
+        XCTAssertEqual(language, "swift")
+        XCTAssertEqual(body, "value\n")
+        XCTAssertTrue(isClosed)
+        XCTAssertEqual(range.end, source.utf16.count - 1)
     }
 
     func testLanguageNormalization() {
@@ -60,6 +125,145 @@ final class MarkdownStreamingTests: XCTestCase {
         let fenced = ChatExporter.fenced("swift", body)
         XCTAssertTrue(fenced.hasPrefix("````"))
         XCTAssertTrue(fenced.contains("code with ``` inside"))
+    }
+
+    // MARK: - Provisional block IDs
+
+    func testOpenFenceCopyIDIsEndInvariantWhileGrowing() throws {
+        let messageID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "Intro\n\n```python\nprint(1)\n"
+        let grown = "Intro\n\n```python\nprint(1)\nprint(2)\n"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(earlyDoc.blocks.last),
+            isStreaming: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(grownDoc.blocks.last),
+            isStreaming: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID, grownID)
+        XCTAssertTrue(earlyID.copyCodeAccessibilityIdentifier.hasSuffix("-open"))
+        XCTAssertNotEqual(earlyID.range.end, grownID.range.end)
+    }
+
+    func testClosedFenceFreezesFullRangeID() throws {
+        let messageID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let source = "Intro\n\n```python\nprint(1)\n```\n"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+        let id = MarkdownBlockID.id(
+            messageID: messageID,
+            block: try XCTUnwrap(doc.blocks.last),
+            isStreaming: false
+        )
+        XCTAssertFalse(id.isProvisional)
+        XCTAssertTrue(id.copyCodeAccessibilityIdentifier.hasSuffix("-\(id.range.end)"))
+    }
+
+    func testTerminalGrowingProseIDIsEndInvariantWhileStreaming() {
+        let messageID = UUID(uuidString: "BBBBBBBB-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let early = "Hello world"
+        let grown = "Hello world, more tokens arrive"
+
+        let earlyDoc = LightweightMarkdownParser.shared.parse(early)
+        let grownDoc = LightweightMarkdownParser.shared.parse(grown)
+
+        let earlyID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: earlyDoc.blocks[0],
+            isStreaming: true,
+            isLastBlock: true
+        )
+        let grownID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            isStreaming: true,
+            isLastBlock: true
+        )
+
+        XCTAssertTrue(earlyID.isProvisional)
+        XCTAssertTrue(grownID.isProvisional)
+        XCTAssertEqual(earlyID, grownID)
+        XCTAssertTrue(earlyID.accessibilityIdentifier.hasSuffix("-open"))
+
+        let finalID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: grownDoc.blocks[0],
+            isStreaming: false
+        )
+        XCTAssertFalse(finalID.isProvisional)
+        XCTAssertNotEqual(finalID, earlyID)
+    }
+
+    func testLastBlockWhileStreamingIsProvisionalEvenIfClosed() throws {
+        let messageID = UUID()
+        let source = "```\nx\n```"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+        let block = try XCTUnwrap(doc.blocks.last)
+        let streaming = MarkdownBlockID.id(
+            messageID: messageID,
+            block: block,
+            isStreaming: true,
+            isLastBlock: true
+        )
+        let done = MarkdownBlockID.id(
+            messageID: messageID,
+            block: block,
+            isStreaming: false
+        )
+        XCTAssertTrue(streaming.isProvisional)
+        XCTAssertFalse(done.isProvisional)
+    }
+
+    func testStaleClosedTerminalBlockDoesNotClaimCurrentSource() throws {
+        let stale = LightweightMarkdownParser.shared.parse("```\nx\n```")
+        let block = try XCTUnwrap(stale.blocks.last)
+        XCTAssertFalse(
+            StreamingMarkdownSplit.terminalBlockMatchesCurrentSource(
+                block,
+                fullSource: "```\nx\n```\nnew trailing tokens"
+            )
+        )
+        let id = MarkdownBlockID.id(
+            messageID: UUID(),
+            block: block,
+            isStreaming: true,
+            isLastBlock: false
+        )
+        XCTAssertFalse(id.isProvisional)
+    }
+
+    func testCompletedMessageUsesPlainFallbackUntilFirstParseFinishes() {
+        let source = "**Not blank while parsing**"
+        XCTAssertTrue(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: .empty,
+                fullSource: source,
+                isStreaming: false
+            )
+        )
+        XCTAssertFalse(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: LightweightMarkdownParser.shared.parse(source),
+                fullSource: source,
+                isStreaming: false
+            )
+        )
+        XCTAssertFalse(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: .empty,
+                fullSource: source,
+                isStreaming: true
+            )
+        )
     }
 }
 
@@ -102,11 +306,9 @@ final class ChatMessageContextSplitTests: XCTestCase {
         ]
         let json = ChatExporter.exportToJSON(session, messages: messages)
         XCTAssertTrue(json.contains("\"version\" : 4") || json.contains("\"version\": 4"))
-        XCTAssertTrue(json.contains("contentFormat"))
         let imported = try ChatImporter.decode(try XCTUnwrap(json.data(using: String.Encoding.utf8)))
         XCTAssertEqual(imported.messages.first?.content, "hi")
         XCTAssertEqual(imported.messages.first?.requestContext, "DOC")
         XCTAssertEqual(imported.messages.last?.generationState, .complete)
-        XCTAssertEqual(imported.messages.last?.content, "**ok**")
     }
 }

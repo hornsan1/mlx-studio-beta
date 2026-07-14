@@ -3,22 +3,22 @@ import Foundation
 // MARK: - Source range
 
 /// UTF-16 unit offsets into the normalized Markdown source (`\r\n` → `\n`).
-/// Used for stable block identity and future streaming tail tracking.
 struct MarkdownSourceRange: Hashable, Sendable, Codable {
     var start: Int
     var end: Int
 
     var isEmpty: Bool { start >= end }
-
-    func contains(_ other: MarkdownSourceRange) -> Bool {
-        start <= other.start && end >= other.end
-    }
 }
 
 // MARK: - Block kind & identity
 
 enum MarkdownBlockKind: String, Hashable, Sendable, Codable {
     case prose
+    case heading
+    case listItem
+    case taskItem
+    case blockquote
+    case thematicBreak
     case table
     case code
     case fallback
@@ -26,26 +26,65 @@ enum MarkdownBlockKind: String, Hashable, Sendable, Codable {
 
 /// Stable identity for a rendered block.
 ///
-/// Replaces transient segment ordinals such as `markdown.copy-code.3` so
-/// accessibility IDs do not shift after a stream completes or when a message
-/// is reopened from storage.
+/// While provisional (open fence, or last block during streaming), only
+/// `(messageID, kind, range.start)` participates in equality so token growth
+/// does not remount views or rotate AX IDs. When finalized, `range.end` is
+/// included.
 struct MarkdownBlockID: Hashable, Sendable {
     var messageID: UUID?
     var range: MarkdownSourceRange
     var kind: MarkdownBlockKind
+    var isProvisional: Bool
 
-    /// Deterministic accessibility / test identifier.
-    ///
-    /// Format: `markdown.<kind>.<messageUUID|orphan>.<start>-<end>`
-    var accessibilityIdentifier: String {
-        let messageKey = messageID?.uuidString.lowercased() ?? "orphan"
-        return "markdown.\(kind.rawValue).\(messageKey).\(range.start)-\(range.end)"
+    private var endMarker: String {
+        isProvisional ? "open" : "\(range.end)"
     }
 
-    /// Copy-control identifier for code blocks (keeps the historical prefix
-    /// so e2e scripts can match either legacy ordinal or stable IDs).
+    var accessibilityIdentifier: String {
+        let messageKey = messageID?.uuidString.lowercased() ?? "orphan"
+        return "markdown.\(kind.rawValue).\(messageKey).\(range.start)-\(endMarker)"
+    }
+
     var copyCodeAccessibilityIdentifier: String {
-        "markdown.copy-code.\(messageID?.uuidString.lowercased() ?? "orphan").\(range.start)-\(range.end)"
+        let messageKey = messageID?.uuidString.lowercased() ?? "orphan"
+        return "markdown.copy-code.\(messageKey).\(range.start)-\(endMarker)"
+    }
+
+    static func == (lhs: MarkdownBlockID, rhs: MarkdownBlockID) -> Bool {
+        lhs.messageID == rhs.messageID
+            && lhs.kind == rhs.kind
+            && lhs.range.start == rhs.range.start
+            && lhs.isProvisional == rhs.isProvisional
+            && (lhs.isProvisional || lhs.range.end == rhs.range.end)
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(messageID)
+        hasher.combine(kind)
+        hasher.combine(range.start)
+        hasher.combine(isProvisional)
+        if !isProvisional {
+            hasher.combine(range.end)
+        }
+    }
+
+    /// Open fence always provisional; while streaming the last block is too.
+    static func id(
+        messageID: UUID?,
+        block: MarkdownBlock,
+        isStreaming: Bool,
+        isLastBlock: Bool = false
+    ) -> MarkdownBlockID {
+        let provisional: Bool = {
+            if case .code(_, _, _, let closed) = block, !closed { return true }
+            return isStreaming && isLastBlock
+        }()
+        return MarkdownBlockID(
+            messageID: messageID,
+            range: block.range,
+            kind: block.kind,
+            isProvisional: provisional
+        )
     }
 }
 
@@ -61,6 +100,22 @@ enum MarkdownTableAlignment: String, Hashable, Sendable, Codable {
 
 enum MarkdownBlock: Hashable, Sendable {
     case prose(text: String, range: MarkdownSourceRange)
+    case heading(level: Int, text: String, range: MarkdownSourceRange)
+    case listItem(
+        ordered: Bool,
+        index: Int?,
+        indentLevel: Int,
+        text: String,
+        range: MarkdownSourceRange
+    )
+    case taskItem(
+        checked: Bool,
+        indentLevel: Int,
+        text: String,
+        range: MarkdownSourceRange
+    )
+    case blockquote(text: String, quoteDepth: Int, range: MarkdownSourceRange)
+    case thematicBreak(range: MarkdownSourceRange)
     case table(
         headers: [String],
         alignments: [MarkdownTableAlignment],
@@ -71,7 +126,6 @@ enum MarkdownBlock: Hashable, Sendable {
         language: String,
         body: String,
         range: MarkdownSourceRange,
-        /// `false` when the fence was never closed (streaming / truncated).
         isClosed: Bool
     )
     case fallback(text: String, range: MarkdownSourceRange)
@@ -79,6 +133,11 @@ enum MarkdownBlock: Hashable, Sendable {
     var kind: MarkdownBlockKind {
         switch self {
         case .prose: return .prose
+        case .heading: return .heading
+        case .listItem: return .listItem
+        case .taskItem: return .taskItem
+        case .blockquote: return .blockquote
+        case .thematicBreak: return .thematicBreak
         case .table: return .table
         case .code: return .code
         case .fallback: return .fallback
@@ -88,47 +147,45 @@ enum MarkdownBlock: Hashable, Sendable {
     var range: MarkdownSourceRange {
         switch self {
         case .prose(_, let range),
+             .heading(_, _, let range),
+             .listItem(_, _, _, _, let range),
+             .taskItem(_, _, _, let range),
+             .blockquote(_, _, let range),
+             .thematicBreak(let range),
              .table(_, _, _, let range),
              .code(_, _, let range, _),
              .fallback(_, let range):
             return range
         }
     }
-
-    func blockID(messageID: UUID?) -> MarkdownBlockID {
-        MarkdownBlockID(messageID: messageID, range: range, kind: kind)
-    }
 }
 
 // MARK: - Document
 
-/// Immutable parse result. Raw Markdown remains the durable source of truth;
-/// this document is derived, cacheable, and never persisted as authoritative.
+/// Immutable parse result. Raw Markdown remains the durable source of truth.
 struct MarkdownDocument: Hashable, Sendable {
-    /// Normalized source (CRLF → LF).
     var source: String
     var blocks: [MarkdownBlock]
-    /// When streaming, the unfinished suffix that is not yet a completed block.
-    /// Production completed-message parses leave this `nil`.
-    var incompleteTail: MarkdownSourceRange?
     var parserName: String
 
-    static let empty = MarkdownDocument(
-        source: "",
-        blocks: [],
-        incompleteTail: nil,
-        parserName: "none"
-    )
+    static let empty = MarkdownDocument(source: "", blocks: [], parserName: "none")
 
-    func blockIDs(messageID: UUID?) -> [MarkdownBlockID] {
-        blocks.map { $0.blockID(messageID: messageID) }
+    func blockIDs(messageID: UUID?, isStreaming: Bool = false) -> [MarkdownBlockID] {
+        let last = blocks.indices.last
+        return blocks.enumerated().map { index, block in
+            MarkdownBlockID.id(
+                messageID: messageID,
+                block: block,
+                isStreaming: isStreaming,
+                isLastBlock: index == last
+            )
+        }
     }
 }
 
 // MARK: - UTF-16 helpers
 
 enum MarkdownSourceIndex {
-    /// UTF-16 offset of `index` in `string`.
     static func utf16Offset(in string: String, of index: String.Index) -> Int {
         string.utf16.distance(from: string.startIndex, to: index)
     }

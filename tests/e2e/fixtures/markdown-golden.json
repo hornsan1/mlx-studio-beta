@@ -11,7 +11,6 @@
         "blockKinds": [
           "prose",
           "table",
-          "prose",
           "code"
         ],
         "table": {
@@ -105,7 +104,6 @@
       "expect": {
         "blockKinds": [
           "code",
-          "prose",
           "table"
         ],
         "code": {
@@ -143,6 +141,444 @@
           "body": "hello\n",
           "isClosed": true
         }
+      }
+    },
+    {
+      "id": "list-2space-nested",
+      "source": "- parent\n  - child",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "parent"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 1,
+            "text": "child"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-mixed-tight",
+      "source": "- alpha\n- beta\n- gamma",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "alpha"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "beta"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "gamma"
+          }
+        ]
+      }
+    },
+    {
+      "id": "task-list-basic",
+      "source": "- [ ] todo\n- [x] done\n- [X] also done",
+      "expect": {
+        "blockKinds": [
+          "taskItem",
+          "taskItem",
+          "taskItem"
+        ],
+        "taskItems": [
+          {
+            "checked": false,
+            "indentLevel": 0,
+            "text": "todo"
+          },
+          {
+            "checked": true,
+            "indentLevel": 0,
+            "text": "done"
+          },
+          {
+            "checked": true,
+            "indentLevel": 0,
+            "text": "also done"
+          }
+        ]
+      }
+    },
+    {
+      "id": "heading-atx-levels",
+      "source": "# One\n## Two\n### Three",
+      "expect": {
+        "blockKinds": [
+          "heading",
+          "heading",
+          "heading"
+        ],
+        "headings": [
+          {
+            "level": 1,
+            "text": "One"
+          },
+          {
+            "level": 2,
+            "text": "Two"
+          },
+          {
+            "level": 3,
+            "text": "Three"
+          }
+        ]
+      }
+    },
+    {
+      "id": "blockquote-simple",
+      "source": "> first\n> second",
+      "expect": {
+        "blockKinds": [
+          "blockquote"
+        ],
+        "blockquote": {
+          "quoteDepth": 1,
+          "text": "first\nsecond"
+        }
+      }
+    },
+    {
+      "id": "thematic-break-hr",
+      "source": "Before\n\n---\n\nAfter",
+      "expect": {
+        "blockKinds": [
+          "prose",
+          "thematicBreak",
+          "prose"
+        ]
+      }
+    },
+    {
+      "id": "list-over-indent-clamp",
+      "source": "- L0\n  - L1\n    - L2\n      - L3\n        - L4\n          - L5\n            - L6\n              - L7",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem",
+          "listItem",
+          "listItem",
+          "listItem",
+          "listItem",
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "L0"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 1,
+            "text": "L1"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 2,
+            "text": "L2"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 3,
+            "text": "L3"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 4,
+            "text": "L4"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 5,
+            "text": "L5"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 5,
+            "text": "L6"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 5,
+            "text": "L7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sloppy-list-tab-indent",
+      "source": "- parent\n\t- child",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "parent"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 1,
+            "text": "child"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-start-at-3",
+      "source": "3. first\n4. second",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 3,
+            "indentLevel": 0,
+            "text": "first"
+          },
+          {
+            "ordered": true,
+            "index": 4,
+            "indentLevel": 0,
+            "text": "second"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-nested-continue",
+      "source": "1. parent a\n   1. nested\n2. parent b",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "parent a"
+          },
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 1,
+            "text": "nested"
+          },
+          {
+            "ordered": true,
+            "index": 2,
+            "indentLevel": 0,
+            "text": "parent b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-restart-after-prose",
+      "source": "1. first list\n\nInterrupting paragraph.\n\n1. new list",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "prose",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "first list"
+          },
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "new list"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-loose-continue",
+      "source": "1. a\n\n2. b",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "a"
+          },
+          {
+            "ordered": true,
+            "index": 2,
+            "indentLevel": 0,
+            "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-paren-marker",
+      "source": "1) a\n2) b",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "a"
+          },
+          {
+            "ordered": true,
+            "index": 2,
+            "indentLevel": 0,
+            "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "task-list-star-marker",
+      "source": "* [ ] todo\n* [x] done",
+      "expect": {
+        "blockKinds": [
+          "taskItem",
+          "taskItem"
+        ],
+        "taskItems": [
+          {
+            "checked": false,
+            "indentLevel": 0,
+            "text": "todo"
+          },
+          {
+            "checked": true,
+            "indentLevel": 0,
+            "text": "done"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-after-heading",
+      "source": "# H\n",
+      "expect": {
+        "blockKinds": [
+          "heading"
+        ],
+        "headings": [
+          {
+            "level": 1,
+            "text": "H"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-between-headings",
+      "source": "# A\n\n# B",
+      "expect": {
+        "blockKinds": [
+          "heading",
+          "heading"
+        ],
+        "headings": [
+          {
+            "level": 1,
+            "text": "A"
+          },
+          {
+            "level": 1,
+            "text": "B"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-whitespace-only-prose-trailing-list",
+      "source": "- a\n- b\n",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "a"
+          },
+          {
+            "ordered": false,
+            "indentLevel": 0,
+            "text": "b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-ordered-start-at-0",
+      "source": "0. zero\n1. one",
+      "expect": {
+        "blockKinds": [
+          "listItem",
+          "listItem"
+        ],
+        "listItems": [
+          {
+            "ordered": true,
+            "index": 0,
+            "indentLevel": 0,
+            "text": "zero"
+          },
+          {
+            "ordered": true,
+            "index": 1,
+            "indentLevel": 0,
+            "text": "one"
+          }
+        ]
       }
     }
   ],

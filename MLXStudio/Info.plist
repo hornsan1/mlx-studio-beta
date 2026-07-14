@@ -48,6 +48,7 @@
 			<string>ai.dealign.mlxstudio.beta</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>vmlx</string>
 				<string>mlxstudio</string>
 			</array>
 		</dict>

@@ -7726,16 +7726,11 @@ private struct ChatTurnBubble: View {
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.Colors.textHigh)
             } else if turn.role == .assistant {
-                // Shared Markdown document model (same as production ChatScreen).
-                if turn.streamState == .streaming {
-                    MarkdownStreamingView(
-                        text: content,
-                        messageID: turn.id,
-                        isStreaming: true
-                    )
-                } else {
-                    MarkdownView(text: content, messageID: turn.id)
-                }
+                MarkdownView(
+                    text: content,
+                    messageID: turn.id,
+                    isStreaming: turn.streamState == .streaming
+                )
             } else {
                 Text(content)
                     .font(Theme.Typography.body)
@@ -7830,15 +7825,48 @@ private struct ChatTurnBubble: View {
 struct ModelRecommendationCard: View {
     var model: RecommendedModel
     var installState: ModelInstallViewState? = nil
+    var starterResolution: StarterModelResolution? = nil
     var queue: () -> Void
     var downloadAndChat: () -> Void
+    var openLocalStarter: (() -> Void)? = nil
 
     private var active: Bool { installState?.isActive == true }
+    private var resolvedLocal: Bool { starterResolution?.resolvedIdentity != nil }
+
+    private var availabilityLabel: String? {
+        switch starterResolution {
+        case .included: return "Included"
+        case .local: return "On this Mac"
+        case .incompatible(_, let reason): return reason
+        case .unavailable(let reason): return reason
+        case .downloadRequired: return nil
+        case nil: return "Checking this Mac…"
+        }
+    }
+
+    private var primaryLabel: String {
+        switch starterResolution {
+        case .included: return "Included — Open Chat"
+        case .local: return "On this Mac — Open Chat"
+        case .incompatible, .unavailable: return "Unavailable"
+        case .downloadRequired: return "Download & Chat"
+        case nil: return "Checking…"
+        }
+    }
+
+    private var primaryDisabled: Bool {
+        if active || starterResolution == nil { return true }
+        switch starterResolution {
+        case .incompatible, .unavailable: return true
+        case .included, .local, .downloadRequired: return false
+        case nil: return true
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack {
-                Image(systemName: "arrow.down.circle")
+                Image(systemName: resolvedLocal ? "internaldrive" : "arrow.down.circle")
                     .foregroundStyle(Theme.Colors.accent)
                 Spacer()
                 Text(model.sizeHint)
@@ -7853,6 +7881,14 @@ struct ModelRecommendationCard: View {
                 .foregroundStyle(Theme.Colors.textMid)
                 .lineLimit(2)
             tagRow(model.labels)
+            if let availabilityLabel {
+                Label(
+                    availabilityLabel,
+                    systemImage: resolvedLocal ? "checkmark.circle.fill" : "info.circle"
+                )
+                .font(Theme.Typography.captionHi)
+                .foregroundStyle(resolvedLocal ? Theme.Colors.success : Theme.Colors.textMid)
+            }
             if let installState {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     Text(installState.label)
@@ -7867,20 +7903,29 @@ struct ModelRecommendationCard: View {
             }
             HStack {
                 Button {
-                    downloadAndChat()
+                    if resolvedLocal {
+                        openLocalStarter?()
+                    } else {
+                        downloadAndChat()
+                    }
                 } label: {
-                    Label(active ? "Working" : "Download & Chat", systemImage: active ? "arrow.triangle.2.circlepath" : "arrow.down.circle")
+                    Label(
+                        active ? "Working" : primaryLabel,
+                        systemImage: active ? "arrow.triangle.2.circlepath" : (resolvedLocal ? "arrow.right.circle" : "arrow.down.circle")
+                    )
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(active)
+                .disabled(primaryDisabled)
 
-                Button {
-                    queue()
-                } label: {
-                    Label(L10n.Studio.queue.render(AppLocalePreference.current), systemImage: "tray.and.arrow.down")
+                if !resolvedLocal {
+                    Button {
+                        queue()
+                    } label: {
+                        Label(L10n.Studio.queue.render(AppLocalePreference.current), systemImage: "tray.and.arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(active || starterResolution == nil)
                 }
-                .buttonStyle(.bordered)
-                .disabled(active)
             }
         }
         .padding(Theme.Spacing.lg)

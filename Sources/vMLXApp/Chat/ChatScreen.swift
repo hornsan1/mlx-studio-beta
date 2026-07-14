@@ -85,6 +85,7 @@ struct ChatScreen: View {
             // Publish the vm to AppState so global Cmd-N / Cmd-Shift-T /
             // Cmd-K shortcuts and the command bar can drive it.
             app.chatViewModelRef = vm
+            app.consumePendingChatLaunch(using: vm)
             // §430 — if user loaded a model on another tab (Terminal,
             // Server) and is just NOW landing on Chat, the global state
             // observer may still be bound to a stale session. Adopt
@@ -116,6 +117,9 @@ struct ChatScreen: View {
                   vm.sessions.contains(where: { $0.id == requestedID })
             else { return }
             vm.selectSession(requestedID)
+        }
+        .onChange(of: app.pendingChatLaunchIntent) { _, _ in
+            app.consumePendingChatLaunch(using: vm)
         }
         // Esc stops the current generation. We intentionally attach at
         // the ChatScreen level so any focus state inside the pane (other
@@ -581,7 +585,7 @@ private struct ChatModelPicker: View {
                         ForEach(shown, id: \.id) { e in
                             Menu {
                                 Button(L10n.Misc.selectForChat.render(appLocale)) {
-                                    Task { await select(labelForEntry(e)) }
+                                    Task { await select(e) }
                                 }
                                 let s = loadState(for: e)
                                 switch s {
@@ -862,7 +866,8 @@ private struct ChatModelPicker: View {
     }
 
     @MainActor
-    private func select(_ alias: String) async {
+    private func select(_ entry: ModelLibrary.ModelEntry) async {
+        let alias = labelForEntry(entry)
         currentAlias = alias
         guard let chatId = vm.activeSessionId else {
             vm.bannerMessage = "No active chat — open or create a chat first."
@@ -873,14 +878,20 @@ private struct ChatModelPicker: View {
         var chat = await app.engine.settings.chat(chatId) ?? .init()
         chat.modelAlias = alias
         await app.engine.settings.setChat(chatId, chat)
-        let entry = ChatModelEntryResolver.resolve(alias: alias, in: entries)
-        vm.updateModelIdentity(chatId, name: alias, path: entry?.canonicalPath.path)
+        // The user selected a concrete library row, so persist that row's
+        // canonical path directly. Re-resolving its human-readable alias can
+        // lose identity when another copy is discovered concurrently.
+        vm.updateModelIdentity(
+            chatId,
+            name: entry.displayName,
+            path: entry.canonicalPath.standardizedFileURL.resolvingSymlinksInPath().path
+        )
     }
 
     /// Start / load the model associated with `entry`. Creates a
     /// session row on the fly if the user picked a model that hasn't
-    /// been added to the Server tab yet. No-op if the session is
-    /// already running (AppState.startSession is idempotent).
+    /// been added to the Server tab yet. This is Chat-only activation:
+    /// it loads the in-process engine without binding an HTTP port.
     @MainActor
     private func startModel(for entry: ModelLibrary.ModelEntry) async {
         let sid: UUID
@@ -889,7 +900,7 @@ private struct ChatModelPicker: View {
         } else {
             sid = await app.createSession(forModel: entry.canonicalPath)
         }
-        await app.startSession(sid)
+        await app.loadChatSession(sid)
     }
 
     /// Stop / unload the model associated with `entry`. No-op if no
@@ -935,8 +946,8 @@ private struct ChatModelPicker: View {
 ///   1. Resolve the chat's `modelAlias` → matching `ModelLibrary.ModelEntry`.
 ///   2. Reuse an existing session for that model path, OR auto-create
 ///      a new session with default settings if it's the first time.
-///   3. Call `AppState.startSession(id)` which loads weights + starts
-///      the HTTP listener. The per-session observer flips the banner
+///   3. Call `AppState.loadChatSession(id)` which loads weights without
+///      starting an HTTP listener. The per-session observer flips the banner
 ///      through `.loading(…)` → `.running` live, so no manual refresh
 ///      is needed.
 ///
@@ -1013,7 +1024,7 @@ private func loadChatModelInline(app: AppState, vm: ChatViewModel) async {
     // Fast-path order:
     //   .running / .loading → just rebind the observer + return
     //   .standby           → wakeFromStandby (cheap)
-    //   .stopped / .error  → full startSession (loads weights + HTTP)
+    //   .stopped / .error  → Chat-only engine load (no HTTP listener)
     let eng = app.engine(for: sid)
     let engState = eng.state
     switch engState {
@@ -1028,6 +1039,6 @@ private func loadChatModelInline(app: AppState, vm: ChatViewModel) async {
         app.selectedServerSessionId = sid
         app.rebindEngineObserver()
     case .stopped, .error:
-        await app.startSession(sid)
+        await app.loadChatSession(sid)
     }
 }

@@ -123,7 +123,14 @@ struct SessionsSidebar: View {
         panel.prompt = "Import"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try vm.importConversation(Data(contentsOf: url))
+            let data = try Data(contentsOf: url)
+            Task { @MainActor in
+                do {
+                    try await vm.importConversation(data)
+                } catch {
+                    importError = error.localizedDescription
+                }
+            }
         } catch {
             importError = error.localizedDescription
         }

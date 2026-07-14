@@ -1,14 +1,21 @@
 import Foundation
 
-/// Revision-keyed, bounded cache of parsed Markdown documents.
+/// Source-keyed, bounded cache of parsed Markdown documents.
 ///
 /// Parses are pure and can run off the main actor; the cache itself is an
 /// actor so concurrent stream finalizations stay race-free.
+///
+/// Default capacity is **128** so long chat sessions retain more completed
+/// message parses. Eviction costs a re-parse on next body evaluation.
 actor MarkdownRenderCache {
+    /// Default entry budget for long sessions (was 64).
+    static let defaultCapacity = 128
+
     struct Key: Hashable, Sendable {
         var messageID: UUID?
-        /// Content hash / revision. Callers typically pass a hash of the source.
-        var revision: Int
+        /// Normalized source participates in equality, so a hash collision can
+        /// never return a document parsed from different Markdown bytes.
+        var source: String
         var parserName: String
     }
 
@@ -18,7 +25,7 @@ actor MarkdownRenderCache {
     private var insertionOrder: [Key] = []
     private let capacity: Int
 
-    init(capacity: Int = 64) {
+    init(capacity: Int = MarkdownRenderCache.defaultCapacity) {
         self.capacity = max(1, capacity)
     }
 
@@ -41,10 +48,9 @@ actor MarkdownRenderCache {
         parser: any MarkdownParser
     ) -> MarkdownDocument {
         let normalized = MarkdownParserSupport.normalizeNewlines(source)
-        let revision = normalized.hashValue
         let key = Key(
             messageID: messageID,
-            revision: revision,
+            source: normalized,
             parserName: parser.name
         )
         if let cached = storage[key] {
@@ -89,6 +95,7 @@ enum MarkdownParserSupport {
             parser: parser
         )
     }
+
 }
 
 /// Main-thread-friendly bounded cache (SwiftUI body).
@@ -100,7 +107,7 @@ final class SyncMarkdownRenderCache: @unchecked Sendable {
     private var insertionOrder: [MarkdownRenderCache.Key] = []
     private let capacity: Int
 
-    init(capacity: Int = 64) {
+    init(capacity: Int = MarkdownRenderCache.defaultCapacity) {
         self.capacity = max(1, capacity)
     }
 
@@ -110,10 +117,9 @@ final class SyncMarkdownRenderCache: @unchecked Sendable {
         parser: any MarkdownParser
     ) -> MarkdownDocument {
         let normalized = MarkdownParserSupport.normalizeNewlines(source)
-        let revision = normalized.hashValue
         let key = MarkdownRenderCache.Key(
             messageID: messageID,
-            revision: revision,
+            source: normalized,
             parserName: parser.name
         )
         lock.lock()

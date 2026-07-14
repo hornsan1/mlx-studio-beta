@@ -185,12 +185,12 @@ struct MLXStudioApp: App {
             // lands on a fresh chat.
             CommandGroup(replacing: .newItem) {
                 Button(L10n.Menu.newChat.render(uiLocale)) {
-                    appState.requestStudioChatCommand(.newSession)
+                    appState.requestChatLaunch(ChatLaunchIntent(action: .newConversation))
                 }
                 .keyboardShortcut("n", modifiers: [.command])
 
                 Button(L10n.Menu.reopenLastClosed.render(uiLocale)) {
-                    appState.requestStudioChatCommand(.reopenLastClosed)
+                    appState.requestChatLaunch(ChatLaunchIntent(action: .reopenLastClosed))
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
             }
@@ -728,6 +728,7 @@ final class AppState {
     var studioChatCommand: StudioChatCommandKind? = nil
     var studioChatCommandNonce: Int = 0
     var pendingStudioChatPrompt: StudioChatPromptHandoff? = nil
+    var pendingChatLaunchIntent: ChatLaunchIntent? = nil
     var pendingStudioImageReuse: StudioImageReuseRequest? = nil
     var activeSessionId: UUID? = nil
 
@@ -735,6 +736,20 @@ final class AppState {
         mode = .chat
         studioChatCommand = command
         studioChatCommandNonce += 1
+    }
+
+    func requestChatLaunch(_ intent: ChatLaunchIntent) {
+        mode = .chat
+        pendingChatLaunchIntent = intent
+        if let chatViewModelRef {
+            consumePendingChatLaunch(using: chatViewModelRef)
+        }
+    }
+
+    func consumePendingChatLaunch(using viewModel: ChatViewModel) {
+        guard let intent = pendingChatLaunchIntent else { return }
+        pendingChatLaunchIntent = nil
+        viewModel.consume(intent)
     }
 
     func openStudioChatSession(_ id: UUID) {
@@ -1187,6 +1202,38 @@ final class AppState {
         }
     }
 
+    /// Load a session's model for the in-process Chat runtime only.
+    /// This intentionally does not create an `HTTPServerActor`, register a
+    /// gateway route, or bind a port. Server mode remains the explicit owner
+    /// of network activation through `startSession(_:)`.
+    @MainActor
+    func loadChatSession(_ id: UUID) async {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        let eng = engine(for: id)
+        selectedServerSessionId = id
+        selectedModelPath = session.modelPath
+        rebindEngineObserver()
+
+        let remoteSettings = await eng.settings.session(id)
+        if remoteSettings?.isRemote == true {
+            flashBanner("Remote models use their configured endpoint; no local server was started.")
+            return
+        }
+
+        let resolved = await eng.settings.resolved(sessionId: id)
+        let options = Engine.LoadOptions(modelPath: session.modelPath, from: resolved)
+        do {
+            for try await event in await eng.load(options) {
+                if case .failed(let message) = event {
+                    flashBanner("Engine load failed: \(message)")
+                    return
+                }
+            }
+        } catch {
+            flashBanner("Engine load failed: \(error)")
+        }
+    }
+
     /// Stop (= unload + tear down HTTP listener) the session with this id.
     /// Safe for already-stopped sessions — engine.stop() + http.stop()
     /// are both idempotent.
@@ -1487,13 +1534,13 @@ struct RootView: View {
                 .hidden()
 
                 Button("") {
-                    state.requestStudioChatCommand(.newSession)
+                    state.requestChatLaunch(ChatLaunchIntent(action: .newConversation))
                 }
                 .keyboardShortcut("n", modifiers: .command)
                 .hidden()
 
                 Button("") {
-                    state.requestStudioChatCommand(.reopenLastClosed)
+                    state.requestChatLaunch(ChatLaunchIntent(action: .reopenLastClosed))
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
                 .hidden()
@@ -1520,17 +1567,16 @@ struct RootView: View {
 ///                                  at least opens
 @MainActor
 fileprivate func handleIncomingURL(_ url: URL, state: AppState) {
-    guard url.scheme == "vmlx" else { return }
+    guard url.scheme == "vmlx" || url.scheme == "mlxstudio" else { return }
+    if let intent = ChatLaunchIntent.chatURL(url) {
+        state.requestChatLaunch(intent)
+        return
+    }
     let host = url.host ?? ""
     let path = url.pathComponents.filter { $0 != "/" }
     switch host {
     case "chat":
         state.mode = .chat
-        if let first = path.first, first == "new" {
-            state.requestStudioChatCommand(.newSession)
-        } else if let first = path.first, let uuid = UUID(uuidString: first) {
-            state.openStudioChatSession(uuid)
-        }
     case "server":
         state.mode = .server
         if let first = path.first, let uuid = UUID(uuidString: first) {

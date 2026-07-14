@@ -186,14 +186,12 @@ struct MessageBubble: View {
     private var contentView: some View {
         if message.role == .assistant && message.isStreaming && message.content.isEmpty {
             TypingDots()
-        } else if message.role == .assistant && message.isStreaming {
-            MarkdownStreamingView(
+        } else if message.role == .assistant {
+            MarkdownView(
                 text: message.content,
                 messageID: message.id,
-                isStreaming: true
+                isStreaming: message.isStreaming
             )
-        } else if message.role == .assistant {
-            MarkdownView(text: message.content, messageID: message.id)
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text(message.content)
@@ -328,11 +326,9 @@ struct MessageBubble: View {
         #if canImport(AppKit)
         let payload: String
         if plain {
-            // Strip common Markdown markers for a plain-text pasteboard payload.
-            payload = message.content
-                .replacingOccurrences(of: "**", with: "")
-                .replacingOccurrences(of: "__", with: "")
-                .replacingOccurrences(of: "```", with: "")
+            // Structure-aware plain text: tables → TSV, code → body, structural
+            // markers linearized, inline emphasis/links stripped.
+            payload = MarkdownPlainText.render(source: message.content)
         } else {
             payload = message.content
         }

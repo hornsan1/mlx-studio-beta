@@ -1,381 +1,354 @@
 import SwiftUI
 import vMLXTheme
-#if canImport(AppKit)
-import AppKit
-#endif
 
-/// Native Markdown renderer for completed chat messages.
+/// Native Markdown renderer for chat messages (streaming and completed).
 ///
-/// Parses via `MarkdownParser` into an immutable `MarkdownDocument`, then
-/// renders blocks with SwiftUI views. Raw Markdown remains the source of
-/// truth; this view only consumes derived state.
+/// One view for both modes: while `isStreaming`, completed blocks render
+/// immediately and only the mutable tail uses the typewriter. When the stream
+/// ends, the same block list finalizes without swapping to a different view.
 struct MarkdownView: View {
     let text: String
-    /// When set, block accessibility IDs are stable across stream completion
-    /// and reloads (`message UUID + source range + kind`).
     var messageID: UUID? = nil
-    var parser: any MarkdownParser = LightweightMarkdownParser.shared
+    var isStreaming: Bool = false
+
+    @State private var document: MarkdownDocument = .empty
+    @State private var parseTask: Task<Void, Never>?
+    @State private var pendingParse: PendingMarkdownParse?
+    @State private var lastParseAt: Date = .distantPast
+    @State private var parseTaskGeneration = 0
 
     var body: some View {
-        let document = MarkdownParserSupport.parseSync(
-            text,
-            messageID: messageID,
-            parser: parser
-        )
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            ForEach(Array(document.blocks.enumerated()), id: \.element.range) { _, block in
-                MarkdownBlockView(block: block, messageID: messageID)
+        let split = StreamingMarkdownSplit.split(document: document, fullSource: text)
+        let lastIndex = split.stableBlocks.indices.last
+        let terminalBlockMatchesCurrentSource = StreamingMarkdownSplit
+            .terminalBlockMatchesCurrentSource(split.stableBlocks.last, fullSource: text)
+        Group {
+            if StreamingMarkdownSplit.needsCompletedFallback(
+                document: document,
+                fullSource: text,
+                isStreaming: isStreaming
+            ) {
+                // Never mount a completed message as a blank bubble while its
+                // first background parse is pending. This is deliberately raw
+                // Text: it cannot resolve untrusted Markdown URLs.
+                Text(text)
+                    .font(Theme.Typography.markdownBody)
+                    .foregroundStyle(Theme.Colors.markdownText)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier(
+                        "markdown.parse-pending.\(messageID?.uuidString.lowercased() ?? "orphan")"
+                    )
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    ForEach(
+                        Array(split.stableBlocks.enumerated()).map { index, block in
+                            IdentifiedMarkdownBlock(
+                                id: MarkdownBlockID.id(
+                                    messageID: messageID,
+                                    block: block,
+                                    isStreaming: isStreaming,
+                                    // A stale document can have an old closed terminal
+                                    // block followed by unparsed tail text. Only the
+                                    // block ending at current source is mutable.
+                                    isLastBlock: isStreaming
+                                        && index == lastIndex
+                                        && terminalBlockMatchesCurrentSource
+                                ),
+                                block: block
+                            )
+                        }
+                    ) { item in
+                        MarkdownBlockView(
+                            block: item.block,
+                            messageID: messageID,
+                            isStreaming: isStreaming,
+                            isLastBlock: item.id.isProvisional && isStreaming
+                        )
+                    }
+                    if isStreaming, !split.tail.isEmpty {
+                        StreamingTextView(text: split.tail, isStreaming: true)
+                            .accessibilityIdentifier(
+                                "markdown.stream-tail.\(messageID?.uuidString.lowercased() ?? "orphan")"
+                            )
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Compatibility API
-
-    /// Legacy segment type kept so existing tests and call sites that only
-    /// need a coarse split keep working. Prefer `MarkdownDocument` for new code.
-    enum Segment: Equatable {
-        case prose(String)
-        case table(headers: [String], alignments: [TableAlignment], rows: [[String]])
-        case code(language: String, body: String)
-    }
-
-    enum TableAlignment: Equatable {
-        case leading
-        case center
-        case trailing
-
-        var frameAlignment: Alignment {
-            switch self {
-            case .leading: .leading
-            case .center: .center
-            case .trailing: .trailing
+        .onAppear { scheduleParse(force: true) }
+        .onChange(of: text) { _, _ in scheduleParse(force: false) }
+        .onChange(of: isStreaming) { _, streaming in
+            if !streaming {
+                // Preserve the last streamed document while the final parse runs.
+                // Parsing here used to run synchronously on the main actor, which
+                // could leave a visible blank/hitch on a large final chunk.
+                scheduleParse(force: true)
             }
         }
-
-        var textAlignment: TextAlignment {
-            switch self {
-            case .leading: .leading
-            case .center: .center
-            case .trailing: .trailing
-            }
-        }
-
-        init(_ alignment: MarkdownTableAlignment) {
-            switch alignment {
-            case .leading: self = .leading
-            case .center: self = .center
-            case .trailing: self = .trailing
-            }
+        .onDisappear {
+            parseTask?.cancel()
+            parseTask = nil
+            pendingParse = nil
         }
     }
 
-    /// Compatibility parse used by unit tests. Delegates to
-    /// `LightweightMarkdownParser` so grammar stays single-sourced.
-    static func parse(_ input: String) -> [Segment] {
-        let document = LightweightMarkdownParser.shared.parse(input)
-        return document.blocks.map { block in
-            switch block {
-            case .prose(let text, _):
-                return .prose(text)
-            case .table(let headers, let alignments, let rows, _):
-                return .table(
-                    headers: headers,
-                    alignments: alignments.map(TableAlignment.init),
-                    rows: rows
+    private func scheduleParse(force: Bool) {
+        let now = Date()
+        let request = PendingMarkdownParse(
+            source: text,
+            messageID: messageID,
+            firstQueuedAt: force ? now : (pendingParse?.firstQueuedAt ?? now),
+            lastUpdatedAt: now
+        )
+        pendingParse = request
+
+        // A trailing debounce that cancels itself for every token can be
+        // postponed forever by a fast stream. Keep one task alive instead; it
+        // reads the newest pending request and the schedule caps its wait.
+        if force || parseTask == nil {
+            beginParseTask(parseImmediately: force)
+        }
+    }
+
+    private func beginParseTask(parseImmediately: Bool) {
+        parseTask?.cancel()
+        parseTaskGeneration &+= 1
+        let generation = parseTaskGeneration
+        parseTask = Task { @MainActor in
+            await runPendingParses(
+                generation: generation,
+                parseImmediately: parseImmediately
+            )
+        }
+    }
+
+    /// Serially parses the newest pending source. New tokens update
+    /// `pendingParse` but intentionally do not cancel this task, so a stream
+    /// always receives a structured refresh within the coalescing limit.
+    @MainActor
+    private func runPendingParses(
+        generation: Int,
+        parseImmediately: Bool
+    ) async {
+        var shouldParseImmediately = parseImmediately
+
+        while !Task.isCancelled, parseTaskGeneration == generation {
+            guard let request = pendingParse else { break }
+
+            if !shouldParseImmediately {
+                let deadline = MarkdownParseSchedule.deadline(
+                    firstQueuedAt: request.firstQueuedAt,
+                    lastUpdatedAt: request.lastUpdatedAt,
+                    lastParseAt: lastParseAt
                 )
-            case .code(let language, let body, _, _):
-                return .code(language: language, body: body)
-            case .fallback(let text, _):
-                return .prose(text)
+                let delay = deadline.timeIntervalSinceNow
+                if delay > 0 {
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(delay * 1_000_000_000)
+                    )
+                    continue
+                }
             }
+            shouldParseImmediately = false
+
+            // Clear before awaiting so tokens received during parsing become
+            // the next coalesced request rather than being overwritten.
+            pendingParse = nil
+            let source = request.source
+            let msgID = request.messageID
+            let parsed = await Task.detached(priority: .userInitiated) {
+                MarkdownParserSupport.parseSync(source, messageID: msgID)
+            }.value
+
+            guard !Task.isCancelled, parseTaskGeneration == generation else {
+                return
+            }
+            document = parsed
+            lastParseAt = Date()
+        }
+
+        if parseTaskGeneration == generation {
+            parseTask = nil
         }
     }
 }
 
-// MARK: - Table
+/// Latest Markdown payload waiting for a coalesced parse.
+private struct PendingMarkdownParse {
+    let source: String
+    let messageID: UUID?
+    let firstQueuedAt: Date
+    let lastUpdatedAt: Date
+}
 
-struct MarkdownTableBlockView: View {
-    let headers: [String]
-    let alignments: [MarkdownTableAlignment]
-    let rows: [[String]]
-    var accessibilityIdentifier: String = "markdown.table"
-    @State private var copiedLabel: String?
+/// Pure timing policy for Markdown stream reparses.
+///
+/// We retain a short trailing debounce so individual tokens coalesce, but cap
+/// its extension so a continuously active stream cannot starve structured
+/// Markdown rendering. The minimum interval avoids reparsing immediately
+/// after a large parse completes.
+struct MarkdownParseSchedule {
+    static let trailingDebounce: TimeInterval = 0.04
+    static let maximumCoalescingWait: TimeInterval = 0.12
+    static let minimumReparseInterval: TimeInterval = 0.08
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                    GridRow {
-                        ForEach(headers.indices, id: \.self) { index in
-                            MarkdownTableCell(
-                                text: headers[index],
-                                alignment: alignments[index],
-                                isHeader: true
-                            )
-                        }
-                    }
-                    ForEach(rows.indices, id: \.self) { rowIndex in
-                        GridRow {
-                            ForEach(headers.indices, id: \.self) { columnIndex in
-                                MarkdownTableCell(
-                                    text: rows[rowIndex][columnIndex],
-                                    alignment: alignments[columnIndex],
-                                    isHeader: false
-                                )
-                            }
-                        }
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: Theme.Spacing.sm) {
-                Button("Copy Markdown") { copyMarkdown() }
-                    .buttonStyle(.plain)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textMid)
-                    .accessibilityIdentifier("\(accessibilityIdentifier).copy-markdown")
-                    .accessibilityLabel("Copy table as Markdown")
-                Button("Copy TSV") { copyTSV() }
-                    .buttonStyle(.plain)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textMid)
-                    .accessibilityIdentifier("\(accessibilityIdentifier).copy-tsv")
-                    .accessibilityLabel("Copy table as TSV")
-                if let copiedLabel {
-                    Text(copiedLabel)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.success)
-                }
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(accessibilityIdentifier)
-        .accessibilityLabel(
-            "Markdown table with \(headers.count) columns and \(rows.count) rows"
+    static func deadline(
+        firstQueuedAt: Date,
+        lastUpdatedAt: Date,
+        lastParseAt: Date
+    ) -> Date {
+        let trailing = lastUpdatedAt.addingTimeInterval(trailingDebounce)
+        let capped = firstQueuedAt.addingTimeInterval(maximumCoalescingWait)
+        let requested = min(trailing, capped)
+        let earliestAfterPriorParse = lastParseAt.addingTimeInterval(
+            minimumReparseInterval
         )
-    }
-
-    private func copyMarkdown() {
-        let payload = MarkdownTableClipboard.asMarkdown(
-            headers: headers,
-            alignments: alignments,
-            rows: rows
-        )
-        writePasteboard(payload)
-        flash("Copied Markdown")
-    }
-
-    private func copyTSV() {
-        let payload = MarkdownTableClipboard.asTSV(headers: headers, rows: rows)
-        writePasteboard(payload)
-        flash("Copied TSV")
-    }
-
-    private func writePasteboard(_ string: String) {
-        #if canImport(AppKit)
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(string, forType: .string)
-        #endif
-    }
-
-    private func flash(_ label: String) {
-        copiedLabel = label
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if copiedLabel == label { copiedLabel = nil }
-        }
+        return max(requested, earliestAfterPriorParse)
     }
 }
 
-private struct MarkdownTableCell: View {
+/// ForEach carrier — identity is `MarkdownBlockID`.
+struct IdentifiedMarkdownBlock: Identifiable {
+    let id: MarkdownBlockID
+    let block: MarkdownBlock
+}
+
+/// Progressive alias kept for existing call sites (`MessageBubble`, Studio).
+struct MarkdownStreamingView: View {
     let text: String
-    let alignment: MarkdownTableAlignment
-    let isHeader: Bool
-
-    private var frameAlignment: Alignment {
-        switch alignment {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-
-    private var textAlignment: TextAlignment {
-        switch alignment {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
+    var messageID: UUID? = nil
+    var isStreaming: Bool = true
 
     var body: some View {
-        Group {
-            if let attributed = try? AttributedString(
-                markdown: text,
-                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-            ) {
-                Text(attributed)
-            } else {
-                Text(text)
-            }
-        }
-        .font(Theme.Typography.body)
-        .fontWeight(isHeader ? .semibold : .regular)
-        .foregroundStyle(Theme.Colors.textHigh)
-        .textSelection(.enabled)
-        .multilineTextAlignment(textAlignment)
-        .padding(.horizontal, Theme.Spacing.sm)
-        .padding(.vertical, Theme.Spacing.xs)
-        .frame(minWidth: 92, alignment: frameAlignment)
-        .background(isHeader ? Theme.Colors.surfaceHi : Theme.Colors.surface)
-        .overlay(
-            Rectangle()
-                .stroke(Theme.Colors.border, lineWidth: 0.5)
-        )
+        MarkdownView(text: text, messageID: messageID, isStreaming: isStreaming)
     }
 }
 
-// MARK: - Code block
-
-/// Code block with an always-visible, keyboard-accessible copy button.
-struct CodeBlockView: View {
-    static let copyAccessibilityLabel = "Copy code"
-    static let longBlockLineThreshold = 80
-
-    /// Legacy ordinal identifier. Prefer
-    /// `MarkdownBlockID.copyCodeAccessibilityIdentifier` for new call sites.
-    static func copyAccessibilityIdentifier(for ordinal: Int) -> String {
-        "markdown.copy-code.\(ordinal)"
+/// Splits a parsed document into finalized blocks plus a mutable tail string.
+enum StreamingMarkdownSplit {
+    struct Result: Equatable {
+        var stableBlocks: [MarkdownBlock]
+        var tail: String
     }
 
-    let language: String
-    let code: String
-    let copyButtonAccessibilityIdentifier: String
-    var isProvisional: Bool = false
-    @State private var copied = false
-    @State private var wrap = false
-    @State private var expanded = false
+    static func split(document: MarkdownDocument, fullSource: String) -> Result {
+        let source = MarkdownParserSupport.normalizeNewlines(fullSource)
+        guard !document.blocks.isEmpty else {
+            return Result(stableBlocks: [], tail: source)
+        }
 
-    init(
-        language: String,
-        code: String,
-        copyButtonAccessibilityIdentifier: String = CodeBlockView.copyAccessibilityIdentifier(for: 0),
-        isProvisional: Bool = false
-    ) {
-        self.language = language
-        self.code = code
-        self.copyButtonAccessibilityIdentifier = copyButtonAccessibilityIdentifier
-        self.isProvisional = isProvisional
+        if case .code(_, _, _, let isClosed) = document.blocks.last, !isClosed {
+            return Result(stableBlocks: document.blocks, tail: "")
+        }
+
+        let lastEnd = document.blocks.last?.range.end ?? 0
+        if lastEnd >= source.utf16.count {
+            return Result(stableBlocks: document.blocks, tail: "")
+        }
+        let tail = MarkdownSourceIndex.substring(
+            source,
+            range: MarkdownSourceRange(start: lastEnd, end: source.utf16.count)
+        )
+        return Result(stableBlocks: document.blocks, tail: tail)
     }
 
-    private var lineCount: Int {
-        max(1, code.split(separator: "\n", omittingEmptySubsequences: false).count)
+    static func terminalBlockMatchesCurrentSource(
+        _ block: MarkdownBlock?,
+        fullSource: String
+    ) -> Bool {
+        guard let block else { return false }
+        let source = MarkdownParserSupport.normalizeNewlines(fullSource)
+        return block.range.end == source.utf16.count
     }
 
-    private var isLong: Bool { lineCount > Self.longBlockLineThreshold }
-
-    private var displayCode: String {
-        guard isLong, !expanded else { return code }
-        let lines = code.split(separator: "\n", omittingEmptySubsequences: false)
-        return lines.prefix(Self.longBlockLineThreshold).joined(separator: "\n")
-            + "\n… (\(lineCount - Self.longBlockLineThreshold) more lines)"
+    static func needsCompletedFallback(
+        document: MarkdownDocument,
+        fullSource: String,
+        isStreaming: Bool
+    ) -> Bool {
+        !isStreaming
+            && document.source != MarkdownParserSupport.normalizeNewlines(fullSource)
     }
+}
+
+/// Shared block renderer used by streaming and completed paths.
+struct MarkdownBlockView: View {
+    let block: MarkdownBlock
+    var messageID: UUID? = nil
+    var isStreaming: Bool = false
+    var isLastBlock: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: Theme.Spacing.sm) {
-                Text(MarkdownLanguage.displayName(for: language))
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textLow)
-                if isProvisional {
-                    Text("streaming…")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.warning)
-                }
-                Spacer(minLength: 0)
-                Button {
-                    wrap.toggle()
-                } label: {
-                    Text(wrap ? "Scroll" : "Wrap")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.textMid)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(wrap ? "Disable wrap" : "Wrap code lines")
-                Button(action: copy) {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(copied ? Theme.Colors.success : Theme.Colors.textMid)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier(copyButtonAccessibilityIdentifier)
-                .accessibilityLabel(copied ? "Code copied" : Self.copyAccessibilityLabel)
-                .accessibilityHint("Copies this code block to the clipboard")
-                .help(copied ? "Copied" : Self.copyAccessibilityLabel)
-            }
-            .padding(.horizontal, Theme.Spacing.md)
-            .padding(.vertical, Theme.Spacing.xs)
-            .background(Theme.Colors.surface)
-
-            Group {
-                if wrap {
-                    Text(displayCode)
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Theme.Colors.textHigh)
-                        .textSelection(.enabled)
-                        .padding(Theme.Spacing.md)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(displayCode)
-                            .font(.system(size: 12, weight: .regular, design: .monospaced))
-                            .foregroundStyle(Theme.Colors.textHigh)
-                            .textSelection(.enabled)
-                            .padding(Theme.Spacing.md)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            .background(Theme.Colors.surfaceHi)
-
-            if isLong {
-                Button(expanded ? "Show less" : "Show full code") {
-                    expanded.toggle()
-                }
-                .buttonStyle(.plain)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.accent)
-                .padding(.horizontal, Theme.Spacing.md)
-                .padding(.vertical, Theme.Spacing.xs)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.Colors.surface)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.md)
-                .fill(Theme.Colors.surfaceHi)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.md)
-                        .stroke(Theme.Colors.border, lineWidth: 1)
-                )
+        let blockID = MarkdownBlockID.id(
+            messageID: messageID,
+            block: block,
+            isStreaming: isStreaming,
+            isLastBlock: isLastBlock
         )
+        switch block {
+        case .prose(let s, _), .fallback(let s, _):
+            MarkdownProseView(text: s)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .heading(let level, let text, _):
+            MarkdownHeadingView(level: level, text: text)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .listItem(let ordered, let index, let indentLevel, let text, _):
+            MarkdownListItemView(
+                ordered: ordered,
+                index: index,
+                indentLevel: indentLevel,
+                text: text
+            )
+            .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .taskItem(let checked, let indentLevel, let text, _):
+            MarkdownTaskItemView(
+                checked: checked,
+                indentLevel: indentLevel,
+                text: text
+            )
+            .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .blockquote(let text, let quoteDepth, _):
+            MarkdownBlockquoteView(text: text, quoteDepth: quoteDepth)
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .thematicBreak:
+            MarkdownThematicBreakView()
+                .accessibilityIdentifier(blockID.accessibilityIdentifier)
+        case .table(let headers, let alignments, let rows, _):
+            MarkdownTableBlockView(
+                headers: headers,
+                alignments: alignments,
+                rows: rows,
+                accessibilityIdentifier: blockID.accessibilityIdentifier
+            )
+        case .code(let lang, let body, _, let isClosed):
+            CodeBlockView(
+                language: lang,
+                code: body,
+                copyButtonAccessibilityIdentifier: blockID.copyCodeAccessibilityIdentifier,
+                isProvisional: !isClosed
+            )
+        }
     }
+}
 
-    private func copy() {
-        #if canImport(AppKit)
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(code, forType: .string)
-        #endif
-        copied = true
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            copied = false
+struct MarkdownProseView: View {
+    let text: String
+
+    var body: some View {
+        if let attr = MarkdownAttributed.inline(text) {
+            Text(attr)
+                .font(Theme.Typography.markdownBody)
+                .foregroundStyle(Theme.Colors.markdownText)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .environment(\.openURL, MarkdownOpenURL.action)
+        } else {
+            Text(text)
+                .font(Theme.Typography.markdownBody)
+                .foregroundStyle(Theme.Colors.markdownText)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -44,6 +44,21 @@ final class Database {
 
     private func open() {
         let fm = FileManager.default
+        if let override = ProcessInfo.processInfo.environment["MLX_STUDIO_CHAT_DB_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty
+        {
+            let url = URL(fileURLWithPath: override).standardizedFileURL
+            try? fm.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if sqlite3_open(url.path, &db) != SQLITE_OK {
+                NSLog("vMLX: sqlite3_open failed at E2E override \(url.path)")
+            }
+            configureConnection()
+            return
+        }
         let appSup = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                  appropriateFor: nil, create: true)
         let dir = (appSup ?? URL(fileURLWithPath: NSTemporaryDirectory()))
@@ -53,6 +68,10 @@ final class Database {
         if sqlite3_open(path, &db) != SQLITE_OK {
             NSLog("vMLX: sqlite3_open failed at \(path)")
         }
+        configureConnection()
+    }
+
+    private func configureConnection() {
         runSQL("PRAGMA journal_mode=WAL;")
         runSQL("PRAGMA foreign_keys=ON;")
         // Iter-28: `synchronous=NORMAL` is the SQLite-documented

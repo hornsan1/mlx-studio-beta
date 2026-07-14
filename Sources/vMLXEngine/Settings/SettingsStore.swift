@@ -293,6 +293,16 @@ public actor SettingsStore {
             trace["defaultMaxTokens"] = Self.whichInf(r?.maxTokens, c?.maxTokens, s?.defaultMaxTokens)
         } else { trace["defaultMaxTokens"] = .global }
 
+        // Context ceilings are intentionally conversation-scoped when a
+        // portable Studio chat supplies one. Do not mutate the user's global
+        // server safety limit simply because they opened an older export.
+        if let v = c?.maxPromptTokens {
+            out.maxPromptTokens = v
+            trace["maxPromptTokens"] = .chat
+        } else {
+            trace["maxPromptTokens"] = .global
+        }
+
         // enableThinking — tri-state (Bool?); both layers are Optional, so we
         // have to pick explicitly.
         if let v = r?.enableThinking {

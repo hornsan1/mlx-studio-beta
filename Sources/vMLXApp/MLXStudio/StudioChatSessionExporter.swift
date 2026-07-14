@@ -12,6 +12,77 @@ enum StudioChatSessionExportFormat {
     }
 }
 
+/// Option A bridge: map legacy Library `StudioChatSession` / `ChatTurn` onto
+/// production `ChatSession` + `[ChatMessage]` so Markdown export can reuse
+/// `ChatExporter.exportToMarkdown` and `ChatExporter.fenced`.
+///
+/// Studio **JSON** stays `schemaVersion: 1` (this bridge is Markdown-only).
+enum StudioChatExportBridge {
+    /// Map Studio session → production `ChatSession` for transcript helpers.
+    static func chatSession(from studio: StudioChatSession) -> ChatSession {
+        ChatSession(
+            id: studio.id,
+            title: studio.title,
+            modelPath: nil,
+            modelName: studio.modelName,
+            isPinned: studio.isPinned,
+            collectionName: nil,
+            createdAt: studio.createdAt,
+            updatedAt: studio.updatedAt
+        )
+    }
+
+    /// Map Studio turns → production messages (cleaned display text; no requestContext).
+    static func messages(from studio: StudioChatSession) -> [ChatMessage] {
+        studio.turns.map { turn in
+            ChatMessage(
+                id: turn.id,
+                sessionId: studio.id,
+                role: role(from: turn.role),
+                content: StudioChatText.cleanForDisplay(turn.content),
+                requestContext: "",
+                createdAt: turn.createdAt,
+                // generationState is an assistant-terminal outcome in production chat.
+                generationState: turn.role == .assistant
+                    ? generationState(from: turn.streamState)
+                    : nil
+            )
+        }
+    }
+
+    /// Full non-lossless transcript via production `ChatExporter`.
+    static func markdownTranscript(for studio: StudioChatSession) -> String {
+        ChatExporter.exportToMarkdown(
+            chatSession(from: studio),
+            messages: messages(from: studio)
+        )
+    }
+
+    private static func role(from role: ChatTurn.Role) -> ChatMessage.Role {
+        switch role {
+        case .user: return .user
+        case .assistant: return .assistant
+        case .system: return .system
+        }
+    }
+
+    /// Map Studio stream state → production generation state for export.
+    /// A live Library export cannot resume its engine, so retain partial output
+    /// as interrupted rather than silently omitting its state.
+    private static func generationState(from streamState: ChatTurn.StreamState) -> ChatGenerationState? {
+        switch streamState {
+        case .complete:
+            return .complete
+        case .streaming:
+            return .interrupted
+        case .failed:
+            return .failed
+        case .cancelled:
+            return .stopped
+        }
+    }
+}
+
 enum StudioChatSessionExporter {
     static func defaultFilename(
         for session: StudioChatSession,
@@ -53,26 +124,21 @@ enum StudioChatSessionExporter {
         Data(summaryMarkdown(for: session, exportedAt: exportedAt).utf8)
     }
 
+    /// Library Markdown export: bridges to production `ChatExporter` transcript
+    /// (dynamic fences for reasoning/tool bodies; non-lossless header).
+    ///
+    /// **Format note:** uses the ChatExporter non-lossless shape (Created/Model/
+    /// Messages). Legacy Library-only fields (Updated, Pinned, ISO8601+fractional
+    /// timestamps, `"Unknown"` model fallback) are intentionally dropped; prefer
+    /// Studio JSON (`schemaVersion: 1`) for machine-readable metadata.
     static func markdown(for session: StudioChatSession) -> String {
-        var lines: [String] = [
-            "# \(session.title)",
-            "",
-            "- Model: \(session.modelName ?? "Unknown")",
-            "- Created: \(dateFormatter.string(from: session.createdAt))",
-            "- Updated: \(dateFormatter.string(from: session.updatedAt))",
-            "- Turns: \(session.turnCount)",
-            "- Pinned: \(session.isPinned ? "yes" : "no")",
-            "",
-        ]
-        for turn in session.turns {
-            lines.append("## \(turnHeading(for: turn))")
-            lines.append("")
-            lines.append(StudioChatText.cleanForDisplay(turn.content))
-            lines.append("")
-        }
-        return lines.joined(separator: "\n")
+        StudioChatExportBridge.markdownTranscript(for: session)
     }
 
+    /// Studio-specific Purpose / Latest Response / Handoff summary.
+    /// Multi-line and backtick-containing model text is embedded via
+    /// `ChatExporter.fenced` so headings/`---`/triple-backticks cannot break
+    /// the summary structure.
     static func summaryMarkdown(
         for session: StudioChatSession,
         exportedAt: Date = Date()
@@ -101,11 +167,11 @@ enum StudioChatSessionExporter {
             "",
             "## Purpose",
             "",
-            lastPrompt,
+            embedBody(lastPrompt),
             "",
             "## Latest Response",
             "",
-            latestResponse,
+            embedBody(latestResponse),
             "",
             "## Handoff",
             "",
@@ -156,25 +222,22 @@ enum StudioChatSessionExporter {
         return cleaned.isEmpty ? "MLX Studio Chat" : cleaned
     }
 
+    /// Embed model text into summary MD. Multi-line bodies and any text with
+    /// backticks are fenced via `ChatExporter.fenced` so nested ``` / headings /
+    /// horizontal rules cannot disturb Purpose / Latest Response structure.
+    /// Single-line plain placeholders stay unfenced for readability.
+    private static func embedBody(_ body: String) -> String {
+        if body.contains("`") || body.contains("\n") {
+            return ChatExporter.fenced("text", body).trimmingCharacters(in: .newlines)
+        }
+        return body
+    }
+
     private static func portableSession(for session: StudioChatSession) -> StudioChatSession {
         var portable = session
         portable.summaryExportPath = nil
         portable.summaryExportedAt = nil
         return portable
-    }
-
-    private static func turnHeading(for turn: ChatTurn) -> String {
-        let role = turn.role.rawValue.capitalized
-        switch turn.streamState {
-        case .complete:
-            return role
-        case .streaming:
-            return "\(role) (Streaming)"
-        case .failed:
-            return "\(role) (Failed)"
-        case .cancelled:
-            return "\(role) (Stopped)"
-        }
     }
 
     private static func defaultSummaryDirectory() throws -> URL {

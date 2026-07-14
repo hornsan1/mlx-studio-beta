@@ -1,4 +1,5 @@
 import Foundation
+import vMLXEngine
 
 enum ChatImportError: LocalizedError, Equatable {
     case unsupportedVersion(Int)
@@ -17,10 +18,11 @@ enum ChatImportError: LocalizedError, Equatable {
     }
 }
 
-/// Decoder for ChatExporter's stable JSON format. Import creates fresh UUIDs
-/// so bringing the same file in twice never overwrites an existing chat.
-/// Supports versions 1–4. v4 carries `displayContent` / `requestContext` and
-/// `generationState`; older versions default content to GFM and empty context.
+/// Decoder for ChatExporter's stable JSON format and the legacy Studio Library
+/// envelope. Import creates fresh UUIDs so bringing the same file in twice
+/// never overwrites an existing chat. Supports versions 1–4; v4 carries
+/// `displayContent` / `requestContext` and `generationState`; older versions
+/// default content to GFM and empty context.
 enum ChatImporter {
     private struct Envelope: Decodable {
         var version: Int
@@ -55,13 +57,59 @@ enum ChatImporter {
         var createdAt: String?
     }
 
+    /// Library exports predating the unified SQLite path use
+    /// `{schemaVersion, exportedAt, session: {turns: [...]}}`. Keep this
+    /// decoder here so old exported conversations remain importable through
+    /// the single Chat import surface.
+    private struct StudioEnvelope: Decodable {
+        var schemaVersion: Int
+        var session: StudioChatSession
+    }
+
+    /// Settings that are intrinsic to the exported conversation rather than
+    /// the importing app's global defaults. These become per-chat overrides
+    /// so reopening an older Studio Library export does not silently change
+    /// its response or prompt budget.
+    struct ImportedChatSettings: Equatable {
+        var maxTokens: Int?
+        var maxPromptTokens: Int?
+
+        var isEmpty: Bool {
+            maxTokens == nil && maxPromptTokens == nil
+        }
+
+        func makeChatSettings() -> ChatSettings {
+            var settings = ChatSettings()
+            settings.maxTokens = maxTokens
+            settings.maxPromptTokens = maxPromptTokens
+            return settings
+        }
+    }
+
     struct ImportedConversation: Equatable {
         var session: ChatSession
         var messages: [ChatMessage]
+        var chatSettings: ImportedChatSettings?
     }
 
     static func decode(_ data: Data, now: Date = Date()) throws -> ImportedConversation {
-        let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+        if let envelope = try? JSONDecoder().decode(Envelope.self, from: data) {
+            return try decodeCanonical(envelope, now: now)
+        }
+
+        let studioDecoder = JSONDecoder()
+        studioDecoder.dateDecodingStrategy = .iso8601
+        let studio = try studioDecoder.decode(StudioEnvelope.self, from: data)
+        guard studio.schemaVersion == 1 else {
+            throw ChatImportError.unsupportedVersion(studio.schemaVersion)
+        }
+        return try decodeStudio(studio.session, now: now)
+    }
+
+    private static func decodeCanonical(
+        _ envelope: Envelope,
+        now: Date
+    ) throws -> ImportedConversation {
         guard (1...4).contains(envelope.version) else {
             throw ChatImportError.unsupportedVersion(envelope.version)
         }
@@ -103,7 +151,85 @@ enum ChatImporter {
                 generationState: genState
             )
         }
-        return ImportedConversation(session: session, messages: messages)
+        return ImportedConversation(session: session, messages: messages, chatSettings: nil)
+    }
+
+    private static func decodeStudio(
+        _ source: StudioChatSession,
+        now: Date
+    ) throws -> ImportedConversation {
+        guard !source.turns.isEmpty else { throw ChatImportError.emptyConversation }
+
+        let sessionID = UUID()
+        let createdAt = source.createdAt
+        let session = ChatSession(
+            id: sessionID,
+            title: normalizedTitle(source.title),
+            modelPath: nil,
+            modelName: normalizedModelName(source.modelName),
+            isPinned: source.isPinned,
+            collectionName: nil,
+            createdAt: createdAt,
+            updatedAt: now
+        )
+        let cleanedSystemPrompt = source.systemPrompt
+            .map(StudioChatText.cleanForDisplay)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let alreadyHasSystemPrompt = source.turns.contains { turn in
+            turn.role == .system
+                && StudioChatText.cleanForDisplay(turn.content)
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == cleanedSystemPrompt
+        }
+        var messages: [ChatMessage] = []
+        if let cleanedSystemPrompt, !cleanedSystemPrompt.isEmpty, !alreadyHasSystemPrompt {
+            messages.append(
+                ChatMessage(
+                    sessionId: sessionID,
+                    role: .system,
+                    content: cleanedSystemPrompt,
+                    createdAt: createdAt.addingTimeInterval(-0.000_001)
+                )
+            )
+        }
+        messages.append(contentsOf: source.turns.map { turn in
+            let role: ChatMessage.Role
+            switch turn.role {
+            case .user: role = .user
+            case .assistant: role = .assistant
+            case .system: role = .system
+            }
+            let generationState: ChatGenerationState?
+            if role == .assistant {
+                switch turn.streamState {
+                case .complete: generationState = .complete
+                case .failed: generationState = .failed
+                case .cancelled: generationState = .stopped
+                // A live Library export cannot safely resume its engine.
+                // Preserve the partial output as interrupted rather than
+                // silently presenting it as completed.
+                case .streaming: generationState = .interrupted
+                }
+            } else {
+                generationState = nil
+            }
+            return ChatMessage(
+                sessionId: sessionID,
+                role: role,
+                content: StudioChatText.cleanForDisplay(turn.content),
+                createdAt: turn.createdAt,
+                isStreaming: false,
+                generationState: generationState
+            )
+        })
+        let exportedSettings = ImportedChatSettings(
+            maxTokens: source.maxResponseTokens,
+            maxPromptTokens: source.contextLimitTokens
+        )
+        return ImportedConversation(
+            session: session,
+            messages: messages,
+            chatSettings: exportedSettings.isEmpty ? nil : exportedSettings
+        )
     }
 
     private static func normalizedTitle(_ value: String) -> String {

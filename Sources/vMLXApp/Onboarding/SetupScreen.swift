@@ -223,6 +223,7 @@ struct SetupScreen: View {
     @State private var recommended: [RecommendedModel] = []
     @State private var status = ""
     @State private var starterInstallState: ModelInstallViewState?
+    @State private var starterResolution: StarterModelResolution?
 
     private let uses = OnboardingGoalRoute.allCases
 
@@ -240,6 +241,7 @@ struct SetupScreen: View {
         .background(Theme.ProNoirBackground())
         .task {
             recommended = (try? await StudioModelService(app: app).listRecommendedModels()) ?? []
+            starterResolution = await resolveStarterModel()
         }
     }
 
@@ -351,8 +353,10 @@ struct SetupScreen: View {
                         ModelRecommendationCard(
                             model: starter,
                             installState: starterInstallState,
+                            starterResolution: starterResolution,
                             queue: { installStarter(starter, openChat: false) },
-                            downloadAndChat: { installStarter(starter, openChat: true) }
+                            downloadAndChat: { installStarter(starter, openChat: true) },
+                            openLocalStarter: { openResolvedStarter() }
                         )
                     }
                     .frame(maxWidth: 380)
@@ -767,6 +771,54 @@ struct SetupScreen: View {
         }
     }
 
+    private func resolveStarterModel() async -> StarterModelResolution {
+        let service = StudioModelService(app: app)
+        if let models = try? await service.listLocalModels(),
+           let starter = models.first(where: { model in
+               model.ref.repo == StudioStarterChatModel.repo
+                   || model.ref.displayName == StudioStarterChatModel.displayName
+                   || model.ref.localURL?.path.contains("/LiquidAI/LFM2.5-350M") == true
+           }),
+           let localURL = starter.ref.localURL
+        {
+            let identity = ModelIdentity(
+                name: starter.ref.displayName,
+                path: localURL.path,
+                repo: StudioStarterChatModel.repo
+            )
+            let resources = Bundle.main.resourceURL?.standardizedFileURL.path ?? ""
+            if !resources.isEmpty,
+               localURL.standardizedFileURL.path.hasPrefix(resources + "/")
+            {
+                return .included(identity)
+            }
+            return .local(identity)
+        }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return .downloadRequired(
+            repo: StudioStarterChatModel.repo,
+            bytes: 681 * 1_024 * 1_024,
+            freeBytes: Int64(values?.volumeAvailableCapacityForImportantUsage ?? 0)
+        )
+    }
+
+    private func openResolvedStarter() {
+        guard let starterResolution,
+              let identity = starterResolution.resolvedIdentity,
+              let path = identity.path
+        else { return }
+        app.selectedModelPath = URL(fileURLWithPath: path, isDirectory: true)
+        if let handoff = selectedUse.chatPromptHandoff {
+            app.requestChatLaunch(
+                ChatLaunchIntent(handoff: handoff).withModel(starterResolution)
+            )
+        }
+        app.markFirstLaunchComplete(mode: .beginner)
+        app.mode = selectedUse.landingMode
+    }
+
     private func finish() {
         Task {
             if !hfToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -774,12 +826,26 @@ struct SetupScreen: View {
             }
             await MainActor.run {
                 if selectedMode == .beginner {
-                    app.pendingStudioChatPrompt = selectedUse.chatPromptHandoff
+                    if let handoff = selectedUse.chatPromptHandoff {
+                        if let starterResolution,
+                           let identity = starterResolution.resolvedIdentity,
+                           let path = identity.path
+                        {
+                            app.selectedModelPath = URL(fileURLWithPath: path, isDirectory: true)
+                        }
+                        app.requestChatLaunch(
+                            ChatLaunchIntent(handoff: handoff).withModel(starterResolution)
+                        )
+                    }
                 } else {
-                    app.pendingStudioChatPrompt = nil
+                    app.pendingChatLaunchIntent = nil
                 }
                 app.markFirstLaunchComplete(mode: selectedMode)
-                app.mode = selectedMode == .advanced ? (openServerAfterSetup ? .server : .models) : selectedUse.landingMode
+                if selectedMode == .advanced {
+                    app.mode = openServerAfterSetup ? .server : .models
+                } else if selectedUse.chatPromptHandoff == nil {
+                    app.mode = selectedUse.landingMode
+                }
             }
         }
     }
