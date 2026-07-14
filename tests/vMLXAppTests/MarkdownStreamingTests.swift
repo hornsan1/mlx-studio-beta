@@ -2,6 +2,36 @@ import XCTest
 @testable import vMLXApp
 
 final class MarkdownStreamingTests: XCTestCase {
+    func testStreamingParseScheduleCapsContinuousTrailingDebounce() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let deadline = MarkdownParseSchedule.deadline(
+            firstQueuedAt: start,
+            lastUpdatedAt: start.addingTimeInterval(0.11),
+            lastParseAt: .distantPast
+        )
+
+        XCTAssertEqual(
+            deadline.timeIntervalSince(start),
+            MarkdownParseSchedule.maximumCoalescingWait,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testStreamingParseScheduleRespectsMinimumIntervalAfterPriorParse() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let deadline = MarkdownParseSchedule.deadline(
+            firstQueuedAt: start.addingTimeInterval(0.02),
+            lastUpdatedAt: start.addingTimeInterval(0.02),
+            lastParseAt: start
+        )
+
+        XCTAssertEqual(
+            deadline.timeIntervalSince(start),
+            MarkdownParseSchedule.minimumReparseInterval,
+            accuracy: 0.000_001
+        )
+    }
+
     func testOpenFenceIsStableCodeNotTail() {
         let source = "Intro\n\n```python\nprint(1)\n"
         let doc = LightweightMarkdownParser.shared.parse(source)
@@ -32,6 +62,42 @@ final class MarkdownStreamingTests: XCTestCase {
         }
         XCTAssertTrue(closed)
         XCTAssertEqual(body, "hello\n")
+    }
+
+    func testFenceWithTrailingNonWhitespaceRemainsCodeBody() {
+        let source = """
+        ```swift
+        print(\"before\")
+        ```not-a-closing-fence
+        print(\"after\")
+        ```
+        """
+        let doc = LightweightMarkdownParser.shared.parse(source)
+
+        XCTAssertEqual(doc.blocks.count, 1)
+        guard case let .code(language, body, _, isClosed) = doc.blocks[0] else {
+            return XCTFail("expected one closed code block")
+        }
+        XCTAssertEqual(language, "swift")
+        XCTAssertTrue(isClosed)
+        XCTAssertEqual(
+            body,
+            "print(\"before\")\n```not-a-closing-fence\nprint(\"after\")\n"
+        )
+    }
+
+    func testLongerClosingFenceIsAcceptedAndConsumesWholeFenceLine() {
+        let source = "````swift\nvalue\n`````   \n"
+        let doc = LightweightMarkdownParser.shared.parse(source)
+
+        XCTAssertEqual(doc.blocks.count, 1)
+        guard case let .code(language, body, range, isClosed) = doc.blocks[0] else {
+            return XCTFail("expected one closed code block")
+        }
+        XCTAssertEqual(language, "swift")
+        XCTAssertEqual(body, "value\n")
+        XCTAssertTrue(isClosed)
+        XCTAssertEqual(range.end, source.utf16.count - 1)
     }
 
     func testLanguageNormalization() {
@@ -155,6 +221,49 @@ final class MarkdownStreamingTests: XCTestCase {
         )
         XCTAssertTrue(streaming.isProvisional)
         XCTAssertFalse(done.isProvisional)
+    }
+
+    func testStaleClosedTerminalBlockDoesNotClaimCurrentSource() throws {
+        let stale = LightweightMarkdownParser.shared.parse("```\nx\n```")
+        let block = try XCTUnwrap(stale.blocks.last)
+        XCTAssertFalse(
+            StreamingMarkdownSplit.terminalBlockMatchesCurrentSource(
+                block,
+                fullSource: "```\nx\n```\nnew trailing tokens"
+            )
+        )
+        let id = MarkdownBlockID.id(
+            messageID: UUID(),
+            block: block,
+            isStreaming: true,
+            isLastBlock: false
+        )
+        XCTAssertFalse(id.isProvisional)
+    }
+
+    func testCompletedMessageUsesPlainFallbackUntilFirstParseFinishes() {
+        let source = "**Not blank while parsing**"
+        XCTAssertTrue(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: .empty,
+                fullSource: source,
+                isStreaming: false
+            )
+        )
+        XCTAssertFalse(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: LightweightMarkdownParser.shared.parse(source),
+                fullSource: source,
+                isStreaming: false
+            )
+        )
+        XCTAssertFalse(
+            StreamingMarkdownSplit.needsCompletedFallback(
+                document: .empty,
+                fullSource: source,
+                isStreaming: true
+            )
+        )
     }
 }
 

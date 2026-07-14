@@ -67,14 +67,14 @@ enum StudioChatExportBridge {
     }
 
     /// Map Studio stream state → production generation state for export.
-    /// Matches durable chat: complete/failed/stopped; streaming is omitted
-    /// (Library history converts open streams to cancelled on save).
+    /// A live Library export cannot resume its engine, so retain partial output
+    /// as interrupted rather than silently omitting its state.
     private static func generationState(from streamState: ChatTurn.StreamState) -> ChatGenerationState? {
         switch streamState {
         case .complete:
             return .complete
         case .streaming:
-            return nil
+            return .interrupted
         case .failed:
             return .failed
         case .cancelled:

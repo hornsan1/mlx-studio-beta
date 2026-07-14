@@ -253,4 +253,19 @@ final class MarkdownPerformanceTests: XCTestCase {
         XCTAssertEqual(a, b)
         XCTAssertFalse(a.blocks.isEmpty)
     }
+
+    func testRenderCacheKeyIncludesNormalizedSourceEquality() {
+        let messageID = UUID()
+        let first = MarkdownRenderCache.Key(
+            messageID: messageID,
+            source: "first",
+            parserName: LightweightMarkdownParser.shared.name
+        )
+        let second = MarkdownRenderCache.Key(
+            messageID: messageID,
+            source: "second",
+            parserName: LightweightMarkdownParser.shared.name
+        )
+        XCTAssertNotEqual(first, second)
+    }
 }

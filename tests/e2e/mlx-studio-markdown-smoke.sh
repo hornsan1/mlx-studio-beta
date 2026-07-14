@@ -3,7 +3,7 @@
 #
 # Unit gates always run. Installed-app AX pasteboard asserts run only when
 # the packaged app and Accessibility tooling are available AND the fixture
-# chat can be injected into the production SQLite store.
+# chat can be injected into an isolated SQLite store.
 #
 # Usage:
 #   tests/e2e/mlx-studio-markdown-smoke.sh [/path/to/MLX Studio.app]
@@ -13,22 +13,24 @@
 #   0  unit gates pass AND (if app+AX available) pasteboard asserts pass
 #   0  unit gates pass, app missing            → prints SKIP_NO_APP
 #   0  unit gates pass, AX denied / incomplete → prints SKIP_NO_AX
-#   0  unit gates pass, SQLite seed unavailable → prints SKIP_NO_AX
-#      (soft packaging: avoids false exit 2 when chat cannot be injected)
+#   2  packaging lane: app + AX are available and a fixture, launch, or AX
+#      assertion failed
 #   1  unit gates fail
-#   2  packaging lane: app present, AX available, seed verified, assert failed
 #
 # Env:
 #   MLX_STUDIO_APP   path to packaged .app (overrides positional when set)
-#   BUNDLE_ID        defaults domain (default: ai.dealign.mlxstudio.beta)
-#   VMLX_SQLITE      override path to vmlx.sqlite3 (default: Application Support)
+#   BUNDLE_ID        base bundle identifier for the isolated copied app
+#                    (default: ai.dealign.mlxstudio.beta)
+#   MLX_SMOKE_HOME   optional empty directory for isolated app state; the
+#                    caller owns and retains it. By default a fresh temporary
+#                    home is created and removed on exit.
 #
-# Seed notes:
-#   Production RootView mounts ChatScreen (SQLite), not Studio UserDefaults.
-#   Studio defaults (mlxstudio.chat.sessions) only feed chat once via
-#   StudioChatHistoryMigration (mlxstudio.chat.unifiedSQLiteMigration.v1).
-#   This script seeds ~/Library/Application Support/vMLX/vmlx.sqlite3 directly
-#   and sets mlxstudio.chat.unifiedSelectedSessionID for durable selection.
+# Isolation notes:
+#   The copied app receives a unique CFBundleIdentifier and runs with a fresh
+#   HOME/CFFIXED_USER_HOME. Its SQLite database is therefore separate from a
+#   user's real chat history, and command-line defaults avoid writing the
+#   normal MLX Studio preference domain. The text clipboard is restored on exit
+#   when it can be read.
 #
 # Does not require network. Not a hard PR CI gate until packaging owns exit 2.
 
@@ -41,15 +43,23 @@ AX_DIR="$ROOT_DIR/tests/e2e/swift-axdriver"
 AX_BIN="$AX_DIR/.build/release/vmlx-axdriver"
 REPORT_DIR="$ROOT_DIR/tests/e2e/reports"
 BUNDLE_ID="${BUNDLE_ID:-ai.dealign.mlxstudio.beta}"
-VMLX_SQLITE="${VMLX_SQLITE:-$HOME/Library/Application Support/vMLX/vmlx.sqlite3}"
+REQUESTED_VMLX_SQLITE="${VMLX_SQLITE:-}"
 TS="$(date +%Y%m%d-%H%M%S)"
-TMP_APP="/tmp/MLX Studio Markdown Smoke.app"
+CALLER_HOME="$(cd "${HOME:?HOME must be set}" && pwd -P)"
+SMOKE_HOME=""
+OWN_SMOKE_HOME=0
+VMLX_SQLITE=""
+TMP_APP=""
+SMOKE_BUNDLE_ID=""
+SAVED_STATE_DIR=""
 PID=""
+CLIPBOARD_BACKUP=""
+CLIPBOARD_WAS_READABLE=0
 # Fallback expected body; packaging branch overwrites from import fixture.
 EXPECTED_CODE_BODY='print("MARKDOWN_E2E")'
-SESSION_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+SESSION_ID="AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
 USER_TURN_ID="11111111-1111-1111-1111-111111111111"
-ASSISTANT_TURN_ID="ffffffff-0000-1111-2222-333333333333"
+ASSISTANT_TURN_ID="FFFFFFFF-0000-1111-2222-333333333333"
 
 # Prefer env over positional; positional remains for manual packaging runs.
 APP_PATH="${MLX_STUDIO_APP:-${1:-}}"
@@ -90,14 +100,70 @@ skip_no_ax() {
   exit 0
 }
 
-cleanup() {
-  if [[ -n "${PID:-}" ]]; then
-    kill -TERM "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
+init_smoke_home() {
+  if [[ -n "$REQUESTED_VMLX_SQLITE" ]]; then
+    fail_assert "VMLX_SQLITE is not supported by the isolated smoke runner; use MLX_SMOKE_HOME instead"
   fi
-  pkill -x MLXStudio 2>/dev/null || true
-  rm -rf "$TMP_APP" 2>/dev/null || true
+
+  if [[ -z "${MLX_SMOKE_HOME:-}" ]]; then
+    SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/mlx-studio-markdown-smoke.XXXXXX")" \
+      || fail_assert "could not create isolated smoke home"
+    OWN_SMOKE_HOME=1
+  else
+    SMOKE_HOME="$MLX_SMOKE_HOME"
+    mkdir -p "$SMOKE_HOME" || fail_assert "could not create MLX_SMOKE_HOME: $SMOKE_HOME"
+    SMOKE_HOME="$(cd "$SMOKE_HOME" && pwd -P)"
+    if [[ "$SMOKE_HOME" == "$CALLER_HOME" || "$SMOKE_HOME" == "/" ]]; then
+      fail_assert "MLX_SMOKE_HOME must not be the real home directory or /"
+    fi
+    if [[ -n "$(find "$SMOKE_HOME" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      fail_assert "MLX_SMOKE_HOME must be an empty directory so no existing test state is overwritten: $SMOKE_HOME"
+    fi
+  fi
+
+  SMOKE_HOME="$(cd "$SMOKE_HOME" && pwd -P)"
+  VMLX_SQLITE="$SMOKE_HOME/Library/Application Support/vMLX/vmlx.sqlite3"
+  TMP_APP="$SMOKE_HOME/MLX Studio Markdown Smoke.app"
+  # A unique bundle ID makes UserDefaults writes from the launched app
+  # disposable even on systems where cfprefsd does not honor CFFIXED_USER_HOME.
+  SMOKE_BUNDLE_ID="${BUNDLE_ID}.markdownsmoke.${TS}.$RANDOM"
+  # AppKit writes this outside HOME even with ApplePersistenceIgnoreState.
+  SAVED_STATE_DIR="${TMPDIR%/}/${SMOKE_BUNDLE_ID}.savedState"
+  CLIPBOARD_BACKUP="$SMOKE_HOME/clipboard-before.txt"
 }
+
+stop_test_app() {
+  [[ -n "${PID:-}" ]] || return
+  if kill -0 "$PID" 2>/dev/null; then
+    kill -TERM "$PID" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "$PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null || true
+  fi
+  wait "$PID" 2>/dev/null || true
+  PID=""
+}
+
+cleanup() {
+  stop_test_app
+  if [[ "$CLIPBOARD_WAS_READABLE" == "1" && -f "$CLIPBOARD_BACKUP" ]]; then
+    /usr/bin/pbcopy <"$CLIPBOARD_BACKUP" 2>/dev/null || true
+  fi
+  if [[ "$OWN_SMOKE_HOME" == "1" && -n "$SMOKE_HOME" ]]; then
+    rm -rf "$SMOKE_HOME" 2>/dev/null || true
+  elif [[ -n "$SMOKE_HOME" ]]; then
+    note "preserving caller-provided isolated state: $SMOKE_HOME"
+  fi
+  if [[ -n "$SMOKE_BUNDLE_ID" ]]; then
+    /usr/bin/defaults delete "$SMOKE_BUNDLE_ID" 2>/dev/null || true
+  fi
+  if [[ -n "$SAVED_STATE_DIR" ]]; then
+    rm -rf "$SAVED_STATE_DIR" 2>/dev/null || true
+  fi
+}
+trap 'exit 130' INT TERM HUP
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -123,7 +189,7 @@ cd "$ROOT_DIR"
 set +e
 UNIT_LOG="$REPORT_DIR/markdown-smoke-unit-$TS.log"
 mkdir -p "$REPORT_DIR"
-swift test --filter 'MarkdownDocument|MarkdownLink|MarkdownRender|MarkdownView|MarkdownStreaming|ChatMessageContext' \
+swift test --filter 'MarkdownDocument|MarkdownLink|MarkdownPlainText|MarkdownRender|MarkdownView|MarkdownStreaming|ChatMessageContext' \
   >"$UNIT_LOG" 2>&1
 UNIT_RC=$?
 set -e
@@ -187,10 +253,16 @@ if [[ "$AX_TRUSTED" != "yes" ]]; then
 fi
 note "AX permission: trusted"
 
+# Everything below this point is the packaging lane.  Never point it at an
+# existing vmlx.sqlite3: the app is launched with a clean per-run home.
+init_smoke_home
+note "isolated home: $SMOKE_HOME"
+
 # ---------------------------------------------------------------------------
 # Fixture body (packaging branch only — after unit gates)
 # ---------------------------------------------------------------------------
 
+set +e
 FIXTURE_BODY="$(
   IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
 import json, os, re
@@ -201,42 +273,53 @@ if not m:
     raise SystemExit("import fixture missing fenced code body")
 print(m.group(1).rstrip("\n"))
 PY
-)" || skip_no_ax "import fixture $IMPORT_FIX missing fenced code body (cannot assert pasteboard)"
-EXPECTED_CODE_BODY="$FIXTURE_BODY"
-note "expected code pasteboard body: $EXPECTED_CODE_BODY"
-
+)"
+FIXTURE_RC=$?
 ASSISTANT_CONTENT="$(
   IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
 import json, os
 print(json.load(open(os.environ["IMPORT_FIX"]))["messages"][1]["content"], end="")
 PY
 )"
+ASSISTANT_RC=$?
 USER_CONTENT="$(
   IMPORT_FIX="$IMPORT_FIX" python3 - <<'PY'
 import json, os
 print(json.load(open(os.environ["IMPORT_FIX"]))["messages"][0]["content"], end="")
 PY
 )"
+USER_RC=$?
+set -e
+
+if [[ "$FIXTURE_RC" -ne 0 ]]; then
+  fail_assert "import fixture $IMPORT_FIX is missing a fenced code body (cannot assert pasteboard)"
+fi
+if [[ "$ASSISTANT_RC" -ne 0 || "$USER_RC" -ne 0 ]]; then
+  fail_assert "could not load message content from import fixture $IMPORT_FIX"
+fi
+EXPECTED_CODE_BODY="$FIXTURE_BODY"
+note "expected code pasteboard body: $EXPECTED_CODE_BODY"
 
 # ---------------------------------------------------------------------------
-# Seed production Chat SQLite (not Studio UserDefaults-only)
+# Seed isolated Chat SQLite (not Studio UserDefaults-only)
 # ---------------------------------------------------------------------------
-# ChatScreen reads ~/Library/Application Support/vMLX/vmlx.sqlite3.
-# Studio UserDefaults migration runs only once (unifiedSQLiteMigration.v1);
-# re-seeding mlxstudio.chat.sessions alone does not update live chat after
-# migration has completed on the machine.
+# ChatScreen reads ~/Library/Application Support/vMLX/vmlx.sqlite3.  Here that
+# path is under SMOKE_HOME, verified by the Foundation CFFIXED_USER_HOME
+# contract used for the app launch below.
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
-  skip_no_ax "sqlite3 CLI missing — cannot inject fixture into production chat DB"
+  fail_assert "sqlite3 CLI missing — cannot inject fixture into isolated chat DB"
 fi
 
-note "seeding production chat SQLite: $VMLX_SQLITE"
-mkdir -p "$(dirname "$VMLX_SQLITE")"
+note "seeding isolated chat SQLite: $VMLX_SQLITE"
+mkdir -p "$(dirname "$VMLX_SQLITE")" \
+  || fail_assert "could not create isolated SQLite directory for $VMLX_SQLITE"
 
-# Ensure base tables exist (app may never have launched on a clean agent).
-# Keep schema aligned with Database.migrate() core columns; extra columns are
-# added by the app on launch if user_version is behind.
-sqlite3 "$VMLX_SQLITE" <<'SQL'
+# Seed the complete current chat schema. This avoids best-effort ALTERs: any
+# schema error is a packaging-lane failure rather than a skipped AX test.
+SCHEMA_LOG="$REPORT_DIR/markdown-smoke-sqlite-schema-$TS.log"
+set +e
+sqlite3 "$VMLX_SQLITE" >"$SCHEMA_LOG" 2>&1 <<'SQL'
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS sessions (
@@ -244,7 +327,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT NOT NULL,
     model_path TEXT,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    model_name TEXT,
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    collection_name TEXT
 );
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
@@ -254,25 +340,49 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning TEXT,
     tool_calls_json TEXT,
     created_at REAL NOT NULL,
+    is_streaming INTEGER NOT NULL DEFAULT 0,
+    image_data BLOB,
+    video_paths BLOB,
+    tool_statuses BLOB,
+    request_context TEXT NOT NULL DEFAULT '',
+    generation_state TEXT,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_messages_session ON messages(session_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_drafts (
+    session_id TEXT PRIMARY KEY,
+    input_text TEXT NOT NULL DEFAULT '',
+    image_data BLOB,
+    video_paths BLOB,
+    document_data BLOB,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+PRAGMA user_version = 4;
 SQL
+SCHEMA_RC=$?
+set -e
+if [[ "$SCHEMA_RC" -ne 0 ]]; then
+  fail_assert "SQLite schema setup failed (rc=$SCHEMA_RC); see $SCHEMA_LOG"
+fi
 
-# Best-effort column upgrades so INSERT matches common app schemas without
-# requiring a full user_version dance when the DB is brand new.
-for col_sql in \
-  "ALTER TABLE sessions ADD COLUMN model_name TEXT;" \
-  "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;" \
-  "ALTER TABLE sessions ADD COLUMN collection_name TEXT;" \
-  "ALTER TABLE messages ADD COLUMN is_streaming INTEGER NOT NULL DEFAULT 0;" \
-  "ALTER TABLE messages ADD COLUMN image_data BLOB;" \
-  "ALTER TABLE messages ADD COLUMN video_paths BLOB;" \
-  "ALTER TABLE messages ADD COLUMN tool_statuses BLOB;" \
-  "ALTER TABLE messages ADD COLUMN request_context TEXT NOT NULL DEFAULT '';" \
-  "ALTER TABLE messages ADD COLUMN generation_state TEXT;"
+for column in \
+  sessions:id sessions:title sessions:model_path sessions:model_name \
+  sessions:is_pinned sessions:collection_name sessions:created_at sessions:updated_at \
+  messages:id messages:session_id messages:role messages:content messages:reasoning \
+  messages:tool_calls_json messages:created_at messages:is_streaming messages:image_data \
+  messages:video_paths messages:tool_statuses messages:request_context messages:generation_state \
+  chat_drafts:session_id chat_drafts:input_text chat_drafts:document_data
 do
-  sqlite3 "$VMLX_SQLITE" "$col_sql" 2>/dev/null || true
+  table="${column%%:*}"
+  name="${column#*:}"
+  set +e
+  COLUMN_COUNT="$(sqlite3 "$VMLX_SQLITE" "SELECT COUNT(*) FROM pragma_table_info('$table') WHERE name='$name';" 2>>"$SCHEMA_LOG")"
+  COLUMN_RC=$?
+  set -e
+  if [[ "$COLUMN_RC" -ne 0 || "$COLUMN_COUNT" != "1" ]]; then
+    fail_assert "SQLite schema is missing required $table.$name (see $SCHEMA_LOG)"
+  fi
 done
 
 # Unix epoch seconds (Database binds Date.timeIntervalSince1970).
@@ -329,34 +439,62 @@ SEED_RC=$?
 set -e
 
 if [[ "$SEED_RC" -ne 0 ]]; then
-  skip_no_ax "SQLite seed failed (rc=$SEED_RC); see $SEED_LOG — soft skip to avoid false packaging exit 2"
+  fail_assert "SQLite seed failed (rc=$SEED_RC); see $SEED_LOG"
 fi
 
-# Verify seed landed (production path only proceeds when content is present).
-SEED_CHECK="$(sqlite3 "$VMLX_SQLITE" "SELECT content FROM messages WHERE id='${ASSISTANT_TURN_ID}';" 2>/dev/null || true)"
-if [[ "$SEED_CHECK" != *"$EXPECTED_CODE_BODY"* ]]; then
-  skip_no_ax "SQLite seed verification failed (assistant message missing expected code body) — soft skip to avoid false packaging exit 2"
+# Verify seed landed before launching. Uppercase UUIDs match UUID.uuidString,
+# which Database.messages(for:) binds for its session lookup.
+set +e
+SEED_COUNT="$(sqlite3 "$VMLX_SQLITE" "SELECT COUNT(*) FROM messages WHERE id='${ASSISTANT_TURN_ID}' AND session_id='${SESSION_ID}';" 2>>"$SEED_LOG")"
+SEED_COUNT_RC=$?
+SEED_CHECK="$(sqlite3 "$VMLX_SQLITE" "SELECT content FROM messages WHERE id='${ASSISTANT_TURN_ID}' AND session_id='${SESSION_ID}';" 2>>"$SEED_LOG")"
+SEED_CHECK_RC=$?
+set -e
+if [[ "$SEED_COUNT_RC" -ne 0 || "$SEED_CHECK_RC" -ne 0 ]]; then
+  fail_assert "SQLite seed verification query failed; see $SEED_LOG"
+fi
+if [[ "$SEED_COUNT" != "1" || "$SEED_CHECK" != *"$EXPECTED_CODE_BODY"* ]]; then
+  fail_assert "SQLite seed verification failed (assistant message missing expected code body); see $SEED_LOG"
 fi
 note "SQLite seed verified for session $SESSION_ID"
-
-# Durable selection for consolidated Chat runtime (not Studio selectedSessionID).
-defaults write "$BUNDLE_ID" mlxstudio.onboardingComplete -bool true
-defaults write "$BUNDLE_ID" mlxstudio.experienceMode -string beginner
-defaults write "$BUNDLE_ID" mlxstudio.chat.unifiedSelectedSessionID "$SESSION_ID"
-# Preferred migration key is consumed once on attach; set it as a fallback for
-# first-launch-after-reset agents. Harmless if already migrated.
-defaults write "$BUNDLE_ID" mlxstudio.chat.unifiedPreferredSessionID "$SESSION_ID"
-# Keep Studio keys aligned for Library surfaces that still read them.
-defaults write "$BUNDLE_ID" mlxstudio.chat.selectedSessionID "$SESSION_ID"
 
 # ---------------------------------------------------------------------------
 # Launch app
 # ---------------------------------------------------------------------------
 
-pkill -x MLXStudio 2>/dev/null || true
-rm -rf "$TMP_APP"
-/usr/bin/ditto --noextattr "$APP_PATH" "$TMP_APP"
+COPY_LOG="$REPORT_DIR/markdown-smoke-copy-$TS.log"
+set +e
+/usr/bin/ditto --noextattr "$APP_PATH" "$TMP_APP" >"$COPY_LOG" 2>&1
+COPY_RC=$?
+set -e
+if [[ "$COPY_RC" -ne 0 ]]; then
+  fail_assert "could not copy app into isolated smoke home (rc=$COPY_RC); see $COPY_LOG"
+fi
 xattr -cr "$TMP_APP" 2>/dev/null || true
+
+INFO_PLIST="$TMP_APP/Contents/Info.plist"
+if [[ ! -f "$INFO_PLIST" ]]; then
+  fail_assert "copied app is missing $INFO_PLIST"
+fi
+set +e
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $SMOKE_BUNDLE_ID" "$INFO_PLIST" >"$COPY_LOG" 2>&1
+PLIST_RC=$?
+ACTUAL_SMOKE_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST" 2>>"$COPY_LOG")"
+set -e
+if [[ "$PLIST_RC" -ne 0 || "$ACTUAL_SMOKE_BUNDLE_ID" != "$SMOKE_BUNDLE_ID" ]]; then
+  fail_assert "could not assign isolated bundle identifier (see $COPY_LOG)"
+fi
+
+# Info.plist changed on a disposable copy, so restore a valid ad-hoc signature
+# before launch. Production signing/notarization is covered by its own lane.
+SIGN_LOG="$REPORT_DIR/markdown-smoke-sign-$TS.log"
+set +e
+/usr/bin/codesign --force --deep --sign - --timestamp=none "$TMP_APP" >"$SIGN_LOG" 2>&1
+SIGN_RC=$?
+set -e
+if [[ "$SIGN_RC" -ne 0 ]]; then
+  fail_assert "could not ad-hoc sign isolated app copy (rc=$SIGN_RC); see $SIGN_LOG"
+fi
 
 MLX_BIN="$TMP_APP/Contents/MacOS/MLXStudio"
 if [[ ! -x "$MLX_BIN" ]]; then
@@ -367,8 +505,15 @@ if [[ ! -x "$MLX_BIN" ]]; then
   fi
 fi
 
-note "launching app"
-"$MLX_BIN" -ApplePersistenceIgnoreState YES \
+note "launching isolated app ($SMOKE_BUNDLE_ID)"
+HOME="$SMOKE_HOME" CFFIXED_USER_HOME="$SMOKE_HOME" "$MLX_BIN" \
+  -ApplePersistenceIgnoreState YES \
+  -mlxstudio.onboardingComplete YES \
+  -mlxstudio.experienceMode beginner \
+  -mlxstudio.chat.unifiedSQLiteMigration.v1 YES \
+  -mlxstudio.chat.unifiedSelectedSessionID "$SESSION_ID" \
+  -mlxstudio.chat.unifiedPreferredSessionID "$SESSION_ID" \
+  -mlxstudio.chat.selectedSessionID "$SESSION_ID" \
   >"$REPORT_DIR/markdown-smoke-app-$TS.log" 2>&1 &
 PID="$!"
 sleep 2
@@ -414,7 +559,17 @@ PY
 )" || fail_assert "could not parse copy-code identifier from $GREP_OUT"
 
 note "clicking copy control: $COPY_ID"
-printf '' | /usr/bin/pbcopy 2>/dev/null || true
+# The AX assertion necessarily exercises the system text pasteboard. Preserve
+# its readable text representation so a normal completion or failure restores
+# it in cleanup; non-text pasteboard types cannot be represented by pbpaste.
+if /usr/bin/pbpaste >"$CLIPBOARD_BACKUP" 2>/dev/null; then
+  CLIPBOARD_WAS_READABLE=1
+else
+  fail_assert "could not read existing text clipboard; refusing to overwrite it"
+fi
+if ! printf '' | /usr/bin/pbcopy 2>/dev/null; then
+  fail_assert "could not clear text clipboard before copy assertion"
+fi
 
 set +e
 "$AX_BIN" click "$PID" "$COPY_ID" >"$REPORT_DIR/markdown-smoke-click-copy-$TS.txt" 2>&1
@@ -431,7 +586,13 @@ if [[ "$CLICK_RC" -ne 0 ]]; then
 fi
 
 sleep 0.5
+set +e
 PASTEBOARD="$(/usr/bin/pbpaste | tr -d '\r')"
+PASTEBOARD_RC=$?
+set -e
+if [[ "$PASTEBOARD_RC" -ne 0 ]]; then
+  fail_assert "could not read text clipboard after copy assertion"
+fi
 PASTE_NORM="$(printf '%s' "$PASTEBOARD" | sed -e 's/[[:space:]]*$//')"
 EXPECT_NORM="$(printf '%s' "$EXPECTED_CODE_BODY" | sed -e 's/[[:space:]]*$//')"
 

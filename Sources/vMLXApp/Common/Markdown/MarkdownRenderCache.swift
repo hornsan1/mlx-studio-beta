@@ -1,6 +1,6 @@
 import Foundation
 
-/// Revision-keyed, bounded cache of parsed Markdown documents.
+/// Source-keyed, bounded cache of parsed Markdown documents.
 ///
 /// Parses are pure and can run off the main actor; the cache itself is an
 /// actor so concurrent stream finalizations stay race-free.
@@ -13,8 +13,9 @@ actor MarkdownRenderCache {
 
     struct Key: Hashable, Sendable {
         var messageID: UUID?
-        /// Content hash / revision. Callers typically pass a hash of the source.
-        var revision: Int
+        /// Normalized source participates in equality, so a hash collision can
+        /// never return a document parsed from different Markdown bytes.
+        var source: String
         var parserName: String
     }
 
@@ -47,10 +48,9 @@ actor MarkdownRenderCache {
         parser: any MarkdownParser
     ) -> MarkdownDocument {
         let normalized = MarkdownParserSupport.normalizeNewlines(source)
-        let revision = normalized.hashValue
         let key = Key(
             messageID: messageID,
-            revision: revision,
+            source: normalized,
             parserName: parser.name
         )
         if let cached = storage[key] {
@@ -117,10 +117,9 @@ final class SyncMarkdownRenderCache: @unchecked Sendable {
         parser: any MarkdownParser
     ) -> MarkdownDocument {
         let normalized = MarkdownParserSupport.normalizeNewlines(source)
-        let revision = normalized.hashValue
         let key = MarkdownRenderCache.Key(
             messageID: messageID,
-            revision: revision,
+            source: normalized,
             parserName: parser.name
         )
         lock.lock()

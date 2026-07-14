@@ -118,7 +118,9 @@ struct MarkdownTableBlockView: View {
                                 )
                             }
                         }
-                        .accessibilityElement(children: .combine)
+                        // Keep row context while preserving each labelled cell
+                        // as a navigable VoiceOver child.
+                        .accessibilityElement(children: .contain)
                         .accessibilityLabel(
                             Self.rowAccessibilityLabel(
                                 headers: headers,
@@ -139,8 +141,8 @@ struct MarkdownTableBlockView: View {
                     expanded.toggle()
                 }
                 .buttonStyle(.plain)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.accent)
+                .font(Theme.Typography.markdownCaption)
+                .foregroundStyle(Theme.Colors.markdownAccent)
                 .accessibilityIdentifier("\(accessibilityIdentifier).expand")
                 .accessibilityLabel(
                     expanded
@@ -152,20 +154,20 @@ struct MarkdownTableBlockView: View {
             HStack(spacing: Theme.Spacing.sm) {
                 Button("Copy Markdown") { copyMarkdown() }
                     .buttonStyle(.plain)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textMid)
+                    .font(Theme.Typography.markdownCaption)
+                    .foregroundStyle(Theme.Colors.markdownTextSecondary)
                     .accessibilityIdentifier("\(accessibilityIdentifier).copy-markdown")
                     .accessibilityLabel("Copy table as Markdown")
                 Button("Copy TSV") { copyTSV() }
                     .buttonStyle(.plain)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textMid)
+                    .font(Theme.Typography.markdownCaption)
+                    .foregroundStyle(Theme.Colors.markdownTextSecondary)
                     .accessibilityIdentifier("\(accessibilityIdentifier).copy-tsv")
                     .accessibilityLabel("Copy table as TSV")
                 if let copiedLabel {
                     Text(copiedLabel)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.success)
+                        .font(Theme.Typography.markdownCaption)
+                        .foregroundStyle(Theme.Colors.markdownSuccess)
                         .accessibilityHidden(true)
                 }
             }
@@ -265,20 +267,23 @@ private struct MarkdownTableCell: View {
                 Text(text)
             }
         }
-        // Theme body scales when Dynamic Type / text-size preferences change via Theme tokens.
-        .font(Theme.Typography.body)
-        .fontWeight(isHeader ? .semibold : .regular)
-        // Semantic Theme colors (high-contrast dynamic provider aware).
-        .foregroundStyle(Theme.Colors.textHigh)
+        .font(
+            isHeader
+                ? Theme.Typography.markdownBodyEmphasized
+                : Theme.Typography.markdownBody
+        )
+        .foregroundStyle(Theme.Colors.markdownText)
         .textSelection(.enabled)
         .multilineTextAlignment(textAlignment)
         .padding(.horizontal, Theme.Spacing.sm)
         .padding(.vertical, Theme.Spacing.xs)
         .frame(minWidth: 92, alignment: frameAlignment)
-        .background(isHeader ? Theme.Colors.surfaceHi : Theme.Colors.surface)
+        .background(
+            isHeader ? Theme.Colors.markdownSurfaceHi : Theme.Colors.markdownSurface
+        )
         .overlay(
             Rectangle()
-                .stroke(Theme.Colors.border, lineWidth: 0.5)
+                .stroke(Theme.Colors.markdownBorder, lineWidth: 0.5)
         )
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(isHeader ? .isHeader : [])
@@ -302,6 +307,17 @@ struct CodeBlockView: View {
     /// `MarkdownBlockID.copyCodeAccessibilityIdentifier` for new call sites.
     static func copyAccessibilityIdentifier(for ordinal: Int) -> String {
         "markdown.copy-code.\(ordinal)"
+    }
+
+    /// Unique AX path for this block's line-number toggle. Deriving it from
+    /// the already-stable copy path keeps multiple code blocks targetable.
+    static func lineNumbersAccessibilityIdentifier(
+        for copyAccessibilityIdentifier: String
+    ) -> String {
+        copyAccessibilityIdentifier.replacingOccurrences(
+            of: "markdown.copy-code.",
+            with: "markdown.code.line-numbers."
+        )
     }
 
     /// Resolves effective line-number visibility for a block.
@@ -338,10 +354,10 @@ struct CodeBlockView: View {
     }
 
     private var lineCount: Int {
-        max(1, code.split(separator: "\n", omittingEmptySubsequences: false).count)
+        Self.lineCount(for: code)
     }
 
-    private var isLong: Bool { lineCount > Self.longBlockLineThreshold }
+    private var isLong: Bool { Self.isLongCode(for: code) }
 
     private var showLineNumbers: Bool {
         Self.resolvesShowLineNumbers(
@@ -351,7 +367,25 @@ struct CodeBlockView: View {
     }
 
     private var sourceLines: [Substring] {
-        code.split(separator: "\n", omittingEmptySubsequences: false)
+        Self.sourceLines(for: code)
+    }
+
+    static func lineCount(for code: String) -> Int {
+        sourceLines(for: code).count
+    }
+
+    static func isLongCode(for code: String) -> Bool {
+        lineCount(for: code) > longBlockLineThreshold
+    }
+
+    private static func sourceLines(for code: String) -> [Substring] {
+        var lines = code.split(separator: "\n", omittingEmptySubsequences: false)
+        // Parser code bodies normally end in a newline. It separates lines;
+        // it does not create a second, empty source line or collapse threshold.
+        if lines.count > 1, lines.last?.isEmpty == true {
+            lines.removeLast()
+        }
+        return lines.isEmpty ? [""] : lines
     }
 
     private var displayCode: String {
@@ -382,20 +416,20 @@ struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Theme.Spacing.sm) {
                 Text(MarkdownLanguage.displayName(for: language))
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.textLow)
+                    .font(Theme.Typography.markdownMonoCaption)
+                    .foregroundStyle(Theme.Colors.markdownTextTertiary)
                 if isProvisional {
                     Text("streaming…")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.warning)
+                        .font(Theme.Typography.markdownCaption)
+                        .foregroundStyle(Theme.Colors.markdownWarning)
                 }
                 Spacer(minLength: 0)
                 Button {
                     wrap.toggle()
                 } label: {
                     Text(wrap ? "Scroll" : "Wrap")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.textMid)
+                        .font(Theme.Typography.markdownCaption)
+                        .foregroundStyle(Theme.Colors.markdownTextSecondary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(wrap ? "Disable wrap" : "Wrap code lines")
@@ -404,11 +438,15 @@ struct CodeBlockView: View {
                     localShowLineNumbersOverride = !showLineNumbers
                 } label: {
                     Text(showLineNumbers ? "Hide #" : "Show #")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.textMid)
+                        .font(Theme.Typography.markdownCaption)
+                        .foregroundStyle(Theme.Colors.markdownTextSecondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("markdown.code.line-numbers")
+                .accessibilityIdentifier(
+                    Self.lineNumbersAccessibilityIdentifier(
+                        for: copyButtonAccessibilityIdentifier
+                    )
+                )
                 .accessibilityLabel(
                     showLineNumbers ? "Hide line numbers" : "Show line numbers"
                 )
@@ -419,8 +457,12 @@ struct CodeBlockView: View {
                 )
                 Button(action: copy) {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(copied ? Theme.Colors.success : Theme.Colors.textMid)
+                        .font(Theme.Typography.markdownCaption)
+                        .foregroundStyle(
+                            copied
+                                ? Theme.Colors.markdownSuccess
+                                : Theme.Colors.markdownTextSecondary
+                        )
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(copyButtonAccessibilityIdentifier)
@@ -430,7 +472,7 @@ struct CodeBlockView: View {
             }
             .padding(.horizontal, Theme.Spacing.md)
             .padding(.vertical, Theme.Spacing.xs)
-            .background(Theme.Colors.surface)
+            .background(Theme.Colors.markdownSurface)
 
             Group {
                 if wrap {
@@ -445,28 +487,28 @@ struct CodeBlockView: View {
                     }
                 }
             }
-            .background(Theme.Colors.surfaceHi)
+            .background(Theme.Colors.markdownSurfaceHi)
 
             if isLong {
                 Button(expanded ? "Show less" : "Show full code") {
                     expanded.toggle()
                 }
                 .buttonStyle(.plain)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.accent)
+                .font(Theme.Typography.markdownCaption)
+                .foregroundStyle(Theme.Colors.markdownAccent)
                 .padding(.horizontal, Theme.Spacing.md)
                 .padding(.vertical, Theme.Spacing.xs)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.Colors.surface)
+                .background(Theme.Colors.markdownSurface)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.md)
-                .fill(Theme.Colors.surfaceHi)
+                .fill(Theme.Colors.markdownSurfaceHi)
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.Radius.md)
-                        .stroke(Theme.Colors.border, lineWidth: 1)
+                        .stroke(Theme.Colors.markdownBorder, lineWidth: 1)
                 )
         )
     }
@@ -477,19 +519,19 @@ struct CodeBlockView: View {
         if showLineNumbers {
             HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                 Text(lineNumberGutter)
-                    .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.Colors.textLow)
+                    .font(Theme.Typography.markdownMono)
+                    .foregroundStyle(Theme.Colors.markdownTextTertiary)
                     .multilineTextAlignment(.trailing)
                     .accessibilityHidden(true)
                 Text(displayCode)
-                    .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.Colors.textHigh)
+                    .font(Theme.Typography.markdownMono)
+                    .foregroundStyle(Theme.Colors.markdownText)
                     .textSelection(.enabled)
             }
         } else {
             Text(displayCode)
-                .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.Colors.textHigh)
+                .font(Theme.Typography.markdownMono)
+                .foregroundStyle(Theme.Colors.markdownText)
                 .textSelection(.enabled)
         }
     }

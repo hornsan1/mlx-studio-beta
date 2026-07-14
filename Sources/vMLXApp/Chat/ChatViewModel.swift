@@ -338,6 +338,53 @@ final class ChatViewModel {
         }
     }
 
+    /// Consume one app-level Chat launch request. This is deliberately the
+    /// only place that turns cross-screen navigation into SQLite mutations.
+    /// Drafts are persisted immediately so a quit directly after onboarding
+    /// cannot lose the prepared prompt.
+    func consume(_ intent: ChatLaunchIntent) {
+        switch intent.action {
+        case .newConversation:
+            if shouldReuseBootstrapSession(for: intent) {
+                clearComposer()
+            } else {
+                newSession()
+            }
+        case .reopenLastClosed:
+            reopenLastClosed()
+        case .openSession(let id):
+            reload()
+            guard sessions.contains(where: { $0.id == id }) else {
+                bannerMessage = "That chat is no longer available."
+                return
+            }
+            selectSession(id)
+        }
+
+        guard let activeSessionId else { return }
+        if let title = intent.initialTitle {
+            renameSession(activeSessionId, to: title)
+        }
+        if let identity = intent.model?.resolvedIdentity {
+            updateModelIdentity(activeSessionId, name: identity.name, path: identity.path)
+        }
+        if let draft = intent.initialDraft {
+            inputText = draft
+            persistActiveDraft()
+        }
+    }
+
+    private func shouldReuseBootstrapSession(for intent: ChatLaunchIntent) -> Bool {
+        guard intent.initialTitle != nil || intent.initialDraft != nil,
+              let activeSessionId,
+              let session = sessions.first(where: { $0.id == activeSessionId }),
+              session.hasPlaceholderTitle,
+              messages.isEmpty,
+              Database.shared.draft(for: activeSessionId) == nil
+        else { return false }
+        return true
+    }
+
     var filteredSessions: [ChatSession] {
         guard !searchQuery.isEmpty else { return sessions }
         let q = searchQuery.lowercased()
@@ -649,13 +696,29 @@ final class ChatViewModel {
     }
 
     @discardableResult
-    func importConversation(_ data: Data) throws -> UUID {
+    func importConversation(_ data: Data) async throws -> UUID {
         let imported = try ChatImporter.decode(data)
         Database.shared.withTransaction {
             Database.shared.upsertSession(imported.session)
             for message in imported.messages {
                 Database.shared.upsertMessage(message)
             }
+        }
+        // A Studio Library JSON export carries its output cap and context
+        // ceiling at session level. Store them as chat-scoped settings before
+        // making the import active: the next regenerate/continue must use the
+        // conversation's saved limits rather than unrelated app defaults.
+        if let importedSettings = imported.chatSettings,
+           let engine = app?.engine
+        {
+            await engine.settings.setChat(
+                imported.session.id,
+                importedSettings.makeChatSettings()
+            )
+            // Import is a durable user action. Do not leave its settings in a
+            // debounce window that could be lost if the app is quit straight
+            // after selecting the newly imported conversation.
+            await engine.settings.flushPending()
         }
         reload()
         selectSession(imported.session.id)
@@ -1162,7 +1225,12 @@ final class ChatViewModel {
             )
         }
         let reasoning = reasoningEnabled
-        let fallbackModelPath = app?.selectedModelPath?.path ?? ""
+        // A conversation's persisted path is a stronger identity source than
+        // the app-wide last selection. The global selection can change while
+        // another conversation is open.
+        let fallbackModelPath = sessions.first(where: { $0.id == sessionId })?.modelPath
+            ?? app?.selectedModelPath?.path
+            ?? ""
         let chatId = sessionId
 
         let assistantId = assistant.id
@@ -1211,7 +1279,15 @@ final class ChatViewModel {
             if let identity {
                 await MainActor.run {
                     guard let self, self.activeGenerationID == generationID else { return }
-                    self.updateModelIdentity(chatId, name: identity.name, path: identity.path)
+                    let current = self.sessions.first(where: { $0.id == chatId })
+                    // Session-specific picker identity is authoritative. A
+                    // per-engine library may still be warming up and return
+                    // no path for the same readable name; do not erase the
+                    // already-proven path in that transient state. A changed
+                    // alias still clears a stale path as before.
+                    let stablePath = identity.path
+                        ?? (current?.modelName == identity.name ? current?.modelPath : nil)
+                    self.updateModelIdentity(chatId, name: identity.name, path: stablePath)
                 }
             }
 

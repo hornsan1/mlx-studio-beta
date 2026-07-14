@@ -101,6 +101,7 @@ final class SamplingFallbackPriorityTests: XCTestCase {
         c.topP = 0.42
         c.topK = 11
         c.maxTokens = 4242
+        c.maxPromptTokens = 65_536
         await store.setChat(chatId, c)
 
         let r = await store.resolved(sessionId: nil, chatId: chatId, request: nil)
@@ -109,8 +110,10 @@ final class SamplingFallbackPriorityTests: XCTestCase {
         XCTAssertEqual(r.settings.defaultTopP, 0.42, accuracy: 1e-9)
         XCTAssertEqual(r.settings.defaultTopK, 11)
         XCTAssertEqual(r.settings.defaultMaxTokens, 4242)
+        XCTAssertEqual(r.settings.maxPromptTokens, 65_536)
         XCTAssertEqual(r.resolutionTrace["defaultTemperature"], .chat,
                        "Chat-sourced temperature must trace to .chat")
+        XCTAssertEqual(r.resolutionTrace["maxPromptTokens"], .chat)
     }
 
     /// chat > session priority: chat tier beats session for the same field.

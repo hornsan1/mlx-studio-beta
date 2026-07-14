@@ -1,8 +1,28 @@
 import XCTest
 @testable import vMLXApp
+import vMLXTheme
 
 final class MarkdownViewTests: XCTestCase {
     private let parser = LightweightMarkdownParser.shared
+
+    func testMarkdownAccessibilityThemeTokensAreAvailable() {
+        // Compile-time coverage for the Markdown-only semantic token surface.
+        // Its use sites live exclusively in Markdown renderers; app-wide
+        // body/caption/mono continue to be fixed-density tokens.
+        _ = Theme.Typography.markdownBody
+        _ = Theme.Typography.markdownBodyEmphasized
+        _ = Theme.Typography.markdownCaption
+        _ = Theme.Typography.markdownMono
+        _ = Theme.Typography.markdownMonoCaption
+        _ = Theme.Typography.markdownHeading(level: 6)
+        _ = Theme.Colors.markdownText
+        _ = Theme.Colors.markdownTextSecondary
+        _ = Theme.Colors.markdownTextTertiary
+        _ = Theme.Colors.markdownAccent
+        _ = Theme.Colors.markdownSurface
+        _ = Theme.Colors.markdownSurfaceHi
+        _ = Theme.Colors.markdownBorder
+    }
 
     func testParsesGFMTableAndKeepsCodeBlockSeparate() {
         let source = #"""
@@ -72,6 +92,12 @@ final class MarkdownViewTests: XCTestCase {
             CodeBlockView.copyAccessibilityIdentifier(for: 3),
             "markdown.copy-code.3"
         )
+        XCTAssertEqual(
+            CodeBlockView.lineNumbersAccessibilityIdentifier(
+                for: "markdown.copy-code.message.12-34"
+            ),
+            "markdown.code.line-numbers.message.12-34"
+        )
     }
 
     func testShowLineNumbersDefaultsKeyAndDefaultResolution() {
@@ -91,6 +117,13 @@ final class MarkdownViewTests: XCTestCase {
         XCTAssertFalse(
             CodeBlockView.resolvesShowLineNumbers(preference: true, localOverride: false)
         )
+    }
+
+    func testCodeLineCountingDoesNotAddPhantomTerminalNewline() {
+        let eightyLines = (0..<80).map(String.init).joined(separator: "\n") + "\n"
+        XCTAssertEqual(CodeBlockView.lineCount(for: eightyLines), 80)
+        XCTAssertFalse(CodeBlockView.isLongCode(for: eightyLines))
+        XCTAssertEqual(CodeBlockView.lineCount(for: ""), 1)
     }
 
     func testTableCollapseThresholdAndVisibleRows() {

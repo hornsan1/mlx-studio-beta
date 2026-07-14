@@ -18,6 +18,10 @@ final class MarkdownLinkPolicyTests: XCTestCase {
         // Relative / scheme-less destinations are not opened from chat.
         XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "/etc/passwd"))
         XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "example.com/path"))
+        XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "https:"))
+        XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "http://"))
+        XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "https:///etc/passwd"))
+        XCTAssertNil(MarkdownLinkPolicy.sanitizedURL(from: "mailto:"))
     }
 
     func testDisplayLabel() {
@@ -120,11 +124,31 @@ final class MarkdownLinkPolicyTests: XCTestCase {
         }
     }
 
+    func testMarkdownAttributedInlineStripsImageURLAttributes() throws {
+        let source = """
+        ![local](file:///etc/passwd)
+        ![remote](https://example.com/image.png)
+        ![data](data:image/png;base64,AAAA)
+        ![custom](vmlx://local/image)
+        """
+        let attributed = try XCTUnwrap(MarkdownAttributed.inline(source))
+        for run in attributed.runs {
+            XCTAssertNil(
+                run[MarkdownImageURLAttribute.self],
+                "model-provided Markdown images must not retain URL attributes"
+            )
+        }
+    }
+
     func testIsAllowedDecisionMatrix() {
         let cases: [(String, Bool)] = [
             ("https://example.com", true),
             ("http://127.0.0.1:8080/x", true),
             ("mailto:a@b.c", true),
+            ("https:", false),
+            ("http://", false),
+            ("https:///etc/passwd", false),
+            ("mailto:", false),
             ("file:///tmp/x", false),
             ("javascript:alert(1)", false),
             ("data:text/html,hi", false),

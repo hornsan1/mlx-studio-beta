@@ -8,8 +8,8 @@ import vMLXTheme
 /// shares the same open path as `MarkdownProseView`.
 private struct MarkdownInlineBody: View {
     let text: String
-    var font: Font = Theme.Typography.body
-    var foreground: Color = Theme.Colors.textHigh
+    var font: Font = Theme.Typography.markdownBody
+    var foreground: Color = Theme.Colors.markdownText
 
     var body: some View {
         Group {
@@ -87,8 +87,8 @@ struct MarkdownListItemView: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs) {
             Text(marker)
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.Colors.textMid)
+                .font(Theme.Typography.markdownBody)
+                .foregroundStyle(Theme.Colors.markdownTextSecondary)
                 .frame(minWidth: ordered ? 22 : 12, alignment: .trailing)
                 .accessibilityHidden(true)
             MarkdownInlineBody(text: text)
@@ -127,13 +127,18 @@ struct MarkdownTaskItemView: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
             Image(systemName: checked ? "checkmark.square.fill" : "square")
-                // Theme body tracks Dynamic Type; avoid hardcoded point sizes.
-                .font(Theme.Typography.body)
-                .foregroundStyle(checked ? Theme.Colors.accent : Theme.Colors.textMid)
+                .font(Theme.Typography.markdownBody)
+                .foregroundStyle(
+                    checked
+                        ? Theme.Colors.markdownAccent
+                        : Theme.Colors.markdownTextSecondary
+                )
                 .accessibilityHidden(true)
             MarkdownInlineBody(
                 text: text,
-                foreground: checked ? Theme.Colors.textMid : Theme.Colors.textHigh
+                foreground: checked
+                    ? Theme.Colors.markdownTextSecondary
+                    : Theme.Colors.markdownText
             )
         }
         .padding(.leading, indent)
@@ -169,13 +174,13 @@ struct MarkdownBlockquoteView: View {
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
             RoundedRectangle(cornerRadius: 1)
-                .fill(Theme.Colors.accent.opacity(0.75))
+                .fill(Theme.Colors.markdownAccent)
                 .frame(width: barWidth)
                 .frame(maxHeight: .infinity)
                 .accessibilityHidden(true)
             MarkdownInlineBody(
                 text: text,
-                foreground: Theme.Colors.textMid
+                foreground: Theme.Colors.markdownTextSecondary
             )
         }
         .padding(.leading, leadingInset)
@@ -193,7 +198,7 @@ struct MarkdownBlockquoteView: View {
 struct MarkdownThematicBreakView: View {
     var body: some View {
         Divider()
-            .overlay(Theme.Colors.border)
+            .overlay(Theme.Colors.markdownBorder)
             .padding(.vertical, Theme.Spacing.xs)
             .accessibilityLabel("Separator")
     }

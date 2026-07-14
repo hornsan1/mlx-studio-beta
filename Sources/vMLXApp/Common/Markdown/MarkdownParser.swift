@@ -66,16 +66,15 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
                 var closeEnd = text.endIndex
                 var isClosed = false
                 while search < text.endIndex {
-                    if text[search...].hasPrefix(fence.marker) {
-                        // Closing fence must be at line start (or start of remaining text).
-                        let atLineStart = search == text.startIndex
-                            || text[text.index(before: search)] == "\n"
-                        if atLineStart {
-                            bodyEnd = search
-                            closeEnd = text.index(search, offsetBy: fence.marker.count)
-                            isClosed = true
-                            break
-                        }
+                    if let end = closingFenceEnd(
+                        at: search,
+                        openingMarker: fence.marker,
+                        in: text
+                    ) {
+                        bodyEnd = search
+                        closeEnd = end
+                        isClosed = true
+                        break
                     }
                     search = text.index(after: search)
                 }
@@ -648,6 +647,43 @@ struct LightweightMarkdownParser: MarkdownParser, Sendable {
             || text[text.index(before: index)] == "\n"
         guard atLineStart else { return nil }
         return FenceMarker(marker: String(repeating: String(ch), count: count))
+    }
+
+    /// Returns the end of a valid closing fence line, if `index` begins one.
+    /// A closer must use the opening fence character at least as many times,
+    /// start at a line boundary, and contain only horizontal whitespace after
+    /// the fence. In particular, ```swift inside a code block is code, not a
+    /// closing fence followed by prose.
+    private static func closingFenceEnd(
+        at index: String.Index,
+        openingMarker: String,
+        in text: String
+    ) -> String.Index? {
+        guard index < text.endIndex,
+              let marker = openingMarker.first,
+              text[index] == marker
+        else {
+            return nil
+        }
+        let atLineStart = index == text.startIndex
+            || text[text.index(before: index)] == "\n"
+        guard atLineStart else { return nil }
+
+        var cursor = index
+        var count = 0
+        while cursor < text.endIndex, text[cursor] == marker {
+            count += 1
+            cursor = text.index(after: cursor)
+        }
+        guard count >= openingMarker.count else { return nil }
+
+        while cursor < text.endIndex, text[cursor] != "\n" {
+            guard text[cursor] == " " || text[cursor] == "\t" else {
+                return nil
+            }
+            cursor = text.index(after: cursor)
+        }
+        return cursor
     }
 
     // MARK: - Table helpers (unchanged semantics from MarkdownView)

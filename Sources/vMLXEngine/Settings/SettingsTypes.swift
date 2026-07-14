@@ -672,6 +672,10 @@ public struct ChatSettings: Codable, Sendable {
     public var minP: Double? = nil
     public var repetitionPenalty: Double? = nil
     public var maxTokens: Int? = nil
+    /// Per-conversation prompt ceiling. This deliberately lives beside the
+    /// response limit so imported chats can retain the context budget they
+    /// were authored with without changing the user's global server ceiling.
+    public var maxPromptTokens: Int? = nil
     public var systemPrompt: String? = nil
     public var stopSequences: [String]? = nil
 

@@ -244,6 +244,52 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertTrue(json.contains("Portable answer"))
     }
 
+    func testStudioJSONExportImportsThroughCanonicalChatImporter() throws {
+        let created = Date(timeIntervalSince1970: 803_000_151)
+        let session = StudioChatSession(
+            title: "Portable round trip",
+            modelName: "Smoke Model",
+            turns: [
+                ChatTurn(role: .user, content: "<|user|>Keep this prompt", createdAt: created),
+                ChatTurn(
+                    role: .assistant,
+                    content: "<|assistant|>Keep this partial answer",
+                    createdAt: created.addingTimeInterval(1),
+                    streamState: .streaming
+                ),
+            ],
+            systemPrompt: "Always cite the local source.",
+            maxResponseTokens: 777,
+            contextLimitTokens: 65_536,
+            createdAt: created,
+            updatedAt: created.addingTimeInterval(1),
+            isPinned: true
+        )
+
+        let exported = try StudioChatSessionExporter.data(for: session, format: .json)
+        let imported = try ChatImporter.decode(
+            exported,
+            now: created.addingTimeInterval(2)
+        )
+
+        XCTAssertNotEqual(imported.session.id, session.id)
+        XCTAssertEqual(imported.session.title, "Portable round trip")
+        XCTAssertEqual(imported.session.modelName, "Smoke Model")
+        XCTAssertTrue(imported.session.isPinned)
+        XCTAssertEqual(
+            imported.messages.map(\.content),
+            ["Always cite the local source.", "Keep this prompt", "Keep this partial answer"]
+        )
+        XCTAssertEqual(
+            imported.messages.map(\.sessionId),
+            [imported.session.id, imported.session.id, imported.session.id]
+        )
+        XCTAssertEqual(imported.messages.first?.role, .system)
+        XCTAssertEqual(imported.messages.last?.generationState, .interrupted)
+        XCTAssertEqual(imported.chatSettings?.maxTokens, 777)
+        XCTAssertEqual(imported.chatSettings?.maxPromptTokens, 65_536)
+    }
+
     func testSummaryExportWritesSessionBriefToDirectory() throws {
         let exportedAt = Date(timeIntervalSince1970: 803_000_200)
         let sessionID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
@@ -358,6 +404,6 @@ final class StudioChatSessionExporterTests: XCTestCase {
         XCTAssertEqual(messages[1].generationState, .complete) // production parity
         XCTAssertEqual(messages[2].generationState, .failed)
         XCTAssertEqual(messages[3].generationState, .stopped)
-        XCTAssertNil(messages[4].generationState) // streaming omitted
+        XCTAssertEqual(messages[4].generationState, .interrupted)
     }
 }

@@ -23,8 +23,8 @@ struct StreamingTextView: View {
 
     var body: some View {
         Text(displayed)
-            .font(Theme.Typography.body)
-            .foregroundStyle(Theme.Colors.textHigh)
+            .font(Theme.Typography.markdownBody)
+            .foregroundStyle(Theme.Colors.markdownText)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {

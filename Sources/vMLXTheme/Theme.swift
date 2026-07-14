@@ -36,6 +36,67 @@ public enum Theme {
         public static let warning    = Color(hex: 0xF0B35A)
         public static let danger     = Color(hex: 0xFF6B8A)
         public static let creative   = Color(hex: 0xD6A5FF)
+
+        // MARK: Markdown accessibility palette
+
+        /// Markdown is the one dense reading surface that intentionally opts
+        /// into Dynamic Type and the system's increased-contrast appearance.
+        /// Keep these separate from the fixed-density global tokens above so
+        /// the rest of Studio remains visually stable.
+        public static let markdownText = dynamic(
+            dark: 0xF4F7FB,
+            light: 0xF4F7FB,
+            highContrastDark: 0xFFFFFF,
+            highContrastLight: 0xFFFFFF
+        )
+        public static let markdownTextSecondary = dynamic(
+            dark: 0xBAC4D0,
+            light: 0xBAC4D0,
+            highContrastDark: 0xE9F0F8,
+            highContrastLight: 0xE9F0F8
+        )
+        public static let markdownTextTertiary = dynamic(
+            dark: 0x8C99A8,
+            light: 0x8C99A8,
+            highContrastDark: 0xD5DFE9,
+            highContrastLight: 0xD5DFE9
+        )
+        public static let markdownAccent = dynamic(
+            dark: 0x6EA8FF,
+            light: 0x6EA8FF,
+            highContrastDark: 0xB8D4FF,
+            highContrastLight: 0xB8D4FF
+        )
+        public static let markdownSuccess = dynamic(
+            dark: 0x5BD489,
+            light: 0x5BD489,
+            highContrastDark: 0xA8F3C3,
+            highContrastLight: 0xA8F3C3
+        )
+        public static let markdownWarning = dynamic(
+            dark: 0xF0B35A,
+            light: 0xF0B35A,
+            highContrastDark: 0xFFE0A8,
+            highContrastLight: 0xFFE0A8
+        )
+        public static let markdownSurface = dynamic(
+            dark: 0x111318,
+            light: 0x111318,
+            highContrastDark: 0x000000,
+            highContrastLight: 0x000000
+        )
+        public static let markdownSurfaceHi = dynamic(
+            dark: 0x1A1D24,
+            light: 0x1A1D24,
+            highContrastDark: 0x0B0D12,
+            highContrastLight: 0x0B0D12
+        )
+        public static let markdownBorder = dynamic(
+            dark: 0x526071,
+            light: 0x526071,
+            highContrastDark: 0xDDE8F3,
+            highContrastLight: 0xDDE8F3
+        )
     }
 
     // MARK: Spacing
@@ -57,8 +118,9 @@ public enum Theme {
     }
 
     // MARK: Typography
-    /// Fixed-point chat density tokens (rest of the app). Markdown headings
-    /// use `markdownHeading(level:)` which opts into Dynamic Type styles.
+    /// Fixed-point chat density tokens for the rest of the app. Markdown uses
+    /// the semantic `markdown*` tokens below so long-form response reading can
+    /// honor Dynamic Type without changing Studio's global density.
     public enum Typography {
         public static let display  = Font.system(size: 30, weight: .semibold, design: .default)
         public static let title    = Font.system(size: 18, weight: .semibold, design: .default)
@@ -69,16 +131,26 @@ public enum Theme {
         public static let mono     = Font.system(size: 12, weight: .regular, design: .monospaced)
         public static let monoCaption = Font.system(size: 11, weight: .regular, design: .monospaced)
 
-        /// ATX Markdown heading hierarchy. Text-style based so Dynamic Type
-        /// scales headings without changing global app density tokens.
+        // MARK: Markdown Dynamic Type
+
+        public static let markdownBody = Font.system(.body, design: .default)
+        public static let markdownBodyEmphasized = Font.system(.body, design: .default)
+            .weight(.medium)
+        public static let markdownCaption = Font.system(.caption, design: .default)
+        public static let markdownMono = Font.system(.body, design: .monospaced)
+        public static let markdownMonoCaption = Font.system(.caption, design: .monospaced)
+
+        /// ATX Markdown heading hierarchy. Every level maps to a semantic
+        /// text style so accessibility text-size settings scale all headings,
+        /// including levels four through six.
         public static func markdownHeading(level: Int) -> Font {
             switch max(1, min(level, 6)) {
             case 1: return .system(.title2, design: .default).weight(.semibold)
             case 2: return .system(.title3, design: .default).weight(.semibold)
             case 3: return .system(.headline, design: .default)
-            case 4: return .system(size: 13, weight: .semibold, design: .default)
-            case 5: return .system(size: 12, weight: .medium, design: .default)
-            default: return .system(size: 11, weight: .medium, design: .default)
+            case 4: return .system(.subheadline, design: .default).weight(.semibold)
+            case 5: return .system(.footnote, design: .default).weight(.medium)
+            default: return .system(.caption, design: .default).weight(.medium)
             }
         }
     }
@@ -164,15 +236,29 @@ extension Color {
 /// us avoid `Color(NSColor(...))` ceremony and works across macOS 14+
 /// without needing an asset catalog. Used by `Theme.Colors` so the same
 /// token name (`background`, `surface`, `textHigh`) automatically picks
-/// the right shade when the user flips the Appearance menu in the tray.
+/// the right shade when the user flips the Appearance menu in the tray. The
+/// optional high-contrast overrides are used only by Markdown's dedicated
+/// reading palette, leaving global Studio colors unchanged.
 @inline(__always)
-private func dynamic(dark: UInt32, light: UInt32) -> Color {
+private func dynamic(
+    dark: UInt32,
+    light: UInt32,
+    highContrastDark: UInt32? = nil,
+    highContrastLight: UInt32? = nil
+) -> Color {
     #if canImport(AppKit)
     return Color(nsColor: NSColor(name: nil) { appearance in
         let isDark = appearance.bestMatch(
             from: [.darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua]
         ) != nil
-        let hex = isDark ? dark : light
+        let isHighContrast = appearance.bestMatch(
+            from: [.accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua]
+        ) != nil
+        let normal = isDark ? dark : light
+        let highContrast = isDark
+            ? (highContrastDark ?? dark)
+            : (highContrastLight ?? light)
+        let hex = isHighContrast ? highContrast : normal
         let r = CGFloat((hex >> 16) & 0xFF) / 255.0
         let g = CGFloat((hex >>  8) & 0xFF) / 255.0
         let b = CGFloat( hex        & 0xFF) / 255.0

@@ -36,7 +36,22 @@ enum MarkdownLinkPolicy {
             // Scheme-less relative URLs are not opened — chat has no base document.
             return false
         }
-        return allowedSchemes.contains(scheme)
+        switch scheme {
+        case "https", "http":
+            // Foundation accepts values such as `https:` and `https:///path`
+            // as URLs with an allowed scheme but no authority. Chat has no
+            // useful base URL, so only absolute web destinations are valid.
+            return !(url.host?.isEmpty ?? true)
+        case "mailto":
+            // Do not open an empty compose sheet from a model-generated link.
+            // AttributedString's Foundation URL bridge can expose an empty
+            // `path` for an otherwise valid `mailto:user@example.com`, so
+            // validate the URL spelling after its scheme instead.
+            let destination = String(url.absoluteString.dropFirst(scheme.count + 1))
+            return !destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default:
+            return false
+        }
     }
 
     /// Human-readable destination for hover / accessibility context.
@@ -66,6 +81,15 @@ enum MarkdownLinkPolicy {
     }
 }
 
+/// Foundation represents Markdown images with this attribute rather than
+/// `AttributedString.link`. We never render model-provided image destinations:
+/// retaining one could allow a future SwiftUI/AppKit renderer to resolve a
+/// local, custom-scheme, data, or remote URL without passing the link gate.
+struct MarkdownImageURLAttribute: AttributedStringKey {
+    typealias Value = URL
+    static let name = "NSImageURL"
+}
+
 // MARK: - OpenURL gate (all AttributedString markdown surfaces)
 
 /// Shared link open path for every SwiftUI surface that renders Markdown
@@ -80,20 +104,27 @@ enum MarkdownOpenURL {
         }
     }
 
-    /// Strip link attributes whose URL fails the allowlist so click targets
-    /// cannot open unsafe schemes. Hard guarantee independent of `openURL`.
+    /// Strip unsafe link attributes and all Markdown image destinations so
+    /// model-provided content cannot resolve URLs outside the explicit openURL
+    /// gate. Hard guarantee independent of `openURL`.
     static func sanitizeLinks(_ attributed: AttributedString) -> AttributedString {
         var result = attributed
         // Collect ranges first — mutating while iterating runs is unsafe.
-        var disallowed: [Range<AttributedString.Index>] = []
+        var disallowedLinks: [Range<AttributedString.Index>] = []
+        var imageURLs: [Range<AttributedString.Index>] = []
         for run in result.runs {
-            guard let url = run.link else { continue }
-            if !MarkdownLinkPolicy.isAllowed(url) {
-                disallowed.append(run.range)
+            if let url = run.link, !MarkdownLinkPolicy.isAllowed(url) {
+                disallowedLinks.append(run.range)
+            }
+            if run[MarkdownImageURLAttribute.self] != nil {
+                imageURLs.append(run.range)
             }
         }
-        for range in disallowed {
+        for range in disallowedLinks {
             result[range].link = nil
+        }
+        for range in imageURLs {
+            result[range][MarkdownImageURLAttribute.self] = nil
         }
         return result
     }
