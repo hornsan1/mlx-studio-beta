@@ -290,6 +290,8 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
     public let topology: ModelExpertTopology?
     public let expertActivationEvidence: [ExpertActivationEvidence]?
     public let routerWeightedExpertEvidence: [RouterWeightedExpertEvidence]?
+    public let maestroExpertEvidence: [MAESTROExpertEvidence]?
+    public let retentionEvidence: StrategyRetentionEvidence?
 
     public init(
         id: StrategyAnalysisID = .init(),
@@ -301,7 +303,9 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         evidenceReferences: [String: String] = [:],
         topology: ModelExpertTopology? = nil,
         expertActivationEvidence: [ExpertActivationEvidence]? = nil,
-        routerWeightedExpertEvidence: [RouterWeightedExpertEvidence]? = nil
+        routerWeightedExpertEvidence: [RouterWeightedExpertEvidence]? = nil,
+        maestroExpertEvidence: [MAESTROExpertEvidence]? = nil,
+        retentionEvidence: StrategyRetentionEvidence? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -313,6 +317,8 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         self.topology = topology
         self.expertActivationEvidence = expertActivationEvidence
         self.routerWeightedExpertEvidence = routerWeightedExpertEvidence
+        self.maestroExpertEvidence = maestroExpertEvidence
+        self.retentionEvidence = retentionEvidence
     }
 }
 
@@ -321,6 +327,7 @@ public struct StrategyAnalysisResult: Codable, Hashable, Sendable {
     public let descriptor: StrategyDescriptor
     public let candidatePlans: [OptimizationPlan]
     public let expertScores: [StrategyExpertScore]?
+    public let retentionEvidence: StrategyRetentionEvidence?
     public let warnings: [String]
 
     public init(
@@ -328,12 +335,14 @@ public struct StrategyAnalysisResult: Codable, Hashable, Sendable {
         descriptor: StrategyDescriptor,
         candidatePlans: [OptimizationPlan],
         expertScores: [StrategyExpertScore]? = nil,
+        retentionEvidence: StrategyRetentionEvidence? = nil,
         warnings: [String] = []
     ) {
         self.analysisID = analysisID
         self.descriptor = descriptor
         self.candidatePlans = candidatePlans
         self.expertScores = expertScores
+        self.retentionEvidence = retentionEvidence
         self.warnings = warnings
     }
 }
