@@ -150,6 +150,7 @@ Paths are relative to their repository.
 
 - The Swift packages have a tools/platform mismatch: MLX Studio is Swift 5.12/macOS 14; JANG runtime is Swift 6/macOS 15.
 - At the pinned source SHA, `jang-runtime/Sources/JANGExpertLab/JANGExpertLab.swift` is a large combined domain/store/runner file and directly imports `JANG` and `JANGKit`. The canonical PR 7 adaptation preserves its Atlas/plan/evidence behavior in `Sources/JANGExpertLab/` while replacing the runner's `JANGKit.Model` ownership with injected `ModelInferenceProvider`.
+- The canonical PR 8 worker consolidates `PythonRunner`, `PythonCLIInvoker`, `CLIArgsBuilder`, and `JSONLProgressParser` behavior in `MLXStudioOptimization`. It supports only declared operations; specialized Python commands remain unavailable until their command adapters and parity fixtures land.
 - JANG Studio verification and Expert Lab screens contain substantial orchestration logic that must move behind services before UI reuse.
 - The existing vMLX tree already carries JANG/JANGTQ loader and kernel work, so copying JANG runtime wholesale would create a third runtime rather than consolidating one.
 - Cross-database artifact references cannot use native SQLite foreign keys; repository-level validation and repair are required while stores remain split.

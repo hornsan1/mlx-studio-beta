@@ -9,7 +9,7 @@
 | Swift/platform mismatch | MLX uses Swift 5.12/macOS 14; JANG runtime uses Swift 6/macOS 15 | Port code to product floor and run strict-concurrency checks; do not add a macOS 15 floor implicitly |
 | Duplicate low-level kernels | vMLX already contains JANG/JANGTQ loaders and kernels while JANGQ has separate Metal/runtime targets | Produce symbol/format/kernel parity matrix before moving JANGCoreMetal/JANGMetal |
 | Runtime capability gaps | JANGQ may support artifacts not accepted by the pinned vMLX loader | Gate retirement on real load/generate/trace/serve matrix per format and architecture |
-| Fragmented converters | Many specialized Python entry points do not share arguments or JSONL behavior | Worker capability registry and per-command adapter tests; do not synthesize unsupported universal flags |
+| Fragmented converters | Many specialized Python entry points do not share arguments or JSONL behavior | PR 8 establishes a declared-operation worker and versioned JSONL boundary; add per-command adapters and parity tests without synthesizing unsupported universal flags |
 | REAP portability | REAP is specialized across Kimi, MiniMax, and DSV4 modules | Declare supported architectures and reject others; extract common result schema only after parity |
 | Missing strategies | No shared MAN, MSAN, or MAESTRO implementation exists | Treat PRs 10/12 as new implementations with literature/spec provenance and golden tests |
 | Expert Lab coupling | The pinned source combines domain, SQLite, runner, and direct `JANGKit.Model`; UI files still contain orchestration | PR 7 removes the canonical target's `JANGKit.Model` edge via `ModelInferenceProvider`; continue splitting store/UI seams while preserving validator gates |

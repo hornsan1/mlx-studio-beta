@@ -1,0 +1,5 @@
+{"v":1,"type":"phase","n":1,"total":5,"name":"detect"}
+{"v":1,"type":"tick","done":2,"total":10,"label":"weights"}
+{"v":1,"type":"info","msg":"conversion active"}
+{"v":1,"type":"warn","msg":"using fallback"}
+{"v":1,"type":"done","ok":true,"output":"/tmp/output"}
