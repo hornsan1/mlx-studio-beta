@@ -112,6 +112,46 @@ public enum PythonJANGCommandBuilder {
             }
             return base + [request.operation.rawValue, request.sourceURL.path]
 
+        case .generateModelCard:
+            if let unsupported = request.parameters.keys.sorted().first {
+                throw PythonJANGCommandBuilderError.unsupportedParameter(unsupported)
+            }
+            return base + [
+                "modelcard", "--model", request.sourceURL.path, "--json",
+            ]
+
+        case .publishHuggingFace:
+            let allowed = Set(["repo", "private", "dry-run", "regenerate-card"])
+            if let unsupported = request.parameters.keys
+                .filter({ !allowed.contains($0) })
+                .sorted()
+                .first {
+                throw PythonJANGCommandBuilderError.unsupportedParameter(unsupported)
+            }
+            guard let repo = request.parameters["repo"], !repo.isEmpty else {
+                throw PythonJANGCommandBuilderError.missingParameter("repo")
+            }
+            var arguments = base + [
+                "publish", "--model", request.sourceURL.path,
+                "--repo", repo, "--json", "--progress=json",
+            ]
+            for (parameter, flag) in [
+                ("private", "--private"),
+                ("dry-run", "--dry-run"),
+                ("regenerate-card", "--regenerate-card"),
+            ] {
+                if let value = request.parameters[parameter] {
+                    guard value == "true" || value == "false" else {
+                        throw PythonJANGCommandBuilderError.invalidParameter(
+                            name: parameter,
+                            value: value
+                        )
+                    }
+                    if value == "true" { arguments.append(flag) }
+                }
+            }
+            return arguments
+
         default:
             throw PythonJANGCommandBuilderError.unsupportedOperation(
                 request.operation.rawValue

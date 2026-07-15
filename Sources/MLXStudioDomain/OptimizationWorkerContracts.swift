@@ -14,6 +14,8 @@ public extension OptimizationWorkerOperation {
     static let inspect = Self(rawValue: "inspect")
     static let validate = Self(rawValue: "validate")
     static let profile = Self(rawValue: "profile")
+    static let generateModelCard = Self(rawValue: "modelcard")
+    static let publishHuggingFace = Self(rawValue: "publish-huggingface")
 }
 
 public enum OptimizationWorkspaceAction: String, Codable, CaseIterable, Hashable, Sendable {
@@ -136,6 +138,7 @@ public enum OptimizationWorkerEvent: Codable, Hashable, Sendable {
     case phase(index: Int, total: Int, name: String)
     case progress(completed: Int, total: Int, label: String?)
     case message(level: WorkerMessageLevel, text: String)
+    case structuredOutput(json: String)
     case toolReportedCompletion(ok: Bool, output: String?, error: String?)
     case completed(outputURL: URL?)
     case cancelled(escalatedToSIGKILL: Bool, partialOutput: PartialOutputDisposition)

@@ -1,7 +1,53 @@
 import Foundation
 import MLXStudioDomain
+import MLXStudioOptimization
 import MLXStudioPersistence
 import vMLXEngine
+
+@MainActor
+enum StudioJANGWorkerFactory {
+    static func configuration(
+        secretEnvironment: [String: String] = [:],
+        variables: [String: String] = ProcessInfo.processInfo.environment,
+        resourceURL: URL? = Bundle.main.resourceURL
+    ) -> PythonJANGWorkerConfiguration {
+        var environment = variables
+        let bundledRoot = resourceURL?
+            .appendingPathComponent("jang-python", isDirectory: true)
+        let bundledPython = bundledRoot?
+            .appendingPathComponent("bin/python3.11")
+        let bundledPythonPath = bundledPython.flatMap {
+            FileManager.default.isExecutableFile(atPath: $0.path) ? $0.path : nil
+        }
+        let python = variables["MLX_STUDIO_JANG_PYTHON"]
+            ?? bundledPythonPath
+            ?? "/usr/bin/python3"
+        if variables["MLX_STUDIO_JANG_PYTHON"] == nil,
+           bundledPythonPath != nil,
+           let bundledRoot {
+            environment["PYTHONHOME"] = bundledRoot.path
+        }
+        if let pythonPath = variables["MLX_STUDIO_JANG_PYTHONPATH"] {
+            environment["PYTHONPATH"] = pythonPath
+        }
+        return .init(
+            executableURL: URL(fileURLWithPath: python),
+            environment: environment,
+            secretEnvironment: secretEnvironment
+        )
+    }
+
+    static func make(
+        secretEnvironment: [String: String] = [:],
+        databaseURL: URL = ModelArtifactRepository.defaultDatabaseURL()
+    ) throws -> PythonJANGWorker {
+        let repository = try ModelArtifactRepository(databaseURL: databaseURL)
+        return PythonJANGWorker(
+            configuration: configuration(secretEnvironment: secretEnvironment),
+            jobRepository: repository.makeJobRepository()
+        )
+    }
+}
 
 enum ExperienceMode: String, Codable, CaseIterable, Identifiable {
     case beginner
