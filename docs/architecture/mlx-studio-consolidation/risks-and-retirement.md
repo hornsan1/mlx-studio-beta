@@ -11,7 +11,7 @@
 | Runtime capability gaps | JANGQ may support artifacts not accepted by the pinned vMLX loader | Gate retirement on real load/generate/trace/serve matrix per format and architecture |
 | Fragmented converters | Many specialized Python entry points do not share arguments or JSONL behavior | PR 8 establishes a declared-operation worker and versioned JSONL boundary; add per-command adapters and parity tests without synthesizing unsupported universal flags |
 | REAP portability | REAP is specialized across Kimi, MiniMax, and DSV4 modules | Declare supported architectures and reject others; extract common result schema only after parity |
-| Missing strategies | No shared MAN, MSAN, or MAESTRO implementation exists | Treat PRs 10/12 as new implementations with literature/spec provenance and golden tests |
+| Missing strategies | No shared MAN, MSAN, or MAESTRO implementation exists at the Phase 0 SHAs | MAN/MSAN land in PR 10 with pinned literature/reference provenance and golden tests; MAESTRO remains a separately gated PR 12 experiment |
 | Expert Lab coupling | The pinned source combines domain, SQLite, runner, and direct `JANGKit.Model`; UI files still contain orchestration | PR 7 removes the canonical target's `JANGKit.Model` edge via `ModelInferenceProvider`; continue splitting store/UI seams while preserving validator gates |
 | Cross-store integrity | Chat and artifact databases cannot enforce foreign keys across files | Repository validation, repair report, nullable compatibility IDs, and no guessed matches |
 | Large-model hashing cost | Full content hashes may read hundreds of GB | Incremental hashing job, cached file records, cancellation/resume, manifest hash distinct from content completion |

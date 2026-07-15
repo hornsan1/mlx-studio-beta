@@ -287,6 +287,8 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
     public let objective: OptimizationObjective
     public let constraints: PruningConstraints
     public let evidenceReferences: [String: String]
+    public let topology: ModelExpertTopology?
+    public let expertActivationEvidence: [ExpertActivationEvidence]?
 
     public init(
         id: StrategyAnalysisID = .init(),
@@ -295,7 +297,9 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         calibrationSuiteID: EvaluationSuiteID,
         objective: OptimizationObjective,
         constraints: PruningConstraints,
-        evidenceReferences: [String: String] = [:]
+        evidenceReferences: [String: String] = [:],
+        topology: ModelExpertTopology? = nil,
+        expertActivationEvidence: [ExpertActivationEvidence]? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -304,6 +308,8 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         self.objective = objective
         self.constraints = constraints
         self.evidenceReferences = evidenceReferences
+        self.topology = topology
+        self.expertActivationEvidence = expertActivationEvidence
     }
 }
 
@@ -311,17 +317,20 @@ public struct StrategyAnalysisResult: Codable, Hashable, Sendable {
     public let analysisID: StrategyAnalysisID
     public let descriptor: StrategyDescriptor
     public let candidatePlans: [OptimizationPlan]
+    public let expertScores: [StrategyExpertScore]?
     public let warnings: [String]
 
     public init(
         analysisID: StrategyAnalysisID,
         descriptor: StrategyDescriptor,
         candidatePlans: [OptimizationPlan],
+        expertScores: [StrategyExpertScore]? = nil,
         warnings: [String] = []
     ) {
         self.analysisID = analysisID
         self.descriptor = descriptor
         self.candidatePlans = candidatePlans
+        self.expertScores = expertScores
         self.warnings = warnings
     }
 }

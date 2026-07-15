@@ -263,6 +263,8 @@ final class DomainContractTests: XCTestCase {
         requireSendable(ModelExpertTopology.self)
         requireSendable(StructuralExpertMask.self)
         requireSendable(OptimizationPlanValidation.self)
+        requireSendable(ExpertActivationEvidence.self)
+        requireSendable(StrategyExpertScore.self)
         requireSendable(StrategyAnalysisRequest.self)
         requireSendable(StrategyAnalysisResult.self)
     }
