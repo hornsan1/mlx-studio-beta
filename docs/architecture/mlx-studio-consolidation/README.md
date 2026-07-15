@@ -39,6 +39,7 @@ ADR numbers in this directory are local to the consolidation decision set. They 
 - [Database migration proposal](database-migration.md)
 - [Pull-request sequence](pr-sequence.md)
 - [Risks and conditional retirement list](risks-and-retirement.md)
+- [JANG Studio retirement record and migration guide](jang-studio-retirement.md)
 - [ADR-001: MLX Studio is the sole product](ADR-001-product-identity.md)
 - [ADR-002: vMLX is the sole inference runtime](ADR-002-runtime-authority.md)
 - [ADR-003: One artifact domain](ADR-003-artifact-domain.md)
@@ -65,3 +66,5 @@ ADR numbers in this directory are local to the consolidation decision set. They 
 ## Phase 0 exit gate
 
 Phase 0 is complete when each required capability has an exact source, canonical owner, destination, migration phase, and retirement gate; all documented paths exist at the pinned revisions; and the accepted ADRs remove ambiguity about product identity, runtime authority, artifact ownership, worker boundaries, strategy maturity, and recommendation selection.
+
+The implementation sequence is complete through the PR 20 retirement gate. The retirement record preserves the original Phase 0 pins while naming the coordinated source freeze, public redirect, package proof, migration steps, rollback path and intentional compatibility survivors.
