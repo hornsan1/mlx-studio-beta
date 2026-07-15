@@ -289,6 +289,7 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
     public let evidenceReferences: [String: String]
     public let topology: ModelExpertTopology?
     public let expertActivationEvidence: [ExpertActivationEvidence]?
+    public let routerWeightedExpertEvidence: [RouterWeightedExpertEvidence]?
 
     public init(
         id: StrategyAnalysisID = .init(),
@@ -299,7 +300,8 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         constraints: PruningConstraints,
         evidenceReferences: [String: String] = [:],
         topology: ModelExpertTopology? = nil,
-        expertActivationEvidence: [ExpertActivationEvidence]? = nil
+        expertActivationEvidence: [ExpertActivationEvidence]? = nil,
+        routerWeightedExpertEvidence: [RouterWeightedExpertEvidence]? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -310,6 +312,7 @@ public struct StrategyAnalysisRequest: Codable, Hashable, Sendable {
         self.evidenceReferences = evidenceReferences
         self.topology = topology
         self.expertActivationEvidence = expertActivationEvidence
+        self.routerWeightedExpertEvidence = routerWeightedExpertEvidence
     }
 }
 

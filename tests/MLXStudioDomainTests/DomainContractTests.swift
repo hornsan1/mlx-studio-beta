@@ -264,6 +264,7 @@ final class DomainContractTests: XCTestCase {
         requireSendable(StructuralExpertMask.self)
         requireSendable(OptimizationPlanValidation.self)
         requireSendable(ExpertActivationEvidence.self)
+        requireSendable(RouterWeightedExpertEvidence.self)
         requireSendable(StrategyExpertScore.self)
         requireSendable(StrategyAnalysisRequest.self)
         requireSendable(StrategyAnalysisResult.self)
