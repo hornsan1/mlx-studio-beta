@@ -365,10 +365,14 @@ final class AppState {
     /// falls back to when no session is selected (e.g. first launch, Chat
     /// mode without a Server session). Every other code path should prefer
     /// `activeEngine` or `engine(for:)`.
-    private let defaultEngine = Engine()
+    private let defaultEngine: Engine
     var engines: [UUID: Engine] = [:]
 
     init() {
+        let engine = Engine()
+        self.defaultEngine = engine
+        self.downloadManager = engine.downloadManager
+
         // Recover from any force-quit mid-stream BEFORE the UI reads
         // SQLite. Flips `is_streaming = 1` rows back to 0 and tags them
         // with ` [interrupted]`. Called exactly once on app launch,
@@ -484,7 +488,7 @@ final class AppState {
         let fresh = Engine()
         engines[id] = fresh
         Task { @MainActor [weak self] in
-            let dm = await fresh.downloadManager
+            let dm = fresh.downloadManager
             HuggingFaceAuth.shared.bind(dm)
             // Fan-in: forward this engine's download events into the
             // shared AppState.downloadJobs list so HTTP-initiated pulls
@@ -836,7 +840,7 @@ final class AppState {
     // Download manager — shared across all screens. Per
     // `feedback_download_window.md`, the Downloads window auto-opens on the
     // first `.started` event so the user ALWAYS sees the download.
-    let downloadManager = DownloadManager()
+    let downloadManager: DownloadManager
     var downloadJobs: [DownloadManager.Job] = []
     var hasAutoOpenedDownloadsWindow = false
 
@@ -1438,7 +1442,7 @@ struct RootView: View {
             // subsequent download picks up the stored token. Per-session
             // engines bind lazily as they're created (see AppState.engine).
             HuggingFaceAuth.shared.loadFromKeychain()
-            let defaultDM = await state.engine.downloadManager
+            let defaultDM = state.engine.downloadManager
             HuggingFaceAuth.shared.bind(defaultDM)
         }
         .task {

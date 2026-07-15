@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import MLXStudioDomain
 
 /// Model library — discovery + metadata index for every model on disk vMLX
 /// can load. Mirrors the Python-side behaviour in `panel/src/main/process/
@@ -250,6 +251,10 @@ public actor ModelLibrary {
 
     public func entry(byId id: String) -> ModelEntry? {
         cache.first(where: { $0.id == id }) ?? database.byId(id)
+    }
+
+    public func artifact(forEntryID id: String) -> ModelArtifact? {
+        database.artifact(legacyModelID: id)
     }
 
     /// Delete a model's on-disk files and drop it from the library cache.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import MLXStudioPersistence
 import XCTest
 @testable import vMLXEngine
 
@@ -95,6 +96,50 @@ final class DownloadManagerResumeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 
+    func testLegacySidecarImportsIntoSQLiteAndRestartsFromDurableJob() async throws {
+        let databaseURL = workRoot.appendingPathComponent("models.sqlite3")
+        let artifactRepository = try ModelArtifactRepository(databaseURL: databaseURL)
+        let jobRepository = artifactRepository.makeJobRepository()
+        let job = DownloadManager.Job(
+            id: UUID(),
+            repo: "qa/restart-fixture",
+            displayName: "Restart Fixture",
+            totalBytes: 1_000,
+            receivedBytes: 400,
+            bytesPerSecond: 20,
+            etaSeconds: 30,
+            status: .downloading,
+            startedAt: Date(timeIntervalSince1970: 1234),
+            localPath: workRoot.appendingPathComponent("hub/restart")
+        )
+        let sidecarURL = workRoot
+            .appendingPathComponent("sidecar", isDirectory: true)
+            .appendingPathComponent("downloads.json")
+        try FileManager.default.createDirectory(
+            at: sidecarURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(LegacyDownloadSidecar(version: 1, jobs: [job]))
+            .write(to: sidecarURL, options: .atomic)
+
+        let importedManager = DownloadManager(jobRepository: jobRepository)
+        let importedValue = await importedManager.job(job.id)
+        let imported = try XCTUnwrap(importedValue)
+        XCTAssertEqual(imported.status, .paused)
+        XCTAssertEqual(imported.receivedBytes, 400)
+        XCTAssertEqual(try jobRepository.records(type: "model_download").count, 1)
+
+        try FileManager.default.removeItem(at: sidecarURL)
+        let restartedManager = DownloadManager(jobRepository: jobRepository)
+        let restartedValue = await restartedManager.job(job.id)
+        let restarted = try XCTUnwrap(restartedValue)
+        XCTAssertEqual(restarted.status, .paused)
+        XCTAssertEqual(restarted.repo, job.repo)
+        XCTAssertEqual(restarted.localPath, job.localPath)
+    }
+
     private func pauseAfterReceivingModelBytes(
         manager: DownloadManager,
         id: UUID
@@ -132,6 +177,11 @@ final class DownloadManagerResumeTests: XCTestCase {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
     }
+}
+
+private struct LegacyDownloadSidecar: Codable {
+    let version: Int
+    let jobs: [DownloadManager.Job]
 }
 
 private final class DownloadManagerResumeURLProtocol: URLProtocol {

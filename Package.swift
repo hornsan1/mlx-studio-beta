@@ -500,6 +500,7 @@ let package = Package(
         .target(
             name: "vMLXEngine",
             dependencies: [
+                "MLXStudioDomain",
                 "MLXStudioPersistence",
                 "MLX",
                 "vMLXLLM",
@@ -603,6 +604,7 @@ let package = Package(
             dependencies: [
                 "MLX",
                 "MLXNN",
+                "MLXStudioPersistence",
                 "vMLXEngine",
                 "vMLXFlux",
                 "vMLXFluxKit",

@@ -238,10 +238,9 @@ public actor Engine {
     /// route + the OpenAI `/v1/admin/models` download endpoint so HTTP
     /// clients that issue `ollama pull <repo>` actually trigger a real
     /// HuggingFace download (instead of the previous silent no-op).
-    /// The SwiftUI app uses its own `AppState.downloadManager` for UI
-    /// state, but the Engine instance is the canonical one for server
-    /// callers (`vmlxctl serve` etc) where there is no AppState.
-    public let downloadManager = DownloadManager()
+    /// Shared by SwiftUI and server callers so every download surface observes
+    /// the same durable queue and restart state.
+    public nonisolated let downloadManager: DownloadManager
 
     /// Persistent terminal working directory, threaded through the
     /// `bash` tool dispatcher so a `cd foo` in one tool invocation
@@ -603,7 +602,11 @@ public actor Engine {
         modelLibraryDB: ModelLibraryDB? = nil,
         settingsDB: SettingsDB? = nil
     ) {
-        self.modelLibrary = ModelLibrary(database: modelLibraryDB ?? ModelLibraryDB())
+        let libraryDatabase = modelLibraryDB ?? ModelLibraryDB()
+        self.modelLibrary = ModelLibrary(database: libraryDatabase)
+        self.downloadManager = DownloadManager(
+            jobRepository: libraryDatabase.durableJobRepository
+        )
         self.settings = SettingsStore(database: settingsDB ?? SettingsDB())
 
         // Load mcp.json if present in any of the standard search paths.

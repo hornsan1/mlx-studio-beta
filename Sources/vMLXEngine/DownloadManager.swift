@@ -1,4 +1,6 @@
 import Foundation
+import MLXStudioDomain
+import MLXStudioPersistence
 
 /// DownloadManager — actor that orchestrates HuggingFace model downloads for vMLX.
 ///
@@ -155,6 +157,7 @@ public actor DownloadManager {
     /// the most recently-created task. Retaining the transfer also retains its
     /// URLSession delegate while it streams bytes into the stable `.part` file.
     private var liveDataTasks: [UUID: [UUID: LiveDataTransfer]] = [:]
+    private let jobRepository: DurableJobRepository?
 
     /// Isolated session-configuration seam for download transport tests.
     /// Production uses an ephemeral configuration; XCTest can install a
@@ -173,14 +176,26 @@ public actor DownloadManager {
             .appendingPathComponent(".cache/huggingface/hub")
     }
 
-    public init() {
+    public init(jobRepository: DurableJobRepository? = nil) {
+        self.jobRepository = jobRepository
         // §252: load any previously-enqueued jobs from the on-disk
         // sidecar so the user can see their downloads after app restart.
         // Entries restored as `.paused` — the user clicks Resume to
         // re-hydrate siblings from HF and continue via the existing
         // Range-header path. Corrupt sidecar = silently start empty;
         // we never want a bad persistence layer to break app launch.
-        Self.loadSidecar().forEach { persisted in
+        let durableJobs = (try? jobRepository?.records(type: Self.durableJobType)) ?? []
+        let sidecarJobs = Self.loadSidecar()
+        let restoredJobs: [Job]
+        if durableJobs.isEmpty {
+            restoredJobs = sidecarJobs
+            for job in sidecarJobs {
+                try? jobRepository?.upsert(Self.durableRecord(for: job))
+            }
+        } else {
+            restoredJobs = durableJobs.compactMap(Self.job(from:))
+        }
+        for persisted in restoredJobs {
             var job = persisted
             // Completed/cancelled jobs survive for history; everything
             // in-flight at the prior quit needs user confirmation
@@ -254,7 +269,7 @@ public actor DownloadManager {
         started.status = .downloading
         _jobs[id] = started
         broadcast(.started(started))
-        persistSidecar()
+        persistSidecar(changedJobID: id)
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -272,7 +287,7 @@ public actor DownloadManager {
         job.status = .paused
         _jobs[id] = job
         broadcast(.paused(id))
-        persistSidecar()
+        persistSidecar(changedJobID: id)
     }
 
     public func resume(_ id: UUID) {
@@ -281,7 +296,7 @@ public actor DownloadManager {
         job.error = nil
         _jobs[id] = job
         broadcast(.resumed(id))
-        persistSidecar()
+        persistSidecar(changedJobID: id)
         let task = Task { [weak self] in
             guard let self else { return }
             await self.run(id: id)
@@ -302,7 +317,7 @@ public actor DownloadManager {
         job.status = .cancelled
         _jobs[id] = job
         broadcast(.cancelled(id))
-        persistSidecar()
+        persistSidecar(changedJobID: id)
     }
 
     public func clearCompleted() {
@@ -310,11 +325,16 @@ public actor DownloadManager {
             guard let j = _jobs[id] else { return false }
             return j.status != .completed && j.status != .cancelled
         }
-        for id in order where !remaining.contains(id) {
+        let removed = order.filter { !remaining.contains($0) }
+        for id in removed {
             _jobs.removeValue(forKey: id)
             speedSamples.removeValue(forKey: id)
         }
         order = remaining
+        let durableIDs = Set(removed.compactMap {
+            JobID(rawValue: $0.uuidString.lowercased())
+        })
+        try? jobRepository?.remove(durableIDs)
         persistSidecar()
     }
 
@@ -445,7 +465,7 @@ public actor DownloadManager {
                 done.bytesPerSecond = 0
                 _jobs[id] = done
                 broadcast(.completed(done))
-                persistSidecar()
+                persistSidecar(changedJobID: id)
             }
         } catch is CancellationError {
             // paused or cancelled — event already broadcast.
@@ -496,7 +516,7 @@ public actor DownloadManager {
                 }
                 _jobs[id] = j
                 broadcast(.failed(id, j.error ?? "unknown error"))
-                persistSidecar()
+                persistSidecar(changedJobID: id)
             }
         }
     }
@@ -1043,11 +1063,62 @@ public actor DownloadManager {
     /// Trigger a sidecar write for the current state. Fire-and-forget;
     /// the write itself is async off-actor to avoid blocking the
     /// download hot path on disk IO.
-    private func persistSidecar() {
+    private func persistSidecar(changedJobID: UUID? = nil) {
         let snapshot = order.compactMap { _jobs[$0] }
+        if let job = changedJobID.flatMap({ _jobs[$0] }) {
+            try? jobRepository?.upsert(Self.durableRecord(for: job))
+        }
         Task.detached(priority: .utility) {
             Self.writeSidecar(snapshot)
         }
+    }
+
+    private nonisolated static let durableJobType = "model_download"
+
+    private nonisolated static func durableRecord(for job: Job) -> DurableJobRecord {
+        let payload: String = {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let data = try? encoder.encode(job) else { return "{}" }
+            return String(decoding: data, as: UTF8.self)
+        }()
+        let state: DurableJobState
+        switch job.status {
+        case .queued: state = .pending
+        case .downloading: state = .running
+        case .paused: state = .paused
+        case .completed: state = .completed
+        case .failed: state = .failed
+        case .cancelled: state = .cancelled
+        }
+        let progress = job.totalBytes > 0
+            ? Double(job.receivedBytes) / Double(job.totalBytes)
+            : 0
+        let now = Date()
+        return DurableJobRecord(
+            id: JobID(job.id),
+            type: durableJobType,
+            state: state,
+            progress: progress,
+            currentStage: job.status.rawValue,
+            errorJSON: job.error.flatMap { message in
+                guard let data = try? JSONEncoder().encode(["message": message]) else { return nil }
+                return String(decoding: data, as: UTF8.self)
+            },
+            recoveryInstructions: job.status == .failed ? "Retry or cancel the download." : nil,
+            payloadJSON: payload,
+            createdAt: job.startedAt,
+            startedAt: job.startedAt,
+            endedAt: [.completed, .failed, .cancelled].contains(job.status) ? now : nil,
+            updatedAt: now
+        )
+    }
+
+    private nonisolated static func job(from record: DurableJobRecord) -> Job? {
+        guard let data = record.payloadJSON.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(Job.self, from: data)
     }
 
     private struct SidecarPayload: Codable {

@@ -1,6 +1,6 @@
 import Foundation
+import MLXStudioDomain
 import MLXStudioPersistence
-import SQLite3
 
 /// Persistent store for `ModelLibrary`. Backed by its own SQLite file at
 /// `~/Library/Application Support/vMLX/models.sqlite3` — deliberately split
@@ -12,9 +12,11 @@ import SQLite3
 /// Connection is opened with `SQLITE_OPEN_FULLMUTEX` for defence in depth.
 public final class ModelLibraryDB: @unchecked Sendable {
 
-    private var db: OpaquePointer?
-    private let path: String
+    private let repository: ModelArtifactRepository?
     public private(set) var migrationErrorDescription: String?
+    public var durableJobRepository: DurableJobRepository? {
+        repository?.makeJobRepository()
+    }
 
     public init(customPath: URL? = nil) {
         let fm = FileManager.default
@@ -29,79 +31,36 @@ public final class ModelLibraryDB: @unchecked Sendable {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             url = dir.appendingPathComponent("models.sqlite3")
         }
-        self.path = url.path
-
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        if sqlite3_open_v2(path, &db, flags, nil) != SQLITE_OK {
-            NSLog("vMLX: ModelLibraryDB sqlite3_open failed at \(path)")
-        }
-        runSQL("PRAGMA journal_mode=WAL;")
-        runSQL("PRAGMA synchronous=NORMAL;")
-        if let db {
-            do {
-                try ModelStoreMigrator.migrate(db)
-            } catch {
-                migrationErrorDescription = String(describing: error)
-                NSLog("vMLX ModelLibraryDB migration failed: \(error)")
-            }
-        }
-    }
-
-    deinit {
-        if db != nil { sqlite3_close(db) }
-    }
-
-    private func runSQL(_ sql: String) {
-        var err: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(db, sql, nil, nil, &err) != SQLITE_OK {
-            let msg = err.map { String(cString: $0) } ?? "?"
-            NSLog("vMLX ModelLibraryDB runSQL failed: \(msg)")
-            sqlite3_free(err)
+        do {
+            self.repository = try ModelArtifactRepository(databaseURL: url)
+        } catch {
+            self.repository = nil
+            self.migrationErrorDescription = String(describing: error)
+            NSLog("vMLX ModelLibraryDB migration failed: \(error)")
         }
     }
 
     // MARK: - Models CRUD
 
     public func upsert(_ e: ModelLibrary.ModelEntry) {
-        let sql = """
-        INSERT INTO models (id, canonical_path, display_name, family, modality,
-                            total_size_bytes, is_jang, is_mxtq, quant_bits,
-                            detected_at, source, capabilities_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            canonical_path=excluded.canonical_path,
-            display_name=excluded.display_name,
-            family=excluded.family,
-            modality=excluded.modality,
-            total_size_bytes=excluded.total_size_bytes,
-            is_jang=excluded.is_jang,
-            is_mxtq=excluded.is_mxtq,
-            quant_bits=excluded.quant_bits,
-            detected_at=excluded.detected_at,
-            source=excluded.source,
-            capabilities_json=excluded.capabilities_json;
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        sqlite3_bind_text(stmt, 1, e.id, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, e.canonicalPath.path, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 3, e.displayName, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 4, e.family, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 5, e.modality.rawValue, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int64(stmt, 6, e.totalSizeBytes)
-        sqlite3_bind_int(stmt, 7, e.isJANG ? 1 : 0)
-        sqlite3_bind_int(stmt, 8, e.isMXTQ ? 1 : 0)
-        if let q = e.quantBits {
-            sqlite3_bind_int(stmt, 9, Int32(q))
-        } else {
-            sqlite3_bind_null(stmt, 9)
+        do {
+            try repository?.upsertIndexedModel(IndexedModelRecord(
+                legacyModelID: e.id,
+                canonicalURL: e.canonicalPath,
+                displayName: e.displayName,
+                family: e.family,
+                modality: e.modality.rawValue,
+                totalSizeBytes: e.totalSizeBytes,
+                isJANG: e.isJANG,
+                isJANGTQ: e.isMXTQ,
+                quantizationBits: e.quantBits,
+                detectedAt: e.detectedAt,
+                source: encodeSource(e.source),
+                capabilitiesJSON: encodeCapabilities(e.capabilities)
+            ))
+        } catch {
+            NSLog("vMLX ModelLibraryDB upsert failed: \(error)")
         }
-        sqlite3_bind_double(stmt, 10, e.detectedAt.timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 11, encodeSource(e.source), -1, SQLITE_TRANSIENT)
-        let capsJSON = encodeCapabilities(e.capabilities)
-        sqlite3_bind_text(stmt, 12, capsJSON, -1, SQLITE_TRANSIENT)
-        sqlite3_step(stmt)
-        sqlite3_finalize(stmt)
     }
 
     private func encodeCapabilities(_ c: ModelCapabilities) -> String {
@@ -122,145 +81,58 @@ public final class ModelLibraryDB: @unchecked Sendable {
     }
 
     public func all() -> [ModelLibrary.ModelEntry] {
-        var out: [ModelLibrary.ModelEntry] = []
-        let sql = """
-        SELECT id, canonical_path, display_name, family, modality,
-               total_size_bytes, is_jang, is_mxtq, quant_bits, detected_at, source,
-               capabilities_json
-        FROM models ORDER BY display_name ASC;
-        """
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                if let e = rowToEntry(stmt) { out.append(e) }
-            }
-        }
-        sqlite3_finalize(stmt)
-        return out
+        (try? repository?.indexedModels())?.compactMap(recordToEntry) ?? []
     }
 
     public func byId(_ id: String) -> ModelLibrary.ModelEntry? {
-        let sql = """
-        SELECT id, canonical_path, display_name, family, modality,
-               total_size_bytes, is_jang, is_mxtq, quant_bits, detected_at, source,
-               capabilities_json
-        FROM models WHERE id=? LIMIT 1;
-        """
-        var stmt: OpaquePointer?
-        var out: ModelLibrary.ModelEntry?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                out = rowToEntry(stmt)
-            }
-        }
-        sqlite3_finalize(stmt)
-        return out
+        guard let record = try? repository?.indexedModel(legacyModelID: id) else { return nil }
+        return recordToEntry(record)
+    }
+
+    public func artifact(legacyModelID: String) -> ModelArtifact? {
+        try? repository?.artifact(legacyModelID: legacyModelID)
     }
 
     public func purge(_ ids: Set<String>) {
-        guard !ids.isEmpty else { return }
-        runSQL("BEGIN;")
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "DELETE FROM models WHERE id=?;", -1, &stmt, nil) == SQLITE_OK {
-            for id in ids {
-                sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
-                sqlite3_step(stmt)
-                sqlite3_reset(stmt)
-            }
-        }
-        sqlite3_finalize(stmt)
-        runSQL("COMMIT;")
+        try? repository?.markUnavailableAndRemoveFromIndex(ids)
     }
 
     /// Most-recent `detected_at` (unix seconds) across all entries, or nil if empty.
     public func mostRecentDetectedAt() -> Date? {
-        var stmt: OpaquePointer?
-        var out: Date?
-        if sqlite3_prepare_v2(db, "SELECT MAX(detected_at) FROM models;", -1, &stmt, nil) == SQLITE_OK {
-            if sqlite3_step(stmt) == SQLITE_ROW,
-               sqlite3_column_type(stmt, 0) != SQLITE_NULL {
-                out = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 0))
-            }
-        }
-        sqlite3_finalize(stmt)
-        return out
+        (try? repository?.mostRecentDetectionDate()) ?? nil
     }
 
     // MARK: - User dirs
 
     public func userDirs() -> [URL] {
-        var out: [URL] = []
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT url FROM user_dirs ORDER BY added_at ASC;",
-                              -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                if let p = sqlite3_column_text(stmt, 0) {
-                    out.append(URL(fileURLWithPath: String(cString: p)))
-                }
-            }
-        }
-        sqlite3_finalize(stmt)
-        return out
+        (try? repository?.userDirectories()) ?? []
     }
 
     public func addUserDir(_ url: URL) {
-        var stmt: OpaquePointer?
-        let sql = "INSERT OR IGNORE INTO user_dirs (url, added_at) VALUES (?, ?);"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(stmt, 1, url.path, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
-            sqlite3_step(stmt)
-        }
-        sqlite3_finalize(stmt)
+        try? repository?.addUserDirectory(url)
     }
 
     public func removeUserDir(_ url: URL) {
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "DELETE FROM user_dirs WHERE url=?;", -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(stmt, 1, url.path, -1, SQLITE_TRANSIENT)
-            sqlite3_step(stmt)
-        }
-        sqlite3_finalize(stmt)
+        try? repository?.removeUserDirectory(url)
     }
 
     // MARK: - Row decoding
 
-    private func rowToEntry(_ stmt: OpaquePointer?) -> ModelLibrary.ModelEntry? {
-        guard let stmt else { return nil }
-        let id = cstr(stmt, 0)
-        let path = cstr(stmt, 1)
-        let name = cstr(stmt, 2)
-        let family = cstr(stmt, 3)
-        let modalityRaw = cstr(stmt, 4)
-        let size = sqlite3_column_int64(stmt, 5)
-        let isJang = sqlite3_column_int(stmt, 6) != 0
-        let isMxtq = sqlite3_column_int(stmt, 7) != 0
-        let qb: Int? = sqlite3_column_type(stmt, 8) == SQLITE_NULL
-            ? nil : Int(sqlite3_column_int(stmt, 8))
-        let ts = sqlite3_column_double(stmt, 9)
-        let sourceRaw = cstr(stmt, 10)
-        let capsRaw = cstr(stmt, 11)
-        let modality = ModelLibrary.Modality(rawValue: modalityRaw) ?? .unknown
+    private func recordToEntry(_ record: IndexedModelRecord) -> ModelLibrary.ModelEntry? {
         return ModelLibrary.ModelEntry(
-            id: id,
-            canonicalPath: URL(fileURLWithPath: path),
-            displayName: name,
-            family: family,
-            modality: modality,
-            totalSizeBytes: size,
-            isJANG: isJang,
-            isMXTQ: isMxtq,
-            quantBits: qb,
-            detectedAt: Date(timeIntervalSince1970: ts),
-            source: decodeSource(sourceRaw),
-            capabilities: decodeCapabilities(capsRaw)
+            id: record.legacyModelID,
+            canonicalPath: record.canonicalURL,
+            displayName: record.displayName,
+            family: record.family,
+            modality: ModelLibrary.Modality(rawValue: record.modality) ?? .unknown,
+            totalSizeBytes: record.totalSizeBytes,
+            isJANG: record.isJANG,
+            isMXTQ: record.isJANGTQ,
+            quantBits: record.quantizationBits,
+            detectedAt: record.detectedAt,
+            source: decodeSource(record.source),
+            capabilities: decodeCapabilities(record.capabilitiesJSON)
         )
-    }
-
-    private func cstr(_ stmt: OpaquePointer?, _ col: Int32) -> String {
-        guard let p = sqlite3_column_text(stmt, col) else { return "" }
-        return String(cString: p)
     }
 
     private func encodeSource(_ s: ModelLibrary.Source) -> String {
@@ -284,6 +156,3 @@ public final class ModelLibraryDB: @unchecked Sendable {
         return .hfCache
     }
 }
-
-// SQLITE_TRANSIENT is not bridged.
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
