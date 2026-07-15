@@ -8,7 +8,7 @@ final class ModelStoreMigratorTests: XCTestCase {
         try withDatabase { database in
             try ModelStoreMigrator.migrate(database)
 
-            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 7)
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 8)
             XCTAssertEqual(try scalarInt(database, "PRAGMA foreign_keys;"), 1)
             XCTAssertEqual(try scalarInt(database, "SELECT COUNT(*) FROM pragma_foreign_key_check;"), 0)
             XCTAssertEqual(
@@ -57,7 +57,7 @@ final class ModelStoreMigratorTests: XCTestCase {
 
             try ModelStoreMigrator.migrate(database)
 
-            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 7)
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 8)
             XCTAssertEqual(try scalarInt(database, "SELECT COUNT(*) FROM models;"), 1)
             XCTAssertEqual(
                 try scalarText(database, "SELECT capabilities_json FROM models WHERE id='legacy-mlx';"),
@@ -130,7 +130,7 @@ final class ModelStoreMigratorTests: XCTestCase {
             XCTAssertFalse(try tableExists(database, "model_artifacts"))
 
             try ModelStoreMigrator.migrate(database)
-            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 7)
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 8)
             XCTAssertTrue(try tableExists(database, "model_artifacts"))
         }
     }
@@ -162,7 +162,7 @@ final class ModelStoreMigratorTests: XCTestCase {
             try execute(database, "PRAGMA foreign_keys=ON;")
             try ModelStoreMigrator.migrate(database)
 
-            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 7)
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 8)
             XCTAssertEqual(
                 try scalarInt(database, "SELECT COUNT(*) FROM model_artifacts WHERE legacy_model_id='legacy-collision';"),
                 1
@@ -239,6 +239,47 @@ final class ModelStoreMigratorTests: XCTestCase {
         }
     }
 
+    func testEvaluationPayloadMigrationRollsBackAndPreservesVersionSevenRows() throws {
+        try withDatabase { database in
+            try ModelStoreMigrator.migrate(database, through: 7, afterApplyingVersion: nil)
+            try execute(database, """
+            INSERT INTO evaluation_suites (
+                id, name, revision, suite_hash, created_at, updated_at
+            ) VALUES (
+                '11111111-1111-1111-1111-111111111111', 'Legacy suite', '1',
+                'legacy-suite-hash', 1, 1
+            );
+            INSERT INTO evaluation_cases (
+                id, suite_id, ordinal, prompt, generation_configuration_json
+            ) VALUES (
+                '22222222-2222-2222-2222-222222222222',
+                '11111111-1111-1111-1111-111111111111', 0, 'legacy prompt', '{}'
+            );
+            """)
+
+            XCTAssertThrowsError(
+                try ModelStoreMigrator.migrate(database) { version in
+                    if version == 8 { throw InjectedFailure() }
+                }
+            )
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 7)
+            XCTAssertFalse(try columnExists(database, table: "evaluation_cases", column: "case_json"))
+            XCTAssertEqual(
+                try scalarText(database, "SELECT prompt FROM evaluation_cases LIMIT 1;"),
+                "legacy prompt"
+            )
+
+            try ModelStoreMigrator.migrate(database)
+            XCTAssertEqual(try scalarInt(database, "PRAGMA user_version;"), 8)
+            XCTAssertTrue(try columnExists(database, table: "evaluation_cases", column: "case_json"))
+            XCTAssertTrue(try columnExists(database, table: "evaluation_runs", column: "manifest_hash"))
+            XCTAssertEqual(
+                try scalarText(database, "SELECT case_json FROM evaluation_cases LIMIT 1;"),
+                "{}"
+            )
+        }
+    }
+
     func testNewerDatabaseIsRejectedWithoutMutation() throws {
         try withDatabase { database in
             try execute(database, "PRAGMA user_version=99;")
@@ -275,7 +316,7 @@ final class ModelStoreMigratorTests: XCTestCase {
             try backup(from: source, to: destination)
             try ModelStoreMigrator.migrate(destination)
 
-            XCTAssertEqual(try scalarInt(destination, "PRAGMA user_version;"), 7)
+            XCTAssertEqual(try scalarInt(destination, "PRAGMA user_version;"), 8)
             XCTAssertEqual(try scalarInt(destination, "SELECT COUNT(*) FROM models;"), sourceModelCount)
             XCTAssertEqual(
                 try scalarInt(destination, "SELECT COUNT(*) FROM model_artifacts WHERE legacy_model_id IS NOT NULL;"),
@@ -443,6 +484,17 @@ private extension ModelStoreMigratorTests {
         try scalarInt(
             database,
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='\(table)';"
+        ) == 1
+    }
+
+    func columnExists(
+        _ database: OpaquePointer,
+        table: String,
+        column: String
+    ) throws -> Bool {
+        try scalarInt(
+            database,
+            "SELECT COUNT(*) FROM pragma_table_info('\(table)') WHERE name='\(column)';"
         ) == 1
     }
 

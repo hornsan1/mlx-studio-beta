@@ -257,6 +257,7 @@ let package = Package(
         // MLX Studio application domain (Foundation-only contracts).
         .library(name: "MLXStudioDomain", targets: ["MLXStudioDomain"]),
         .library(name: "MLXStudioPersistence", targets: ["MLXStudioPersistence"]),
+        .library(name: "MLXStudioEvaluation", targets: ["MLXStudioEvaluation"]),
 
         // vMLX engine + app libraries.
         .library(name: "vMLXEngine", targets: ["vMLXEngine"]),
@@ -322,6 +323,14 @@ let package = Package(
             name: "MLXStudioPersistence",
             dependencies: ["MLXStudioDomain"],
             path: "Sources/MLXStudioPersistence",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "MLXStudioEvaluation",
+            dependencies: ["MLXStudioDomain", "MLXStudioPersistence"],
+            path: "Sources/MLXStudioEvaluation",
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
@@ -591,6 +600,15 @@ let package = Package(
             name: "MLXStudioPersistenceTests",
             dependencies: ["MLXStudioPersistence"],
             path: "tests/MLXStudioPersistenceTests"
+        ),
+        .testTarget(
+            name: "MLXStudioEvaluationTests",
+            dependencies: [
+                "MLXStudioDomain",
+                "MLXStudioPersistence",
+                "MLXStudioEvaluation",
+            ],
+            path: "tests/MLXStudioEvaluationTests"
         ),
 
         // MARK: - Parser unit tests (runnable via `swift test`)

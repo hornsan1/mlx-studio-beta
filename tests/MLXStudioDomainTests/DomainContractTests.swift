@@ -253,6 +253,8 @@ final class DomainContractTests: XCTestCase {
         requireSendable(GenerationRequest.self)
         requireSendable(GenerationEvent.self)
         requireSendable(EvaluationRunRequest.self)
+        requireSendable(EvaluationCaseManifest.self)
+        requireSendable(EvaluationRunManifest.self)
         requireSendable(EvaluationRunResult.self)
         requireSendable(OptimizationPlan.self)
         requireSendable(StrategyAnalysisRequest.self)

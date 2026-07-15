@@ -62,10 +62,10 @@ All IDs are lowercase UUID strings unless noted. Timestamps are UTC Unix seconds
 | `build_runs` | `id PK`, `plan_id FK`, `job_id UNIQUE FK`, `output_artifact_id FK NULL`, `worker_identifier`, `tool_versions_json`, `command_manifest_json`, `partial_output_policy`, `status`, `started_at`, `ended_at` |
 | `verification_reports` | `id PK`, `artifact_id FK`, `job_id FK NULL`, `status`, `checks_json`, `diagnostic_export_url`, `runtime_smoke_generation_id NULL`, `created_at` |
 | `evaluation_suites` | `id PK`, `name`, `revision`, `tags_json`, `suite_hash UNIQUE`, `created_at`, `updated_at`; unique `(name, revision)` |
-| `evaluation_cases` | `id PK`, `suite_id FK`, `ordinal`, `prompt`, `system_prompt`, `domain`, `tags_json`, `expected_kind`, `expected_value`, `generation_configuration_json`, `weight`, unique `(suite_id, ordinal)` |
-| `evaluation_runs` | `id PK`, `suite_id FK`, `hardware_profile_id FK`, `runtime_version`, `kernel_version`, `execution_order_json`, `status`, `started_at`, `ended_at` |
+| `evaluation_cases` | `id PK`, `suite_id FK`, `ordinal`, `prompt`, `system_prompt`, `domain`, `tags_json`, `expected_kind`, `expected_value`, `generation_configuration_json`, `weight`, versioned `case_json`, unique `(suite_id, ordinal)` |
+| `evaluation_runs` | `id PK`, `suite_id FK`, `hardware_profile_id FK`, `runtime_version`, `kernel_version`, `execution_order_json`, `status`, `started_at`, `ended_at`, versioned `request_json`, `manifest_json`, indexed `manifest_hash` |
 | `evaluation_run_artifacts` | `run_id FK`, `artifact_id FK`, `blind_label`, `artifact_hash`, composite PK `(run_id, artifact_id)`; blind label unique per run |
-| `evaluation_results` | `id PK`, `run_id FK`, `case_id FK`, `artifact_id FK`, `generation_id`, `output_text`, `score_kind`, `score_value`, `score_payload_json`, `runtime_metrics_json`, `error_json`, `created_at`; unique `(run_id, case_id, artifact_id)` |
+| `evaluation_results` | `id PK`, `run_id FK`, `case_id FK`, `artifact_id FK`, `generation_id`, `output_text`, `score_kind`, `score_value`, `score_payload_json`, `runtime_metrics_json`, `error_json`, `created_at`, versioned `case_result_json`; unique `(run_id, case_id, artifact_id)` |
 | `human_judgments` | `id PK`, `run_id FK`, `case_id FK`, `assignment_json`, `choice`, `notes`, `revealed_at NULL`, `created_at`; identity is never stored in assignment-facing fields before reveal |
 | `jobs` | `id PK`, `type`, `project_id FK NULL`, `artifact_id FK NULL`, `state`, `progress`, `current_stage`, `log_url`, `diagnostic_export_url`, `peak_memory_bytes`, `error_json`, `recovery_instructions`, `created_at`, `started_at`, `ended_at`, `updated_at` |
 | `job_events` | `job_id FK`, `sequence`, `event_type`, `payload_json`, `created_at`; composite PK `(job_id, sequence)` |
@@ -81,6 +81,7 @@ The existing `models` and `user_dirs` tables remain intact during Phase 1. `arti
 3. Version 5: create analysis/plan/recipe/build/verification tables.
 4. Version 6: create evaluation/human-judgment tables.
 5. Version 7: create jobs/events and add repair indexes.
+6. Version 8: add lossless evaluation case, run-manifest, request, and result JSON payloads while retaining the queryable version-6 projection columns.
 
 Each version runs inside `BEGIN IMMEDIATE`; migration functions throw on any SQL failure and roll back without advancing `user_version`.
 

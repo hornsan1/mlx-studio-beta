@@ -130,6 +130,10 @@ public final class ModelArtifactRepository: @unchecked Sendable {
         DurableJobRepository(store: store)
     }
 
+    public func makeEvaluationRepository() -> EvaluationRepository {
+        EvaluationRepository(store: store)
+    }
+
     public func upsertIndexedModel(_ record: IndexedModelRecord) throws {
         try store.transaction { database in
             try SQLiteStore.execute(database, """
@@ -642,14 +646,14 @@ private func readJobs(
     }
 }
 
-private enum SQLiteValue {
+enum SQLiteValue {
     case text(String)
     case integer(Int64)
     case real(Double)
     case null
 }
 
-private final class SQLiteStore: @unchecked Sendable {
+final class SQLiteStore: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var database: OpaquePointer?
 

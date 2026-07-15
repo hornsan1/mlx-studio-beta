@@ -21,7 +21,7 @@ public enum ModelStoreMigrationError: Error, Equatable, Sendable, CustomStringCo
 
 /// Transactional schema migration for the canonical project/artifact store.
 public enum ModelStoreMigrator {
-    public static let latestVersion = 7
+    public static let latestVersion = 8
 
     public static func migrate(_ database: OpaquePointer) throws {
         try migrate(database, through: latestVersion, afterApplyingVersion: nil)
@@ -82,6 +82,7 @@ public enum ModelStoreMigrator {
         case 5: try createOptimizationSchema(in: database)
         case 6: try createEvaluationSchema(in: database)
         case 7: try createJobSchema(in: database)
+        case 8: try addEvaluationPayloads(in: database)
         default: preconditionFailure("Unexpected model-store migration \(version)")
         }
     }
@@ -478,6 +479,24 @@ private extension ModelStoreMigrator {
         CREATE INDEX IF NOT EXISTS idx_jobs_artifact ON jobs(artifact_id);
         CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
         """)
+    }
+
+    static func addEvaluationPayloads(in database: OpaquePointer) throws {
+        let additions = [
+            ("evaluation_cases", "case_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("evaluation_runs", "request_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("evaluation_runs", "manifest_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("evaluation_runs", "manifest_hash", "TEXT"),
+            ("evaluation_results", "case_result_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ]
+        for (table, column, declaration) in additions {
+            guard try !columnExists(column, in: table, database: database) else { continue }
+            try execute(database, "ALTER TABLE \(table) ADD COLUMN \(column) \(declaration);")
+        }
+        try execute(
+            database,
+            "CREATE INDEX IF NOT EXISTS idx_evaluation_runs_manifest_hash ON evaluation_runs(manifest_hash);"
+        )
     }
 }
 

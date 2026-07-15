@@ -49,6 +49,16 @@ flowchart LR
     FluxKit --> Flux["vMLXFlux"]
     FluxModels --> Flux
     FluxVideo --> Flux
+    Domain["MLXStudioDomain"] --> Persistence["MLXStudioPersistence"]
+    Domain --> Evaluation["MLXStudioEvaluation"]
+    Persistence --> Evaluation
+    Domain --> DomainTests["MLXStudioDomainTests"]
+    Persistence --> PersistenceTests["MLXStudioPersistenceTests"]
+    Domain --> EvaluationTests["MLXStudioEvaluationTests"]
+    Persistence --> EvaluationTests
+    Evaluation --> EvaluationTests
+    Domain --> Engine
+    Persistence --> Engine
     MLX --> Engine["vMLXEngine"]
     LLM --> Engine
     VLM --> Engine
@@ -64,6 +74,7 @@ flowchart LR
     Engine --> App["vMLXApp / MLXStudio"]
     Server --> App
     Theme["vMLXTheme"] --> App
+    Domain --> App
     Engine --> CLI["vMLXCLI / vmlxctl"]
     Server --> CLI
     Engine --> Regression["RegressionCheck"]
@@ -73,8 +84,11 @@ flowchart LR
     MLX --> Regression
     App --> AppTests["vMLXAppTests"]
     Engine --> AppTests
+    Domain --> AppTests
     MLX --> ParserTests["vMLXParserTests"]
     MLXNN --> ParserTests
+    Domain --> ParserTests
+    Persistence --> ParserTests
     Engine --> ParserTests
     Flux --> ParserTests
     FluxKit --> ParserTests
