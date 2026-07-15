@@ -45,3 +45,21 @@ public struct StrategyExpertScore: Codable, Hashable, Sendable {
         self.routedTokenCount = routedTokenCount
     }
 }
+
+/// Aggregated REAP evidence: the selected router weight multiplied by the
+/// expert output L2 norm, summed only across tokens routed to the expert.
+public struct RouterWeightedExpertEvidence: Codable, Hashable, Sendable {
+    public let coordinate: ExpertCoordinate
+    public let routedTokenCount: Int
+    public let gateWeightedActivationNormSum: Double
+
+    public init(
+        coordinate: ExpertCoordinate,
+        routedTokenCount: Int,
+        gateWeightedActivationNormSum: Double
+    ) {
+        self.coordinate = coordinate
+        self.routedTokenCount = routedTokenCount
+        self.gateWeightedActivationNormSum = gateWeightedActivationNormSum
+    }
+}
