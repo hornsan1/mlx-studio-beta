@@ -1,4 +1,5 @@
 import Foundation
+import MLXStudioDomain
 import vMLXEngine
 
 enum ExperienceMode: String, Codable, CaseIterable, Identifiable {
@@ -1538,6 +1539,22 @@ enum StudioChatRuntime {
         return messages
     }
 
+    static func generationMessages(
+        systemPrompt: String?,
+        turns: [ChatTurn]
+    ) -> [GenerationMessage] {
+        var messages = turns.map { turn in
+            GenerationMessage(
+                role: GenerationMessageRole(rawValue: turn.role.rawValue) ?? .user,
+                content: turn.content
+            )
+        }
+        if let prompt = normalizedSystemPrompt(systemPrompt) {
+            messages.insert(GenerationMessage(role: .system, content: prompt), at: 0)
+        }
+        return messages
+    }
+
     static func estimatedContextTokens(
         systemPrompt: String,
         turns: [ChatTurn],
@@ -1552,6 +1569,24 @@ enum StudioChatRuntime {
 
     static func totalTokens(_ usage: StreamChunk.Usage) -> Int {
         usage.promptTokens + usage.completionTokens
+    }
+}
+
+private extension StreamChunk.Usage {
+    init(_ metrics: RuntimeMetrics) {
+        self.init(
+            promptTokens: metrics.promptTokenCount,
+            completionTokens: metrics.generatedTokenCount,
+            cachedTokens: metrics.cachedTokenCount,
+            tokensPerSecond: metrics.tokensPerSecond,
+            promptTokensPerSecond: metrics.promptTokensPerSecond,
+            ttftMs: metrics.timeToFirstTokenSeconds.map { $0 * 1_000 },
+            prefillMs: metrics.prefillDurationSeconds.map { $0 * 1_000 },
+            totalMs: (metrics.totalDurationSeconds
+                ?? ((metrics.prefillDurationSeconds ?? 0) + metrics.generationDurationSeconds)) * 1_000,
+            cacheDetail: metrics.cacheDetail,
+            isPartial: metrics.isPartial
+        )
     }
 }
 
@@ -2116,39 +2151,52 @@ final class StudioChatService: ChatService {
                 await engine.applySettings(global)
             }
         }
-        let engineRequest = ChatRequest(
-            model: request.model.displayName,
-            messages: StudioChatRuntime.requestMessages(
-                systemPrompt: request.systemPrompt,
-                turns: request.messages
-            ),
-            stream: true,
-            maxTokens: StudioChatRuntime.sanitizedMaxResponseTokens(request.maxTokens),
-            enableThinking: request.enableThinking
+        let modelLibrary = await engine.modelLibrary
+        guard let artifact = await modelLibrary.artifact(forEntryID: request.model.id) else {
+            throw StudioServiceError.modelNotLocal
+        }
+        let messages = StudioChatRuntime.generationMessages(
+            systemPrompt: request.systemPrompt,
+            turns: request.messages
         )
-        let upstream = await engine.stream(request: engineRequest)
+        let generationRequest = GenerationRequest(
+            artifactID: artifact.id,
+            messages: messages,
+            configuration: GenerationConfiguration(
+                maximumTokenCount: StudioChatRuntime.sanitizedMaxResponseTokens(request.maxTokens)
+            ),
+            metadata: [
+                "enable_thinking": request.enableThinking ? "true" : "false",
+                "vmlx_use_runtime_sampling_defaults": "true",
+            ]
+        )
+        let upstream = VMLXInferenceProvider(engine: engine).events(for: generationRequest)
 
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 do {
-                    for try await chunk in upstream {
-                        if let content = chunk.content, !content.isEmpty {
+                    for try await event in upstream {
+                        switch event {
+                        case .textDelta(let content):
                             continuation.yield(.token(StudioChatText.clean(content)))
-                        }
-                        if let reasoning = chunk.reasoning, !reasoning.isEmpty {
+                        case .reasoningDelta(let reasoning):
                             continuation.yield(.reasoning(StudioChatText.clean(reasoning)))
-                        }
-                        if let usage = chunk.usage {
-                            continuation.yield(.usage(usage))
-                        }
-                        if let finish = chunk.finishReason {
-                            continuation.yield(.finished(finish))
+                        case .metrics(let metrics):
+                            continuation.yield(.usage(StreamChunk.Usage(metrics)))
+                        case .completed(let result):
+                            continuation.yield(.finished(result.finishReason.rawValue))
+                        case .started, .trace:
+                            break
                         }
                     }
-                    continuation.yield(.finished(nil))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { termination in
+                if case .cancelled = termination {
+                    task.cancel()
                 }
             }
         }

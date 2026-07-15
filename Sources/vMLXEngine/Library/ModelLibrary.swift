@@ -257,6 +257,10 @@ public actor ModelLibrary {
         database.artifact(legacyModelID: id)
     }
 
+    public func artifact(id: ModelArtifactID) -> ModelArtifact? {
+        database.artifact(id: id)
+    }
+
     /// Delete a model's on-disk files and drop it from the library cache.
     ///
     /// Fixes vmlx #57 (OPEN): no user-facing way to remove downloaded models.

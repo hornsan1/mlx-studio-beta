@@ -107,25 +107,43 @@ public struct GenerationRequest: Codable, Hashable, Sendable {
 public struct RuntimeMetrics: Codable, Hashable, Sendable {
     public var promptTokenCount: Int
     public var generatedTokenCount: Int
+    public var cachedTokenCount: Int
     public var timeToFirstTokenSeconds: Double?
+    public var prefillDurationSeconds: Double?
     public var generationDurationSeconds: Double
+    public var totalDurationSeconds: Double?
     public var tokensPerSecond: Double?
+    public var promptTokensPerSecond: Double?
     public var peakMemoryBytes: Int64?
+    public var cacheDetail: String?
+    public var isPartial: Bool
 
     public init(
         promptTokenCount: Int = 0,
         generatedTokenCount: Int = 0,
+        cachedTokenCount: Int = 0,
         timeToFirstTokenSeconds: Double? = nil,
+        prefillDurationSeconds: Double? = nil,
         generationDurationSeconds: Double = 0,
+        totalDurationSeconds: Double? = nil,
         tokensPerSecond: Double? = nil,
-        peakMemoryBytes: Int64? = nil
+        promptTokensPerSecond: Double? = nil,
+        peakMemoryBytes: Int64? = nil,
+        cacheDetail: String? = nil,
+        isPartial: Bool = false
     ) {
         self.promptTokenCount = promptTokenCount
         self.generatedTokenCount = generatedTokenCount
+        self.cachedTokenCount = cachedTokenCount
         self.timeToFirstTokenSeconds = timeToFirstTokenSeconds
+        self.prefillDurationSeconds = prefillDurationSeconds
         self.generationDurationSeconds = generationDurationSeconds
+        self.totalDurationSeconds = totalDurationSeconds
         self.tokensPerSecond = tokensPerSecond
+        self.promptTokensPerSecond = promptTokensPerSecond
         self.peakMemoryBytes = peakMemoryBytes
+        self.cacheDetail = cacheDetail
+        self.isPartial = isPartial
     }
 }
 

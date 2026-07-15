@@ -570,6 +570,7 @@ let package = Package(
         .executableTarget(
             name: "vMLXApp",
             dependencies: [
+                "MLXStudioDomain",
                 "vMLXEngine",
                 "vMLXServer",
                 "vMLXTheme",
@@ -604,6 +605,7 @@ let package = Package(
             dependencies: [
                 "MLX",
                 "MLXNN",
+                "MLXStudioDomain",
                 "MLXStudioPersistence",
                 "vMLXEngine",
                 "vMLXFlux",
@@ -639,12 +641,14 @@ let package = Package(
                 "ModelInstallReadinessVerifierTests.swift",
                 "ModelLibraryImageLayoutTests.swift",
                 "SamplingFallbackPriorityTests.swift",
+                "VMLXInferenceProviderTests.swift",
                 "WeightLoaderComponentLayoutTests.swift",
             ]
         ),
         .testTarget(
             name: "vMLXAppTests",
             dependencies: [
+                "MLXStudioDomain",
                 "vMLXApp",
                 "vMLXEngine",
             ],

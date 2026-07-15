@@ -1,4 +1,5 @@
 import Foundation
+import MLXStudioDomain
 import XCTest
 @testable import vMLXApp
 import vMLXEngine
@@ -125,6 +126,12 @@ final class StudioChatHistoryStoreTests: XCTestCase {
         XCTAssertEqual(messages.map(\.role), ["system", "user"])
         XCTAssertEqual(stringContent(messages[0]), "You are concise.")
         XCTAssertEqual(stringContent(messages[1]), "Hi")
+        let generationMessages = StudioChatRuntime.generationMessages(
+            systemPrompt: "  You are concise.  ",
+            turns: [ChatTurn(role: .user, content: "Hi")]
+        )
+        XCTAssertEqual(generationMessages.map(\.role), [.system, .user])
+        XCTAssertEqual(generationMessages.map(\.content), ["You are concise.", "Hi"])
         XCTAssertEqual(StudioChatRuntime.sanitizedMaxResponseTokens(-50), 1)
         XCTAssertEqual(StudioChatRuntime.sanitizedContextLimitTokens(2_000_000), 1_000_000)
         XCTAssertGreaterThan(

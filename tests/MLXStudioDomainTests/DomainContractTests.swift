@@ -121,8 +121,15 @@ final class DomainContractTests: XCTestCase {
             metrics: .init(
                 promptTokenCount: 1,
                 generatedTokenCount: 1,
+                cachedTokenCount: 1,
+                timeToFirstTokenSeconds: 0.01,
+                prefillDurationSeconds: 0.02,
                 generationDurationSeconds: 0.1,
-                tokensPerSecond: 10
+                totalDurationSeconds: 0.12,
+                tokensPerSecond: 10,
+                promptTokensPerSecond: 50,
+                peakMemoryBytes: 1_024,
+                cacheDetail: "paged(1)"
             ),
             trace: .init(expertRouting: [observation])
         )
