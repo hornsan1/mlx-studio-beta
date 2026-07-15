@@ -197,6 +197,8 @@ final class DomainContractTests: XCTestCase {
     }
 
     func testOptimizationPlanRoundTripsAndStrategyReturnsCandidates() async throws {
+        XCTAssertEqual(ExpertDirectiveAction.automatic.rawValue, "auto")
+
         let projectID = fixedID(ModelProjectID.self, "30000000-0000-0000-0000-000000000001")
         let artifactID = fixedID(ModelArtifactID.self, "30000000-0000-0000-0000-000000000002")
         let suiteID = fixedID(EvaluationSuiteID.self, "30000000-0000-0000-0000-000000000003")
