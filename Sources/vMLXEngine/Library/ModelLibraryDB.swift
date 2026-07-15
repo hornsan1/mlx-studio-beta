@@ -93,6 +93,10 @@ public final class ModelLibraryDB: @unchecked Sendable {
         try? repository?.artifact(legacyModelID: legacyModelID)
     }
 
+    public func artifact(id: ModelArtifactID) -> ModelArtifact? {
+        try? repository?.artifact(id: id)
+    }
+
     public func purge(_ ids: Set<String>) {
         try? repository?.markUnavailableAndRemoveFromIndex(ids)
     }
