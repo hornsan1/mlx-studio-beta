@@ -26,26 +26,32 @@ public struct SettingsScreen: View {
     public init() {}
 
     public var body: some View {
-        Form {
-            Section(header: Text(L10n.Settings.uiLanguage.render(appLocale))
-                .font(.headline)) {
-                LanguagePicker()
-            }
-
-            Section(header: Text(L10n.Settings.appearance.render(appLocale))
-                .font(.headline)) {
-                Picker("", selection: $appearanceRaw) {
-                    ForEach(AppearanceMode.allCases) { mode in
-                        Text(mode.label).tag(mode.rawValue)
-                    }
+        TabView {
+            Form {
+                Section(header: Text(L10n.Settings.uiLanguage.render(appLocale))
+                    .font(.headline)) {
+                    LanguagePicker()
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 320, alignment: .leading)
+
+                Section(header: Text(L10n.Settings.appearance.render(appLocale))
+                    .font(.headline)) {
+                    Picker("", selection: $appearanceRaw) {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Text(mode.label).tag(mode.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320, alignment: .leading)
+                }
             }
+            .formStyle(.grouped)
+            .tabItem { Label("General", systemImage: "gearshape") }
+
+            APIScreen()
+                .tabItem { Label("API & Accounts", systemImage: "network") }
         }
-        .formStyle(.grouped)
-        .frame(minWidth: 520, minHeight: 320)
+        .frame(minWidth: 900, minHeight: 680)
         .background(Theme.Colors.background)
     }
 }

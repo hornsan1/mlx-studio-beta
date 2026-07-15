@@ -2,7 +2,7 @@ import SwiftUI
 import vMLXEngine
 import vMLXTheme
 
-/// O2/O3/O4 §290 — discoverable API route explorer for the API tab.
+/// O2/O3/O4 §290 — discoverable API route explorer for Settings > API & Accounts.
 ///
 /// Renders every entry in `RouteCatalog.all` with:
 ///   • live online dot (green when the current engine can serve this

@@ -1,5 +1,6 @@
 import Foundation
 import MLXStudioDomain
+import MLXStudioPersistence
 import vMLXEngine
 
 enum ExperienceMode: String, Codable, CaseIterable, Identifiable {
@@ -56,80 +57,6 @@ struct ModelSummary: Identifiable, Hashable, Sendable {
     var sizeBytes: Int64
     var labels: [String]
     var isLoaded: Bool
-}
-
-enum StudioLibraryModelSearch {
-    struct Summary: Equatable, Sendable {
-        var loadStateLabel: String
-        var searchTokens: [String]
-    }
-
-    static func summary(for model: ModelSummary) -> Summary {
-        let loadStateLabel = model.isLoaded ? "Loaded" : "Not loaded"
-        let path = model.ref.localURL?.path
-        let repo = model.ref.repo
-
-        // Built imperatively rather than as one large array literal: the
-        // Swift type-checker times out ("unable to type-check this
-        // expression in reasonable time") on a literal this size mixing
-        // ternaries and Optional.map. Appending is trivially typed.
-        var tokens: [String] = []
-        tokens.append(model.ref.displayName)
-        tokens.append(model.family)
-        tokens.append(model.modality)
-        tokens.append(model.labels.joined(separator: " "))
-        tokens.append(loadStateLabel)
-        tokens.append(model.isLoaded ? "loaded model" : "not loaded model")
-        tokens.append(model.isLoaded ? "active model" : "downloaded model")
-        tokens.append(model.isLoaded ? "ready in memory" : "available on disk")
-        tokens.append("\(model.sizeBytes)")
-        tokens.append(formattedBytes(model.sizeBytes))
-        tokens.append(repo ?? "")
-        tokens.append(repo.map { "repo \($0)" } ?? "")
-        tokens.append(path ?? "")
-        tokens.append(path.map { "local path \($0)" } ?? "")
-        tokens.append(model.ref.localURL?.lastPathComponent ?? "")
-        tokens.append(contentsOf: model.labels)
-
-        return Summary(
-            loadStateLabel: loadStateLabel,
-            searchTokens: tokens
-        )
-    }
-}
-
-enum StudioLibraryModelArchive {
-    static func spotlightModel(in models: [ModelSummary], selectedModelPath: URL?) -> ModelSummary? {
-        guard !models.isEmpty else { return nil }
-
-        if let selectedModelPath,
-           let selectedModel = models.first(where: { isSameLocalPath($0.ref.localURL, selectedModelPath) }) {
-            return selectedModel
-        }
-
-        if let loadedModel = models.first(where: \.isLoaded) {
-            return loadedModel
-        }
-
-        if let chatModel = models.first(where: isChatCapable) {
-            return chatModel
-        }
-
-        return models.first
-    }
-
-    private static func isSameLocalPath(_ lhs: URL?, _ rhs: URL) -> Bool {
-        guard let lhs else { return false }
-        return normalizedPath(lhs) == normalizedPath(rhs)
-    }
-
-    private static func normalizedPath(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().standardizedFileURL.path
-    }
-
-    private static func isChatCapable(_ model: ModelSummary) -> Bool {
-        !model.modality.localizedCaseInsensitiveContains("image")
-    }
 }
 
 enum StudioModelRouteReadiness {
@@ -365,65 +292,6 @@ enum StudioServerModelCompatibility {
     }
 
     private static func cleanModelName(_ name: String) -> String {
-        name
-            .replacingOccurrences(of: "models--", with: "")
-            .replacingOccurrences(of: "--", with: "/")
-    }
-}
-
-enum StudioChatModelSelection {
-    static func chatCapableModels(in models: [ModelSummary]) -> [ModelSummary] {
-        models.filter(StudioServerModelCompatibility.isChatCapable)
-    }
-
-    static func chatModel(matching savedModelName: String?, in models: [ModelSummary]) -> ModelSummary? {
-        guard let savedName = normalizedName(savedModelName) else { return nil }
-        return chatCapableModels(in: models).first { model in
-            modelNameCandidates(for: model).contains(savedName)
-        }
-    }
-
-    static func selectedModelID(
-        currentID: String?,
-        selectedPath: URL?,
-        sessionModelName: String? = nil,
-        models: [ModelSummary]
-    ) -> String? {
-        let chatModels = chatCapableModels(in: models)
-        if let sessionModel = chatModel(matching: sessionModelName, in: models) {
-            return sessionModel.id
-        }
-        if let selectedPath,
-           let selected = chatModels.first(where: { $0.ref.localURL == selectedPath }) {
-            return selected.id
-        }
-        if let currentID,
-           chatModels.contains(where: { $0.id == currentID }) {
-            return currentID
-        }
-        return chatModels.first?.id
-    }
-
-    private static func modelNameCandidates(for model: ModelSummary) -> Set<String> {
-        var candidates = [
-            model.ref.displayName,
-            model.ref.repo,
-            model.ref.id,
-            model.ref.localURL?.lastPathComponent,
-        ]
-        if let pathComponent = model.ref.localURL?.lastPathComponent {
-            candidates.append(cleanLocalModelName(pathComponent))
-        }
-        return Set(candidates.compactMap(normalizedName))
-    }
-
-    private static func normalizedName(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed.lowercased()
-    }
-
-    private static func cleanLocalModelName(_ name: String) -> String {
         name
             .replacingOccurrences(of: "models--", with: "")
             .replacingOccurrences(of: "--", with: "/")
@@ -691,15 +559,6 @@ enum ModelInstallEvent: Sendable {
     case failed(String)
 }
 
-struct StudioChatRequest: Sendable {
-    var model: ModelRef
-    var messages: [ChatTurn]
-    var maxTokens: Int = StudioChatRuntime.defaultMaxResponseTokens
-    var systemPrompt: String?
-    var contextLimitTokens: Int? = StudioChatRuntime.defaultContextLimitTokens
-    var enableThinking: Bool = false
-}
-
 struct ChatTurn: Identifiable, Codable, Hashable, Sendable {
     enum Role: String, Codable, Sendable {
         case user
@@ -793,9 +652,9 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         self.title = title
         self.modelName = modelName
         self.turns = turns
-        self.systemPrompt = StudioChatRuntime.normalizedSystemPrompt(systemPrompt)
-        self.maxResponseTokens = maxResponseTokens.map(StudioChatRuntime.sanitizedMaxResponseTokens)
-        self.contextLimitTokens = contextLimitTokens.map(StudioChatRuntime.sanitizedContextLimitTokens)
+        self.systemPrompt = StudioChatHistoryCompatibility.normalizedSystemPrompt(systemPrompt)
+        self.maxResponseTokens = maxResponseTokens.map(StudioChatHistoryCompatibility.sanitizedMaxResponseTokens)
+        self.contextLimitTokens = contextLimitTokens.map(StudioChatHistoryCompatibility.sanitizedContextLimitTokens)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.isPinned = isPinned
@@ -824,13 +683,13 @@ struct StudioChatSession: Identifiable, Codable, Hashable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? "New Chat"
         modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         turns = try container.decodeIfPresent([ChatTurn].self, forKey: .turns) ?? []
-        systemPrompt = StudioChatRuntime.normalizedSystemPrompt(
+        systemPrompt = StudioChatHistoryCompatibility.normalizedSystemPrompt(
             try container.decodeIfPresent(String.self, forKey: .systemPrompt)
         )
         maxResponseTokens = try container.decodeIfPresent(Int.self, forKey: .maxResponseTokens)
-            .map(StudioChatRuntime.sanitizedMaxResponseTokens)
+            .map(StudioChatHistoryCompatibility.sanitizedMaxResponseTokens)
         contextLimitTokens = try container.decodeIfPresent(Int.self, forKey: .contextLimitTokens)
-            .map(StudioChatRuntime.sanitizedContextLimitTokens)
+            .map(StudioChatHistoryCompatibility.sanitizedContextLimitTokens)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
@@ -1143,7 +1002,8 @@ enum StudioDiagnosticSource: String, Codable, CaseIterable, Sendable {
     case diagnostics = "diagnostics"
 
     var label: String {
-        rawValue.split(separator: " ")
+        if self == .advancedModels { return "Model Tools" }
+        return rawValue.split(separator: " ")
             .map { $0.capitalized }
             .joined(separator: " ")
     }
@@ -1290,7 +1150,7 @@ enum StudioDiagnosticBriefFormatter {
             }
             return "Manual only - run Health Probe; no binding changes here"
         case .advancedModels:
-            return "Safe no-op - open Advanced Models job row; no model files are changed"
+            return "Safe no-op - open the Models > Model Tools job row; no model files are changed"
         case .diagnostics:
             return "Safe no-op - refresh snapshot; no runtime state changes"
         }
@@ -1411,7 +1271,7 @@ enum StudioDiagnosticIssueStore {
     }
 }
 
-enum StudioAdvancedModelDiagnostic {
+enum StudioModelToolsDiagnostic {
     @discardableResult
     static func recordFailure(
         kind: ModelJobKind,
@@ -1429,15 +1289,15 @@ enum StudioAdvancedModelDiagnostic {
     static func title(for kind: ModelJobKind) -> String {
         switch kind {
         case .download:
-            return "Advanced model download failed"
+            return "Model tools download failed"
         case .inspect:
-            return "Advanced model inspection failed"
+            return "Model tools inspection failed"
         case .validate:
-            return "Advanced model validation failed"
+            return "Model tools validation failed"
         case .benchmark:
-            return "Advanced model benchmark failed"
+            return "Model tools benchmark failed"
         case .package:
-            return "Advanced model report export failed"
+            return "Model tools report export failed"
         }
     }
 
@@ -1493,14 +1353,7 @@ enum StudioDiagnosticRedactor {
     }
 }
 
-enum ChatEvent: Sendable {
-    case token(String)
-    case reasoning(String)
-    case usage(StreamChunk.Usage)
-    case finished(String?)
-}
-
-enum StudioChatRuntime {
+enum StudioChatHistoryCompatibility {
     static let defaultMaxResponseTokens = 512
     static let defaultContextLimitTokens = 262_144
     static let minTokenLimit = 1
@@ -1520,74 +1373,6 @@ enum StudioChatRuntime {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    static func requestMessages(
-        systemPrompt: String?,
-        turns: [ChatTurn]
-    ) -> [ChatRequest.Message] {
-        var messages = turns.map { turn in
-            ChatRequest.Message(
-                role: turn.role.rawValue,
-                content: .string(turn.content)
-            )
-        }
-        if let prompt = normalizedSystemPrompt(systemPrompt) {
-            messages.insert(
-                ChatRequest.Message(role: ChatTurn.Role.system.rawValue, content: .string(prompt)),
-                at: 0
-            )
-        }
-        return messages
-    }
-
-    static func generationMessages(
-        systemPrompt: String?,
-        turns: [ChatTurn]
-    ) -> [GenerationMessage] {
-        var messages = turns.map { turn in
-            GenerationMessage(
-                role: GenerationMessageRole(rawValue: turn.role.rawValue) ?? .user,
-                content: turn.content
-            )
-        }
-        if let prompt = normalizedSystemPrompt(systemPrompt) {
-            messages.insert(GenerationMessage(role: .system, content: prompt), at: 0)
-        }
-        return messages
-    }
-
-    static func estimatedContextTokens(
-        systemPrompt: String,
-        turns: [ChatTurn],
-        draftPrompt: String
-    ) -> Int {
-        let contextText = ([systemPrompt] + turns.map(\.content) + [draftPrompt])
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !contextText.isEmpty else { return 0 }
-        return max(1, Int(ceil(Double(contextText.utf8.count) / 4.0)))
-    }
-
-    static func totalTokens(_ usage: StreamChunk.Usage) -> Int {
-        usage.promptTokens + usage.completionTokens
-    }
-}
-
-private extension StreamChunk.Usage {
-    init(_ metrics: RuntimeMetrics) {
-        self.init(
-            promptTokens: metrics.promptTokenCount,
-            completionTokens: metrics.generatedTokenCount,
-            cachedTokens: metrics.cachedTokenCount,
-            tokensPerSecond: metrics.tokensPerSecond,
-            promptTokensPerSecond: metrics.promptTokensPerSecond,
-            ttftMs: metrics.timeToFirstTokenSeconds.map { $0 * 1_000 },
-            prefillMs: metrics.prefillDurationSeconds.map { $0 * 1_000 },
-            totalMs: (metrics.totalDurationSeconds
-                ?? ((metrics.prefillDurationSeconds ?? 0) + metrics.generationDurationSeconds)) * 1_000,
-            cacheDetail: metrics.cacheDetail,
-            isPartial: metrics.isPartial
-        )
-    }
 }
 
 enum StudioChatText {
@@ -1753,7 +1538,7 @@ struct BenchmarkConfig: Codable, Hashable, Sendable {
     var suite: String = Engine.BenchSuite.decode256.rawValue
 }
 
-enum StudioAdvancedModelBenchmarkGate {
+enum StudioModelToolsBenchmarkGate {
     static func unavailableReason(
         displayName: String,
         modality: String,
@@ -1777,7 +1562,7 @@ enum StudioAdvancedModelBenchmarkGate {
     }
 }
 
-enum StudioAdvancedModelValidationGate {
+enum StudioModelToolsValidationGate {
     static func unavailableReason(
         hasSelectedModel: Bool,
         hasTokenizer: Bool
@@ -1792,7 +1577,7 @@ enum StudioAdvancedModelValidationGate {
     }
 }
 
-enum StudioAdvancedModelReportGate {
+enum StudioModelToolsReportGate {
     static func unavailableReason(
         hasSelectedModel: Bool,
         hasInspection: Bool
@@ -1827,7 +1612,7 @@ enum JobStatus: String, Codable, Sendable {
     case cancelled
 }
 
-struct ModelJob: Identifiable, Codable, Sendable {
+struct ModelJob: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
     var kind: ModelJobKind
     var inputModel: ModelRef
@@ -1860,10 +1645,8 @@ protocol ModelInstallService {
 }
 
 @MainActor
-protocol ChatService {
+protocol ModelLoadService {
     func loadModel(_ model: ModelRef) async throws
-    func streamMessage(_ request: StudioChatRequest) async throws -> AsyncThrowingStream<ChatEvent, Error>
-    func stopGeneration() async
 }
 
 @MainActor
@@ -1875,7 +1658,7 @@ protocol ServerService {
 }
 
 @MainActor
-protocol AdvancedModelService {
+protocol ModelToolsService {
     func inspect(_ model: ModelRef) async throws -> ModelInspection
     func validate(_ model: ModelRef, suite: ValidationSuite) async throws -> JobID
     func benchmark(_ model: ModelRef, config: BenchmarkConfig) async throws -> JobID
@@ -1883,7 +1666,7 @@ protocol AdvancedModelService {
 }
 
 @MainActor
-protocol JobService {
+protocol ModelToolJobStore {
     func listJobs() async throws -> [ModelJob]
     func events(for id: JobID) -> AsyncStream<JobEvent>
     func cancel(_ id: JobID) async throws
@@ -2117,7 +1900,7 @@ final class StudioModelService: ModelService {
 }
 
 @MainActor
-final class StudioChatService: ChatService {
+final class StudioModelLoadService: ModelLoadService {
     private let app: AppState
 
     init(app: AppState) {
@@ -2141,70 +1924,6 @@ final class StudioChatService: ChatService {
         await app.startSession(id)
     }
 
-    func streamMessage(_ request: StudioChatRequest) async throws -> AsyncThrowingStream<ChatEvent, Error> {
-        let engine = app.engine
-        if let contextLimitTokens = request.contextLimitTokens {
-            var global = await engine.settings.global()
-            let sanitizedLimit = StudioChatRuntime.sanitizedContextLimitTokens(contextLimitTokens)
-            if global.maxPromptTokens != sanitizedLimit {
-                global.maxPromptTokens = sanitizedLimit
-                await engine.applySettings(global)
-            }
-        }
-        let modelLibrary = await engine.modelLibrary
-        guard let artifact = await modelLibrary.artifact(forEntryID: request.model.id) else {
-            throw StudioServiceError.modelNotLocal
-        }
-        let messages = StudioChatRuntime.generationMessages(
-            systemPrompt: request.systemPrompt,
-            turns: request.messages
-        )
-        let generationRequest = GenerationRequest(
-            artifactID: artifact.id,
-            messages: messages,
-            configuration: GenerationConfiguration(
-                maximumTokenCount: StudioChatRuntime.sanitizedMaxResponseTokens(request.maxTokens)
-            ),
-            metadata: [
-                "enable_thinking": request.enableThinking ? "true" : "false",
-                "vmlx_use_runtime_sampling_defaults": "true",
-            ]
-        )
-        let upstream = VMLXInferenceProvider(engine: engine).events(for: generationRequest)
-
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    for try await event in upstream {
-                        switch event {
-                        case .textDelta(let content):
-                            continuation.yield(.token(StudioChatText.clean(content)))
-                        case .reasoningDelta(let reasoning):
-                            continuation.yield(.reasoning(StudioChatText.clean(reasoning)))
-                        case .metrics(let metrics):
-                            continuation.yield(.usage(StreamChunk.Usage(metrics)))
-                        case .completed(let result):
-                            continuation.yield(.finished(result.finishReason.rawValue))
-                        case .started, .trace:
-                            break
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { termination in
-                if case .cancelled = termination {
-                    task.cancel()
-                }
-            }
-        }
-    }
-
-    func stopGeneration() async {
-        await app.engine.cancelStream()
-    }
 }
 
 @MainActor
@@ -2246,7 +1965,7 @@ final class StudioModelInstallService: ModelInstallService {
                 self.app.selectedModelPath = model.ref.localURL
             },
             loadChatModel: { model in
-                try await StudioChatService(app: self.app).loadModel(model.ref)
+                try await StudioModelLoadService(app: self.app).loadModel(model.ref)
             },
             routeToChat: {
                 self.app.mode = .chat
@@ -2489,11 +2208,11 @@ final class StudioServerService: ServerService {
 }
 
 @MainActor
-final class StudioAdvancedModelService: AdvancedModelService {
+final class StudioModelToolsService: ModelToolsService {
     private let app: AppState
-    private let jobs: StudioJobService
+    private let jobs: StudioModelToolJobStore
 
-    init(app: AppState, jobs: StudioJobService) {
+    init(app: AppState, jobs: StudioModelToolJobStore) {
         self.app = app
         self.jobs = jobs
     }
@@ -2590,9 +2309,9 @@ final class StudioAdvancedModelService: AdvancedModelService {
     }
 
     func validate(_ model: ModelRef, suite: ValidationSuite) async throws -> JobID {
-        let id = jobs.start(kind: .validate, model: model, message: "Queued validation")
+        let id = try jobs.start(kind: .validate, model: model, message: "Queued validation")
         Task { @MainActor in
-            jobs.update(id, status: .running, progress: 0.2, message: "Inspecting model files")
+            try? jobs.update(id, status: .running, progress: 0.2, message: "Inspecting model files")
             do {
                 let inspection = try await inspect(model)
                 guard inspection.tokenizerPresent else {
@@ -2600,10 +2319,10 @@ final class StudioAdvancedModelService: AdvancedModelService {
                         "Validation failed: tokenizer required before validation."
                     )
                 }
-                jobs.update(id, status: .completed, progress: 1.0, message: "Validation passed")
+                try jobs.update(id, status: .completed, progress: 1.0, message: "Validation passed")
             } catch {
-                jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
-                StudioAdvancedModelDiagnostic.recordFailure(
+                try? jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
+                StudioModelToolsDiagnostic.recordFailure(
                     kind: .validate,
                     model: model,
                     message: error.localizedDescription
@@ -2614,21 +2333,21 @@ final class StudioAdvancedModelService: AdvancedModelService {
     }
 
     func benchmark(_ model: ModelRef, config: BenchmarkConfig) async throws -> JobID {
-        let id = jobs.start(kind: .benchmark, model: model, message: "Queued benchmark")
+        let id = try jobs.start(kind: .benchmark, model: model, message: "Queued benchmark")
         Task { @MainActor in
-            jobs.update(id, status: .running, progress: 0.1, message: "Running decode benchmark")
+            try? jobs.update(id, status: .running, progress: 0.1, message: "Running decode benchmark")
             let suite = Engine.BenchSuite(rawValue: config.suite) ?? .decode256
             do {
                 for try await event in await app.engine.benchmark(suite: suite) {
                     switch event {
                     case .progress(let fraction, let label):
-                        jobs.update(id, status: .running, progress: fraction, message: label)
+                        try jobs.update(id, status: .running, progress: fraction, message: label)
                     case .done(let report):
                         let output = try writeBenchmarkReport(report)
-                        jobs.update(id, status: .completed, progress: 1.0, outputPath: output, message: "Benchmark complete")
+                        try jobs.update(id, status: .completed, progress: 1.0, outputPath: output, message: "Benchmark complete")
                     case .failed(let message):
-                        jobs.update(id, status: .failed, progress: 1.0, message: message)
-                        StudioAdvancedModelDiagnostic.recordFailure(
+                        try? jobs.update(id, status: .failed, progress: 1.0, message: message)
+                        StudioModelToolsDiagnostic.recordFailure(
                             kind: .benchmark,
                             model: model,
                             message: message
@@ -2636,8 +2355,8 @@ final class StudioAdvancedModelService: AdvancedModelService {
                     }
                 }
             } catch {
-                jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
-                StudioAdvancedModelDiagnostic.recordFailure(
+                try? jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
+                StudioModelToolsDiagnostic.recordFailure(
                     kind: .benchmark,
                     model: model,
                     message: error.localizedDescription
@@ -2648,14 +2367,14 @@ final class StudioAdvancedModelService: AdvancedModelService {
     }
 
     func package(_ model: ModelRef, options: PackageOptions) async throws -> JobID {
-        let id = jobs.start(kind: .package, model: model, message: "Writing metadata report")
+        let id = try jobs.start(kind: .package, model: model, message: "Writing metadata report")
         do {
             let inspection = try await inspect(model)
             let output = try writeInspectionReport(inspection)
-            jobs.update(id, status: .completed, progress: 1.0, outputPath: output, message: "Report exported")
+            try jobs.update(id, status: .completed, progress: 1.0, outputPath: output, message: "Report exported")
         } catch {
-            jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
-            StudioAdvancedModelDiagnostic.recordFailure(
+            try? jobs.update(id, status: .failed, progress: 1.0, message: error.localizedDescription)
+            StudioModelToolsDiagnostic.recordFailure(
                 kind: .package,
                 model: model,
                 message: error.localizedDescription
@@ -2694,12 +2413,19 @@ final class StudioAdvancedModelService: AdvancedModelService {
 }
 
 @MainActor
-final class StudioJobService: JobService {
-    private var jobs: [JobID: ModelJob] = [:]
-    private var order: [JobID] = []
+final class StudioModelToolJobStore: ModelToolJobStore {
+    private static let typePrefix = "model-tools."
+    private let artifactRepository: ModelArtifactRepository
+    private let repository: DurableJobRepository
     private var continuations: [JobID: [UUID: AsyncStream<JobEvent>.Continuation]] = [:]
 
-    func start(kind: ModelJobKind, model: ModelRef, message: String) -> JobID {
+    init(databaseURL: URL = ModelArtifactRepository.defaultDatabaseURL()) throws {
+        let artifacts = try ModelArtifactRepository(databaseURL: databaseURL)
+        artifactRepository = artifacts
+        repository = artifacts.makeJobRepository()
+    }
+
+    func start(kind: ModelJobKind, model: ModelRef, message: String) throws -> JobID {
         let id = UUID()
         let now = Date()
         let job = ModelJob(
@@ -2714,8 +2440,7 @@ final class StudioJobService: JobService {
             createdAt: now,
             updatedAt: now
         )
-        jobs[id] = job
-        order.insert(id, at: 0)
+        try persist(job)
         broadcast(id, .updated(job))
         return id
     }
@@ -2726,27 +2451,30 @@ final class StudioJobService: JobService {
         progress: Double?,
         outputPath: URL? = nil,
         message: String
-    ) {
-        guard var job = jobs[id] else { return }
+    ) throws {
+        guard var job = try modelJob(id: id) else { return }
         job.status = status
         job.progress = progress
         job.outputPath = outputPath ?? job.outputPath
         job.message = message
         job.updatedAt = Date()
-        jobs[id] = job
+        try persist(job)
         broadcast(id, .updated(job))
         broadcast(id, .log(message))
     }
 
     func listJobs() async throws -> [ModelJob] {
-        order.compactMap { jobs[$0] }
+        try repository.records()
+            .filter { $0.type.hasPrefix(Self.typePrefix) }
+            .compactMap(Self.decode)
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     func events(for id: JobID) -> AsyncStream<JobEvent> {
         AsyncStream { continuation in
             let token = UUID()
             continuations[id, default: [:]][token] = continuation
-            if let job = jobs[id] {
+            if let job = try? modelJob(id: id) {
                 continuation.yield(.updated(job))
             }
             continuation.onTermination = { [weak self] _ in
@@ -2758,12 +2486,73 @@ final class StudioJobService: JobService {
     }
 
     func cancel(_ id: JobID) async throws {
-        update(id, status: .cancelled, progress: nil, message: "Cancelled")
+        try update(id, status: .cancelled, progress: nil, message: "Cancelled")
     }
 
     func retry(_ id: JobID) async throws -> JobID {
-        guard let job = jobs[id] else { throw StudioServiceError.noSelectedModel }
-        return start(kind: job.kind, model: job.inputModel, message: "Retry queued")
+        guard let job = try modelJob(id: id) else { throw StudioServiceError.noSelectedModel }
+        return try start(kind: job.kind, model: job.inputModel, message: "Retry queued")
+    }
+
+    private func modelJob(id: JobID) throws -> ModelJob? {
+        guard let durableID = MLXStudioDomain.JobID(rawValue: id.uuidString),
+              let record = try repository.record(id: durableID),
+              record.type.hasPrefix(Self.typePrefix)
+        else { return nil }
+        return Self.decode(record)
+    }
+
+    private func persist(_ job: ModelJob) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        let payload = try String(decoding: encoder.encode(job), as: UTF8.self)
+        let id = MLXStudioDomain.JobID(job.id)
+        let existing = try repository.record(id: id)
+        let indexedArtifactID = try artifactRepository.artifact(
+            legacyModelID: job.inputModel.id
+        )?.id
+        let artifactID = existing?.artifactID ?? indexedArtifactID
+        let now = job.updatedAt
+        let state: DurableJobState = switch job.status {
+        case .queued: .pending
+        case .running: .running
+        case .completed: .completed
+        case .failed: .failed
+        case .cancelled: .cancelled
+        }
+        try repository.upsert(DurableJobRecord(
+            id: id,
+            type: Self.typePrefix + job.kind.rawValue,
+            projectID: existing?.projectID,
+            artifactID: artifactID,
+            state: state,
+            progress: job.progress ?? existing?.progress ?? 0,
+            currentStage: job.message,
+            peakMemoryBytes: existing?.peakMemoryBytes,
+            errorJSON: job.status == .failed ? Self.errorJSON(job.message) : nil,
+            recoveryInstructions: job.status == .failed ? "Retry from Models > Model Tools." : nil,
+            payloadJSON: payload,
+            createdAt: job.createdAt,
+            startedAt: state == .running ? (existing?.startedAt ?? now) : existing?.startedAt,
+            endedAt: [.completed, .failed, .cancelled].contains(state) ? now : nil,
+            updatedAt: now
+        ))
+    }
+
+    private static func decode(_ record: DurableJobRecord) -> ModelJob? {
+        guard let data = record.payloadJSON.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(ModelJob.self, from: data)
+    }
+
+    private static func errorJSON(_ message: String) -> String {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["message": message],
+            options: [.sortedKeys]
+        ) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func broadcast(_ id: JobID, _ event: JobEvent) {

@@ -935,10 +935,10 @@ public enum L10n {
             zh: "通过 HuggingFace 仓库下载"
         )
         public static let hfFormatHint = L10nEntry(
-            en: "Enter `{org}/{repo}` format. Gated repos require a HuggingFace token in the API tab.",
-            ja: "`{org}/{repo}` 形式で入力してください。ゲート付きリポジトリには API タブで HuggingFace トークンが必要です。",
-            ko: "`{org}/{repo}` 형식으로 입력하십시오. 게이트된 리포지토리는 API 탭에서 HuggingFace 토큰이 필요합니다.",
-            zh: "输入 `{org}/{repo}` 格式。受限仓库需要在 API 选项卡中配置 HuggingFace 令牌。"
+            en: "Enter `{org}/{repo}` format. Gated repos require a HuggingFace token in Settings > API & Accounts.",
+            ja: "`{org}/{repo}` 形式で入力してください。ゲート付きリポジトリには「設定」>「API とアカウント」で HuggingFace トークンが必要です。",
+            ko: "`{org}/{repo}` 형식으로 입력하십시오. 게이트된 리포지토리는 설정 > API 및 계정에서 HuggingFace 토큰이 필요합니다.",
+            zh: "输入 `{org}/{repo}` 格式。受限仓库需要在设置 > API 与账户中配置 HuggingFace 令牌。"
         )
         public static let hfCacheDefault = L10nEntry(
             en: "HuggingFace cache (default — cannot be removed)",
@@ -1201,11 +1201,11 @@ public enum L10n {
     }
 
     public enum DownloadsUI {
-        public static let imageTabHint = L10nEntry(
-            en: "From the **Image** tab, the model picker has a download button next to each Flux / Z-Image model. Click it and the download appears here automatically.",
-            ja: "**画像** タブでは、モデルピッカーの各 Flux / Z-Image モデルの横にダウンロードボタンがあります。クリックするとダウンロードがここに自動的に表示されます。",
-            ko: "**이미지** 탭에서 모델 피커의 각 Flux / Z-Image 모델 옆에 다운로드 버튼이 있습니다. 클릭하면 여기에 다운로드가 자동으로 표시됩니다.",
-            zh: "在**图像**标签页中，模型选择器的每个 Flux / Z-Image 模型旁都有下载按钮。点击后下载会自动显示在此处。"
+        public static let createDownloadHint = L10nEntry(
+            en: "From **Create**, the model picker has a download button next to each Flux / Z-Image model. Click it and the download appears here automatically.",
+            ja: "**Create** では、モデルピッカーの各 Flux / Z-Image モデルの横にダウンロードボタンがあります。クリックするとダウンロードがここに自動的に表示されます。",
+            ko: "**Create**에서 모델 피커의 각 Flux / Z-Image 모델 옆에 다운로드 버튼이 있습니다. 클릭하면 여기에 다운로드가 자동으로 표시됩니다.",
+            zh: "在 **Create** 中，模型选择器的每个 Flux / Z-Image 模型旁都有下载按钮。点击后下载会自动显示在此处。"
         )
         public static let fromCLI = L10nEntry(
             en: "From the CLI:",
@@ -1220,10 +1220,10 @@ public enum L10n {
             zh: "某些模型需要在 HuggingFace 上接受许可证。下载方法:"
         )
         public static let cacheHint = L10nEntry(
-            en: "Files are stored in the standard HuggingFace cache. The Server tab's Model Library auto-detects them on the next scan.",
-            ja: "ファイルは標準の HuggingFace キャッシュに保存されます。サーバータブのモデルライブラリは次回スキャン時に自動的に検出します。",
-            ko: "파일은 표준 HuggingFace 캐시에 저장됩니다. 서버 탭의 모델 라이브러리가 다음 스캔 시 자동으로 감지합니다.",
-            zh: "文件存储在标准 HuggingFace 缓存中。服务器选项卡的模型库将在下次扫描时自动检测它们。"
+            en: "Files are stored in the standard HuggingFace cache. The Models workspace auto-detects them on the next scan.",
+            ja: "ファイルは標準の HuggingFace キャッシュに保存されます。Models ワークスペースは次回スキャン時に自動的に検出します。",
+            ko: "파일은 표준 HuggingFace 캐시에 저장됩니다. Models 작업 공간이 다음 스캔 시 자동으로 감지합니다.",
+            zh: "文件存储在标准 HuggingFace 缓存中。Models 工作区将在下次扫描时自动检测它们。"
         )
         public static let pauseResumeHint = L10nEntry(
             en: "Pause / cancel / retry are per-row in this window. Resumes use HTTP Range requests so paused downloads pick up from the exact byte they stopped — no re-downloading.",
@@ -1289,10 +1289,10 @@ public enum L10n {
             zh: "一切就绪"
         )
         public static let allSetBody = L10nEntry(
-            en: "Open the Server tab to start the engine, then head to Chat. Keys for remote clients live under the API tab.",
-            ja: "サーバータブを開いてエンジンを起動し、チャットに進んでください。リモートクライアント用のキーは API タブにあります。",
-            ko: "서버 탭을 열어 엔진을 시작한 다음 채팅으로 이동하십시오. 원격 클라이언트용 키는 API 탭에 있습니다.",
-            zh: "打开服务器选项卡启动引擎，然后转到聊天。远程客户端的密钥在 API 选项卡下。"
+            en: "Open Serve to start the engine, then head to Chat. Keys for remote clients live in Settings > API & Accounts.",
+            ja: "「Serve」を開いてエンジンを起動し、チャットに進んでください。リモートクライアント用のキーは「設定」>「API とアカウント」にあります。",
+            ko: "Serve를 열어 엔진을 시작한 다음 채팅으로 이동하십시오. 원격 클라이언트용 키는 설정 > API 및 계정에 있습니다.",
+            zh: "打开 Serve 启动引擎，然后转到聊天。远程客户端密钥位于设置 > API 与账户。"
         )
         public static let tokenSaved = L10nEntry(
             en: "Hugging Face token stored — gated repos (Llama, Gemma, Mistral) are accessible.",

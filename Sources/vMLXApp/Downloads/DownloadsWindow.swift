@@ -147,7 +147,7 @@ struct DownloadsWindow: View {
                 .font(Theme.Typography.bodyHi)
                 .foregroundStyle(Theme.Colors.textHigh)
 
-            Text(L10n.DownloadsUI.imageTabHint.render(appLocale))
+            Text(L10n.DownloadsUI.createDownloadHint.render(appLocale))
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.textMid)
                 .fixedSize(horizontal: false, vertical: true)
@@ -184,7 +184,7 @@ struct DownloadsWindow: View {
                 .foregroundStyle(Theme.Colors.textMid)
             VStack(alignment: .leading, spacing: 4) {
                 Text("1. Visit the model page on huggingface.co and click **Request access**.")
-                Text("2. In the **API** tab below, paste a HuggingFace token in the *HuggingFace access token* card and click **Save & Test**.")
+                Text("2. Open **Settings > API & Accounts**, paste a HuggingFace token, and click **Save & Test**.")
                 Text("3. Retry the download — gated files will now succeed.")
             }
             .font(Theme.Typography.caption)
@@ -290,8 +290,8 @@ private struct DownloadRow: View {
                 }
                 // O7 §293 — targeted HF auth CTA. When the sibling
                 // fetch returned 401/403, show a Fix button that
-                // switches to the API tab + scrolls the user to the
-                // HuggingFaceTokenCard. Much better UX than the
+                // opens Settings > API & Accounts and scrolls the user
+                // to HuggingFaceTokenCard. Much better UX than the
                 // generic error hint which users miss.
                 if job.requiresHFAuth {
                     HStack(spacing: 6) {

@@ -142,9 +142,9 @@ final class Database {
             runSQL("PRAGMA user_version = 1;")
         }
         if version < 2 {
-            // Unified Chat schema. These columns absorb the redesigned
-            // StudioChatScreen's parallel UserDefaults model and make the
-            // capable SQLite chat path the single source of truth.
+            // Unified Chat schema. These columns absorbed the retired Studio
+            // chat shell's parallel UserDefaults model and make the capable
+            // SQLite chat path the single source of truth.
             runSQL("ALTER TABLE sessions ADD COLUMN model_name TEXT;")
             runSQL("ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;")
             runSQL("ALTER TABLE sessions ADD COLUMN collection_name TEXT;")
