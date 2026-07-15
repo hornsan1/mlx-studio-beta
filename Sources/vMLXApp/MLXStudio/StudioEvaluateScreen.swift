@@ -3,19 +3,23 @@ import MLXStudioDomain
 import MLXStudioEvaluation
 import MLXStudioPersistence
 import SwiftUI
+import UniformTypeIdentifiers
 import vMLXEngine
 import vMLXTheme
 
 enum StudioEvaluationMode: String, CaseIterable, Identifiable {
     case quickCompare = "Quick Compare"
     case blindAB = "Blind A/B"
+    case promptSuite = "Prompt Suite"
 
     var id: String { rawValue }
 }
 
 struct StudioEvaluateScreen: View {
     @Environment(AppState.self) private var app
-    @State private var model = StudioQuickCompareViewModel()
+    @State private var model = StudioEvaluateViewModel()
+    @State private var importsSuite = false
+    @State private var exportsSuite = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,9 +44,7 @@ struct StudioEvaluateScreen: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     compareCard(
                         model.presentationMode.rawValue,
-                        subtitle: model.presentationMode == .blindAB
-                            ? "Compare anonymous responses, persist your judgment, then reveal model identity."
-                            : "Run identical messages and generation settings through two artifacts in a reproducible sequential order."
+                        subtitle: model.modeSubtitle
                     ) {
                         Picker("Evaluation mode", selection: $model.presentationMode) {
                             ForEach(StudioEvaluationMode.allCases) { mode in
@@ -52,29 +54,64 @@ struct StudioEvaluateScreen: View {
                         .pickerStyle(.segmented)
                         .disabled(model.isRunning || model.hasUnrevealedBlindResult)
                         .accessibilityIdentifier("evaluate.mode")
-                        HStack {
-                            candidatePicker("Candidate A", selection: $model.firstArtifactID)
-                            candidatePicker("Candidate B", selection: $model.secondArtifactID)
+                        if model.presentationMode == .promptSuite {
+                            candidatePicker("Candidate", selection: $model.firstArtifactID)
+                        } else {
+                            HStack {
+                                candidatePicker("Candidate A", selection: $model.firstArtifactID)
+                                candidatePicker("Candidate B", selection: $model.secondArtifactID)
+                            }
                         }
-                        Text("Sequential fallback unloads and loads candidates one at a time, so comparison remains available when both models cannot fit in memory together.")
+                        Text(model.executionNote)
                             .font(Theme.Typography.captionHi)
                             .foregroundStyle(Theme.Colors.textLow)
                     }
 
                     compareCard(
-                        "Prompt and settings",
-                        subtitle: "Both candidates use the same logical template, prompt, seed, and sampling configuration."
+                        model.presentationMode == .promptSuite ? "Suite and settings" : "Prompt and settings",
+                        subtitle: model.presentationMode == .promptSuite
+                            ? "Import a versioned JSONL suite or build an unscored suite from one custom prompt per line."
+                            : "Both candidates use the same logical template, prompt, seed, and sampling configuration."
                     ) {
-                        TextField("Optional system prompt", text: $model.systemPrompt)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("evaluate.system-prompt")
-                        TextEditor(text: $model.prompt)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minHeight: 100)
-                            .padding(6)
-                            .background(Theme.Colors.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-                            .accessibilityIdentifier("evaluate.prompt")
+                        if model.presentationMode == .promptSuite {
+                            HStack {
+                                Button("Import JSONL") { importsSuite = true }
+                                    .disabled(model.isRunning)
+                                    .accessibilityIdentifier("evaluate.suite-import")
+                                Button("Export JSONL") { exportsSuite = true }
+                                    .disabled(model.promptSuite == nil || model.isRunning)
+                                    .accessibilityIdentifier("evaluate.suite-export")
+                                if let summary = model.promptSuiteSummary {
+                                    Text(summary)
+                                        .font(Theme.Typography.captionHi)
+                                        .foregroundStyle(Theme.Colors.textLow)
+                                }
+                            }
+                            TextEditor(text: $model.customPromptsText)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(minHeight: 110)
+                                .padding(6)
+                                .background(Theme.Colors.surface)
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+                                .disabled(model.isRunning)
+                                .accessibilityIdentifier("evaluate.suite-custom-prompts")
+                            Button("Build custom suite") { model.buildCustomSuite() }
+                                .disabled(model.customPromptsText
+                                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || model.isRunning)
+                                .accessibilityIdentifier("evaluate.suite-build")
+                        } else {
+                            TextField("Optional system prompt", text: $model.systemPrompt)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityIdentifier("evaluate.system-prompt")
+                            TextEditor(text: $model.prompt)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(minHeight: 100)
+                                .padding(6)
+                                .background(Theme.Colors.surface)
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+                                .accessibilityIdentifier("evaluate.prompt")
+                        }
                         HStack {
                             Stepper(
                                 "Maximum tokens: \(model.maximumTokenCount)",
@@ -91,7 +128,7 @@ struct StudioEvaluateScreen: View {
                                 .frame(width: 110)
                                 .accessibilityIdentifier("evaluate.seed")
                         }
-                        Text("Template contract: \(QuickCompareRunner.templateIdentifier)")
+                        Text("Template contract: \(model.templateIdentifier)")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(Theme.Colors.textLow)
                     }
@@ -109,7 +146,7 @@ struct StudioEvaluateScreen: View {
                                 .disabled(!model.isRunning)
                             if model.isRunning { ProgressView() }
                         }
-                        if let manifest = model.outcome?.manifest {
+                        if let manifest = model.activeManifest {
                             Text(model.manifestSummary(manifest))
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Theme.Colors.textLow)
@@ -154,6 +191,10 @@ struct StudioEvaluateScreen: View {
                         }
                     }
 
+                    if let outcome = model.promptSuiteOutcome {
+                        promptSuiteResults(outcome)
+                    }
+
                     if model.presentationMode == .blindAB, model.judgment != nil {
                         blindJudgmentCard
                     }
@@ -165,6 +206,21 @@ struct StudioEvaluateScreen: View {
         }
         .background(Theme.Colors.background)
         .task { model.refresh() }
+        .fileImporter(
+            isPresented: $importsSuite,
+            allowedContentTypes: [.json, .plainText, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            model.importSuite(result)
+        }
+        .fileExporter(
+            isPresented: $exportsSuite,
+            document: EvaluationSuiteDocument(data: model.exportData ?? Data()),
+            contentType: .plainText,
+            defaultFilename: model.exportFilename
+        ) { result in
+            model.finishExport(result)
+        }
     }
 
     private func candidatePicker(
@@ -178,7 +234,46 @@ struct StudioEvaluateScreen: View {
                     .tag(artifact.id as ModelArtifactID?)
             }
         }
-        .accessibilityIdentifier(title == "Candidate A" ? "evaluate.candidate-a" : "evaluate.candidate-b")
+        .disabled(model.isRunning)
+        .accessibilityIdentifier(title == "Candidate B" ? "evaluate.candidate-b" : "evaluate.candidate-a")
+    }
+
+    private func promptSuiteResults(_ outcome: PromptSuiteOutcome) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            ForEach(outcome.scorecards, id: \.artifactID) { scorecard in
+                compareCard(
+                    "Scorecard — \(model.artifactName(scorecard.artifactID))",
+                    subtitle: model.scorecardSummary(scorecard)
+                ) {
+                    ForEach(scorecard.domains, id: \.domain) { domain in
+                        Text(model.domainScoreSummary(domain))
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Theme.Colors.textLow)
+                    }
+                }
+            }
+            compareCard(
+                "Case results",
+                subtitle: "Every completed case is durable and will be skipped by Resume."
+            ) {
+                ForEach(outcome.result.caseResults, id: \.caseID) { result in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.caseName(result.caseID))
+                            .font(.system(size: 13, weight: .semibold))
+                        if let error = result.errorDescription {
+                            Text(error).foregroundStyle(Theme.Colors.danger)
+                        } else {
+                            Text(result.generationResult?.text ?? "No output")
+                                .textSelection(.enabled)
+                            Text(model.caseScoreSummary(result))
+                                .font(Theme.Typography.captionHi)
+                                .foregroundStyle(Theme.Colors.textLow)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
     }
 
     private func resultColumn(
@@ -274,7 +369,7 @@ struct StudioEvaluateScreen: View {
 
 @MainActor
 @Observable
-final class StudioQuickCompareViewModel {
+final class StudioEvaluateViewModel {
     var artifacts: [ModelArtifact] = []
     var firstArtifactID: ModelArtifactID?
     var secondArtifactID: ModelArtifactID?
@@ -282,12 +377,17 @@ final class StudioQuickCompareViewModel {
         didSet {
             guard presentationMode != oldValue, !isRunning else { return }
             outcome = nil
+            promptSuiteOutcome = nil
             judgment = nil
-            status = artifacts.count >= 2 ? "Ready" : status
+            status = presentationMode == .promptSuite
+                ? (artifacts.isEmpty ? "Prompt Suite needs one local text-model artifact." : "Ready")
+                : (artifacts.count >= 2 ? "Ready" : status)
+            if presentationMode == .promptSuite { discoverInterruptedPromptSuite() }
         }
     }
     var systemPrompt = ""
     var prompt = "Reply with one concise sentence."
+    var customPromptsText = "Summarize why deterministic evaluation matters.\nWrite a one-line Swift greeting."
     var maximumTokenCount = 128
     var temperature = 0.0
     var seedText = "42"
@@ -295,27 +395,81 @@ final class StudioQuickCompareViewModel {
     var hasError = false
     var isRunning = false
     var outcome: QuickCompareOutcome?
+    var promptSuiteOutcome: PromptSuiteOutcome?
+    var promptSuite: EvaluationSuite?
     var judgment: HumanJudgment?
+    var resumableRequest: EvaluationRunRequest?
 
     private var artifactRepository: ModelArtifactRepository?
     private var evaluationRepository: EvaluationRepository?
     private var activeTask: Task<Void, Never>?
 
     var canRun: Bool {
-        firstArtifactID != nil
+        guard firstArtifactID != nil else { return false }
+        if presentationMode == .promptSuite { return promptSuite?.cases.isEmpty == false }
+        return UInt64(seedText) != nil
             && secondArtifactID != nil
             && firstArtifactID != secondArtifactID
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && UInt64(seedText) != nil
     }
 
     var isRevealed: Bool { judgment?.revealedAt != nil }
     var runButtonTitle: String {
-        presentationMode == .blindAB ? "Run Blind A/B" : "Run Quick Compare"
+        switch presentationMode {
+        case .quickCompare: "Run Quick Compare"
+        case .blindAB: "Run Blind A/B"
+        case .promptSuite: hasMatchingResume ? "Resume Prompt Suite" : "Run Prompt Suite"
+        }
     }
     var canJudge: Bool { outcome?.result.status == .completed && judgment != nil }
     var hasUnrevealedBlindResult: Bool {
         presentationMode == .blindAB && canJudge && !isRevealed
+    }
+
+    var hasMatchingResume: Bool {
+        guard let resumableRequest, let promptSuite, let firstArtifactID else { return false }
+        return resumableRequest.suite.id == promptSuite.id
+            && resumableRequest.candidates.map(\.artifactID) == [firstArtifactID]
+    }
+
+    var modeSubtitle: String {
+        switch presentationMode {
+        case .quickCompare:
+            "Run identical messages and generation settings through two artifacts in a reproducible sequential order."
+        case .blindAB:
+            "Compare anonymous responses, persist your judgment, then reveal model identity."
+        case .promptSuite:
+            "Run a versioned multi-case suite with durable per-case progress, resumability, and domain scorecards."
+        }
+    }
+
+    var executionNote: String {
+        presentationMode == .promptSuite
+            ? "Each case is committed before the next starts. Resume skips durable case results after cancellation or restart."
+            : "Sequential fallback unloads and loads candidates one at a time, so comparison remains available when both models cannot fit in memory together."
+    }
+
+    var templateIdentifier: String {
+        presentationMode == .promptSuite
+            ? PromptSuiteRunner.templateIdentifier : QuickCompareRunner.templateIdentifier
+    }
+
+    var activeManifest: EvaluationRunManifest? {
+        promptSuiteOutcome?.manifest ?? outcome?.manifest
+    }
+
+    var promptSuiteSummary: String? {
+        guard let promptSuite else { return nil }
+        return "\(promptSuite.name) · \(promptSuite.cases.count) cases · \(promptSuite.suiteHash.prefix(12))"
+    }
+
+    var exportData: Data? { try? promptSuite.map(EvaluationJSONL.encode) }
+    var exportFilename: String {
+        let name = promptSuite?.name ?? "evaluation-suite"
+        let safe = name.lowercased().map { character in
+            character.isLetter || character.isNumber ? character : "-"
+        }
+        return String(safe).replacingOccurrences(of: "--", with: "-") + ".jsonl"
     }
 
     var revealSummary: String? {
@@ -374,15 +528,23 @@ final class StudioQuickCompareViewModel {
             {
                 secondArtifactID = artifacts.dropFirst().first?.id
             }
-            status = artifacts.count >= 2
-                ? "Ready" : "Quick Compare needs two local text-model artifacts."
+            status = presentationMode == .promptSuite
+                ? (artifacts.isEmpty
+                    ? "Prompt Suite needs one local text-model artifact." : "Ready")
+                : (artifacts.count >= 2
+                    ? "Ready" : "Quick Compare needs two local text-model artifacts.")
             hasError = false
+            if presentationMode == .promptSuite { discoverInterruptedPromptSuite() }
         } catch {
             fail(error)
         }
     }
 
     func run(engine: Engine) {
+        if presentationMode == .promptSuite {
+            runPromptSuite(engine: engine)
+            return
+        }
         guard activeTask == nil,
               let evaluationRepository,
               let first = artifacts.first(where: { $0.id == firstArtifactID }),
@@ -461,6 +623,7 @@ final class StudioQuickCompareViewModel {
             isRunning = true
             hasError = false
             outcome = nil
+            promptSuiteOutcome = nil
             judgment = nil
             status = presentationMode == .blindAB
                 ? "Generating two anonymous responses sequentially…"
@@ -494,6 +657,175 @@ final class StudioQuickCompareViewModel {
 
     func cancel() {
         activeTask?.cancel()
+    }
+
+    private func runPromptSuite(engine: Engine) {
+        guard activeTask == nil,
+              let evaluationRepository,
+              let suite = promptSuite,
+              let artifact = artifacts.first(where: { $0.id == firstArtifactID })
+        else { return }
+        do {
+            let request: EvaluationRunRequest
+            if let resumableRequest,
+               resumableRequest.suite.id == suite.id,
+               resumableRequest.candidates.map(\.artifactID) == [artifact.id]
+            {
+                request = resumableRequest
+            } else {
+                let persistedSuite = try PromptSuiteFactory.resolvingPersistedSuite(
+                    suite,
+                    repository: evaluationRepository
+                )
+                promptSuite = persistedSuite
+                request = EvaluationRunRequest(
+                    suite: persistedSuite,
+                    candidates: [.init(
+                        artifactID: artifact.id,
+                        blindLabel: artifact.name,
+                        artifactHash: artifact.contentHash
+                    )],
+                    runtimeVersion: Self.runtimeVersion,
+                    kernelVersion: "mlx-0.31.1",
+                    executionOrder: [artifact.id]
+                )
+            }
+            let runner = try PromptSuiteRunner(
+                provider: VMLXInferenceProvider(engine: engine),
+                repository: evaluationRepository
+            )
+            isRunning = true
+            hasError = false
+            outcome = nil
+            promptSuiteOutcome = nil
+            judgment = nil
+            let completed = (try? evaluationRepository.caseResults(runID: request.id).count) ?? 0
+            status = completed > 0
+                ? "Resuming after \(completed) durable case results…"
+                : "Running \(request.suite.cases.count) prompt-suite cases sequentially…"
+            activeTask = Task { [weak self] in
+                do {
+                    let result = try await runner.run(request)
+                    self?.promptSuiteOutcome = result
+                    self?.resumableRequest = nil
+                    self?.status = result.result.status == .completed
+                        ? "Prompt suite complete; results and scorecards are durable."
+                        : "Prompt suite finished with case errors; partial results are durable."
+                    self?.hasError = result.result.status == .failed
+                } catch is CancellationError {
+                    self?.resumableRequest = request
+                    self?.status = "Prompt suite cancelled; use Resume Prompt Suite to continue durable work."
+                } catch {
+                    self?.resumableRequest = request
+                    self?.fail(error)
+                }
+                self?.isRunning = false
+                self?.activeTask = nil
+            }
+        } catch {
+            fail(error)
+        }
+    }
+
+    private func discoverInterruptedPromptSuite() {
+        guard let evaluationRepository else { return }
+        do {
+            guard let stored = try evaluationRepository.runs().first(where: {
+                [.pending, .running, .cancelled].contains($0.status)
+                    && $0.request.candidates.count == 1
+            }) else {
+                resumableRequest = nil
+                return
+            }
+            resumableRequest = stored.request
+            promptSuite = stored.request.suite
+            let candidateID = stored.request.candidates[0].artifactID
+            if artifacts.contains(where: { $0.id == candidateID }) {
+                firstArtifactID = candidateID
+            }
+            let completed = try evaluationRepository.caseResults(runID: stored.request.id).count
+            status = "Interrupted prompt suite found with \(completed) durable case results."
+            hasError = false
+        } catch {
+            fail(error)
+        }
+    }
+
+    func buildCustomSuite() {
+        guard let seed = UInt64(seedText) else { return }
+        do {
+            let proposed = try PromptSuiteFactory.customPrompts(
+                prompts: customPromptsText.components(separatedBy: .newlines),
+                generationConfiguration: GenerationConfiguration(
+                    maximumTokenCount: maximumTokenCount,
+                    temperature: temperature,
+                    topP: 1,
+                    seed: seed
+                )
+            )
+            promptSuite = try evaluationRepository.map {
+                try PromptSuiteFactory.resolvingPersistedSuite(proposed, repository: $0)
+            } ?? proposed
+            resumableRequest = nil
+            promptSuiteOutcome = nil
+            status = "Custom suite ready with \(proposed.cases.count) prompts."
+            hasError = false
+        } catch {
+            fail(error)
+        }
+    }
+
+    func importSuite(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            let imported = try PromptSuiteImport.decode(
+                Data(contentsOf: url),
+                name: url.deletingPathExtension().lastPathComponent
+            )
+            promptSuite = try evaluationRepository.map {
+                try PromptSuiteFactory.resolvingPersistedSuite(imported, repository: $0)
+            } ?? imported
+            resumableRequest = nil
+            promptSuiteOutcome = nil
+            status = "Imported \(imported.name) with \(imported.cases.count) cases."
+            hasError = false
+        } catch {
+            fail(error)
+        }
+    }
+
+    func finishExport(_ result: Result<URL, Error>) {
+        switch result {
+        case .success:
+            status = "Prompt suite exported as versioned JSONL."
+            hasError = false
+        case .failure(let error):
+            fail(error)
+        }
+    }
+
+    func scorecardSummary(_ scorecard: EvaluationScorecard) -> String {
+        let score = scorecard.overall.weightedScore.map {
+            String(format: "%.1f%%", $0 * 100)
+        } ?? "unscored"
+        return "Weighted score \(score) · \(scorecard.overall.scoredCaseCount) scored · \(scorecard.overall.unscoredCaseCount) unscored · \(scorecard.overall.errorCaseCount) errors · \(scorecard.generatedTokenCount) tokens"
+    }
+
+    func domainScoreSummary(_ score: EvaluationDomainScore) -> String {
+        let value = score.weightedScore.map { String(format: "%.1f%%", $0 * 100) }
+            ?? "unscored"
+        return "\(score.domain): \(value) · pass \(score.passedCaseCount) · fail \(score.failedCaseCount) · unscored \(score.unscoredCaseCount) · errors \(score.errorCaseCount)"
+    }
+
+    func caseName(_ id: EvaluationCaseID) -> String {
+        promptSuite?.cases.first { $0.id == id }?.name ?? id.rawValue
+    }
+
+    func caseScoreSummary(_ result: EvaluationCaseResult) -> String {
+        guard let score = result.score else { return "Free-form · not scored" }
+        return "\(score.kind.rawValue): \(String(format: "%.3f", score.value)) · \(score.details["scorer"] ?? "scorer unavailable")"
     }
 
     func choose(_ choice: BlindResponseChoice) {
@@ -553,5 +885,23 @@ final class StudioQuickCompareViewModel {
         status = error is ModelStoreMigrationError
             ? String(describing: error) : error.localizedDescription
         hasError = true
+    }
+}
+
+struct EvaluationSuiteDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.plainText, .json, .data] }
+
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }

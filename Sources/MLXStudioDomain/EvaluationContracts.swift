@@ -279,6 +279,68 @@ public struct EvaluationRunResult: Codable, Hashable, Sendable {
     }
 }
 
+/// Aggregate score information for one logical domain. Scores are weighted by
+/// the originating case weight; unscored prompts and generation errors remain
+/// visible without silently lowering the scored average.
+public struct EvaluationDomainScore: Codable, Hashable, Sendable {
+    public let domain: String
+    public let caseCount: Int
+    public let scoredCaseCount: Int
+    public let passedCaseCount: Int
+    public let failedCaseCount: Int
+    public let unscoredCaseCount: Int
+    public let errorCaseCount: Int
+    public let weightedScore: Double?
+
+    public init(
+        domain: String,
+        caseCount: Int,
+        scoredCaseCount: Int,
+        passedCaseCount: Int,
+        failedCaseCount: Int,
+        unscoredCaseCount: Int,
+        errorCaseCount: Int,
+        weightedScore: Double?
+    ) {
+        self.domain = domain
+        self.caseCount = caseCount
+        self.scoredCaseCount = scoredCaseCount
+        self.passedCaseCount = passedCaseCount
+        self.failedCaseCount = failedCaseCount
+        self.unscoredCaseCount = unscoredCaseCount
+        self.errorCaseCount = errorCaseCount
+        self.weightedScore = weightedScore
+    }
+}
+
+/// Derived, reproducible scorecard for one candidate in an evaluation run.
+/// It is rebuilt from the immutable suite plus durable case results, so no
+/// additional database authority is introduced.
+public struct EvaluationScorecard: Codable, Hashable, Sendable {
+    public let runID: EvaluationRunID
+    public let artifactID: ModelArtifactID
+    public let overall: EvaluationDomainScore
+    public let domains: [EvaluationDomainScore]
+    public let generatedTokenCount: Int
+    public let totalDurationSeconds: Double
+
+    public init(
+        runID: EvaluationRunID,
+        artifactID: ModelArtifactID,
+        overall: EvaluationDomainScore,
+        domains: [EvaluationDomainScore],
+        generatedTokenCount: Int,
+        totalDurationSeconds: Double
+    ) {
+        self.runID = runID
+        self.artifactID = artifactID
+        self.overall = overall
+        self.domains = domains
+        self.generatedTokenCount = generatedTokenCount
+        self.totalDurationSeconds = totalDurationSeconds
+    }
+}
+
 public enum BlindResponseChoice: String, Codable, CaseIterable, Hashable, Sendable {
     case responseA = "response_a"
     case responseB = "response_b"
