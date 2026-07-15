@@ -85,6 +85,41 @@ final class StudioEvaluateScreenTests: XCTestCase {
         XCTAssertEqual(model.runButtonTitle, "Resume Prompt Suite")
     }
 
+    func testLossAttributionRequiresDistinctVariantsAndDescribesPartialMatrix() throws {
+        let artifacts = (0..<4).map { index in
+            ModelArtifact(
+                projectID: ModelProjectID(),
+                name: "Variant \(index)",
+                localURL: URL(fileURLWithPath: "/models/variant-\(index)"),
+                format: .mlx,
+                state: .ready
+            )
+        }
+        let model = StudioEvaluateViewModel()
+        model.artifacts = artifacts
+        model.promptSuite = try PromptSuiteFactory.customPrompts(
+            prompts: ["Return four"],
+            generationConfiguration: .init(maximumTokenCount: 16, seed: 42)
+        )
+        model.presentationMode = .lossAttribution
+
+        XCTAssertEqual(model.selectedLossArtifactIDs, artifacts.map(\.id))
+        XCTAssertTrue(model.canRun)
+        XCTAssertEqual(model.runButtonTitle, "Run Loss Attribution")
+        XCTAssertTrue(model.lossPlanSummary.contains("Full A/B/C/D"))
+        XCTAssertEqual(model.templateIdentifier, PromptSuiteRunner.templateIdentifier)
+
+        model.secondArtifactID = nil
+        model.thirdArtifactID = nil
+        XCTAssertTrue(model.canRun)
+        XCTAssertTrue(model.lossPlanSummary.contains("missing B, C"))
+        XCTAssertEqual(model.currentLossPlan?.comparisons.last?.state, .notEvaluated)
+
+        model.fourthArtifactID = model.firstArtifactID
+        XCTAssertFalse(model.canRun)
+        XCTAssertNotNil(model.lossSelectionIssue)
+    }
+
     func testArtifactSelectionAllowsPresentDiscoveredModelsButRejectsUnsafeStates() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("evaluate-selectable-\(UUID().uuidString)")
