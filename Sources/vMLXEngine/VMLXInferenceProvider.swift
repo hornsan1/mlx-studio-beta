@@ -68,7 +68,7 @@ public final class VMLXInferenceProvider: ModelInferenceProvider, @unchecked Sen
                     guard let artifact = await runtime.artifact(request.artifactID) else {
                         throw VMLXInferenceProviderError.artifactNotFound(request.artifactID)
                     }
-                    guard artifact.state == .ready else {
+                    guard artifact.state == .ready || artifact.state == .discovered else {
                         throw VMLXInferenceProviderError.artifactNotReady(artifact.id, artifact.state)
                     }
 
