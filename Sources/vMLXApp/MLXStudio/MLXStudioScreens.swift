@@ -757,7 +757,7 @@ struct StudioModelsScreen: View {
         let service = StudioModelService(app: app)
         do {
             if force {
-                let library = await app.engine.modelLibrary
+                let library = await app.modelCatalogEngine.modelLibrary
                 _ = await library.scan(force: true)
             }
             localModels = try await service.listLocalModels()
@@ -814,7 +814,10 @@ struct StudioModelsScreen: View {
             selectedID = model.id
             try await StudioModelLoadService(app: app).loadModel(model.ref)
             status = "Loaded \(model.ref.displayName)"
-            await refresh(force: true)
+            // Loading changes runtime state, not the disk catalog. Reusing
+            // the durable cache keeps Create/Models responsive and avoids a
+            // multi-volume rescan on every load.
+            await refresh(force: false)
         } catch {
             status = error.localizedDescription
             StudioDiagnosticIssueStore.record(
@@ -1131,15 +1134,14 @@ struct StudioServerScreen: View {
 
     private var selectedServerModel: ModelSummary? {
         guard let selectedPath = app.selectedModelPath else { return nil }
-        return serverModels.first { $0.ref.localURL == selectedPath }
+        return StudioServerModelCompatibility.matchingModel(for: selectedPath, in: serverModels)
     }
 
     private var effectiveServerModel: ModelSummary? {
-        if let selected = selectedServerModel {
-            return StudioServerModelCompatibility.isChatCapable(selected) ? selected : nil
-        }
-        guard app.selectedModelPath == nil else { return nil }
-        return serverModels.first(where: StudioServerModelCompatibility.isChatCapable)
+        StudioServerModelCompatibility.effectiveServerModel(
+            selectedPath: app.selectedModelPath,
+            localModels: serverModels
+        )
     }
 
     private var incompatibleServerModel: ModelSummary? {
@@ -1872,8 +1874,11 @@ struct StudioServerScreen: View {
     private func refresh() async {
         let service = StudioServerService(app: app)
         routes = service.routeCatalog()
-        serverModels = (try? await StudioModelService(app: app).listLocalModels()) ?? serverModels
+        // Operational truth first: a slow model-library scan must not leave
+        // the Serve screen showing its initial Stopped placeholder while an
+        // owned listener is already accepting requests.
         health = (try? await service.health()) ?? health
+        serverModels = (try? await StudioModelService(app: app).listLocalModels()) ?? serverModels
         if selectedRouteFamily != "All", !routeFamilies.contains(selectedRouteFamily) {
             selectedRouteFamily = "All"
         }
@@ -2020,6 +2025,10 @@ struct StudioModelToolsScreen: View {
             } catch {
                 status = "Canonical jobs unavailable: \(error.localizedDescription)"
             }
+        }
+        .onChange(of: selectedID) { _, _ in
+            inspection = nil
+            Task { await restoreInspection() }
         }
         .sheet(item: $modelCardModel) { model in
             StudioModelCardSheet(model: model)
@@ -2771,6 +2780,29 @@ struct StudioModelToolsScreen: View {
         models = (try? await StudioModelService(app: app).listLocalModels()) ?? []
         selectedID = selectedID ?? models.first(where: { $0.ref.localURL == app.selectedModelPath })?.id ?? models.first?.id
         jobs = (try? await jobService?.listJobs()) ?? []
+        await restoreInspection()
+    }
+
+    private func restoreInspection() async {
+        guard inspection == nil, let selected else { return }
+        if let reportURL = StudioModelToolsInspectionRecovery.reportURL(
+            for: selected.id,
+            jobs: jobs
+        ), let restored = StudioModelToolsInspectionRecovery.decodeReport(at: reportURL) {
+            inspection = restored
+            status = "Restored completed inspection report"
+            return
+        }
+        guard StudioModelToolsInspectionRecovery.hasCompletedInspection(
+            for: selected.id,
+            jobs: jobs
+        ), let service = service() else { return }
+        do {
+            inspection = try await service.inspect(selected.ref)
+            status = "Restored completed inspection"
+        } catch {
+            status = "Could not restore inspection: \(error.localizedDescription)"
+        }
     }
 
     private func inspect() async {
@@ -4620,6 +4652,19 @@ struct DeAlignMascotMark: View {
 private enum DeAlignBrandAssets {
     #if canImport(AppKit)
     static let mascotImage: NSImage? = {
+        // SwiftPM's executable resource accessor probes for its target bundle
+        // at the .app root, while a correctly signed macOS app keeps resource
+        // bundles in Contents/Resources. Resolve that packaged location
+        // directly so installed builds do not fall back to a checkout path or
+        // block the main thread while Foundation searches a very large app.
+        if let resources = Bundle.main.resourceURL {
+            let packagedURL = resources
+                .appendingPathComponent("vmlx_vMLXApp.bundle", isDirectory: true)
+                .appendingPathComponent("dealign-mascot-static.svg")
+            if FileManager.default.fileExists(atPath: packagedURL.path) {
+                return NSImage(contentsOf: packagedURL)
+            }
+        }
         let bundle = Bundle.module
         let rootURL = bundle.url(
             forResource: "dealign-mascot-static",

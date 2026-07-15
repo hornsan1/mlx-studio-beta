@@ -297,7 +297,7 @@ enum StudioServerModelCompatibility {
         localModels: [ModelSummary]
     ) throws -> URL {
         if let selectedPath {
-            if let selected = localModels.first(where: { $0.ref.localURL == selectedPath }) {
+            if let selected = matchingModel(for: selectedPath, in: localModels) {
                 guard isChatCapable(selected) else {
                     throw StudioServiceError.serverModelNotChatCapable(selected.ref.displayName)
                 }
@@ -322,6 +322,49 @@ enum StudioServerModelCompatibility {
             return url
         }
         throw StudioServiceError.noSelectedModel
+    }
+
+    static func effectiveServerModel(
+        selectedPath: URL?,
+        localModels: [ModelSummary]
+    ) -> ModelSummary? {
+        if let selectedPath {
+            if let selected = matchingModel(for: selectedPath, in: localModels) {
+                return isChatCapable(selected) ? selected : nil
+            }
+            guard (try? resolveServerModelPath(
+                selectedPath: selectedPath,
+                localModels: localModels
+            )) != nil else {
+                return nil
+            }
+            let displayName = cleanModelName(selectedPath.lastPathComponent)
+            return ModelSummary(
+                id: selectedPath.standardizedFileURL.path,
+                ref: ModelRef(
+                    id: selectedPath.standardizedFileURL.path,
+                    displayName: displayName,
+                    repo: nil,
+                    localURL: selectedPath
+                ),
+                family: "local",
+                modality: "text",
+                sizeBytes: 0,
+                labels: ["Chat"],
+                isLoaded: true
+            )
+        }
+        return localModels.first(where: isChatCapable)
+    }
+
+    static func matchingModel(
+        for selectedPath: URL,
+        in localModels: [ModelSummary]
+    ) -> ModelSummary? {
+        let selected = selectedPath.resolvingSymlinksInPath().standardizedFileURL.path
+        return localModels.first { model in
+            model.ref.localURL?.resolvingSymlinksInPath().standardizedFileURL.path == selected
+        }
     }
 
     private static func looksImageOnly(
@@ -1115,7 +1158,7 @@ enum StudioDiagnosticBriefFormatter {
         case .chatStream:
             return "Retry or inspect logs"
         case .imageGeneration:
-            return "Open Create proof"
+            return "Repair image runtime"
         case .imageInstall, .modelInstall:
             return "Verify install files"
         case .server:
@@ -1185,7 +1228,10 @@ enum StudioDiagnosticBriefFormatter {
         case .chatStream:
             return "Manual only - use Chat Retry; no prompt is resent here"
         case .imageGeneration:
-            return "Manual only - reopen Create proof; no image is generated here"
+            if isMissingImageRuntime(issue: issue) {
+                return "Blocked - packaged Python.framework is missing. Reinstall the current signed MLX Studio build, relaunch, then refresh Create proof"
+            }
+            return "Manual only - refresh Create proof and retry a small image; no image is generated here"
         case .imageInstall:
             return "Manual only - verify image files in Models; no files move here"
         case .modelInstall:
@@ -1200,6 +1246,14 @@ enum StudioDiagnosticBriefFormatter {
         case .diagnostics:
             return "Safe no-op - refresh snapshot; no runtime state changes"
         }
+    }
+
+    private static func isMissingImageRuntime(issue: StudioDiagnosticIssue?) -> Bool {
+        guard let issue else { return true }
+        let text = "\(issue.title) \(issue.message) \(issue.context ?? "")".lowercased()
+        return text.contains("python.framework")
+            || text.contains("python3.14")
+            || text.contains("mflux") && text.contains("missing")
     }
 
     static func incidentBrief(for issue: StudioDiagnosticIssue, openIssueCount: Int) -> String {
@@ -1638,6 +1692,34 @@ enum StudioModelToolsReportGate {
     }
 }
 
+enum StudioModelToolsInspectionRecovery {
+    static func reportURL(for modelID: String, jobs: [ModelJob]) -> URL? {
+        jobs
+            .filter {
+                $0.inputModel.id == modelID
+                    && $0.kind == .package
+                    && $0.status == .completed
+                    && $0.outputPath != nil
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .first?.outputPath
+    }
+
+    static func decodeReport(at url: URL) -> ModelInspection? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ModelInspection.self, from: data)
+    }
+
+    static func hasCompletedInspection(for modelID: String, jobs: [ModelJob]) -> Bool {
+        jobs.contains {
+            $0.inputModel.id == modelID
+                && $0.kind == .inspect
+                && $0.status == .completed
+        }
+    }
+}
+
 struct PackageOptions: Codable, Hashable, Sendable {
     var includeConfigSummary: Bool = true
 }
@@ -1791,6 +1873,34 @@ enum StudioServerLifecycleGuard {
     }
 }
 
+enum StudioServerHealthResolver {
+    static func resolve(
+        engineState: EngineState,
+        hasSessionProcess: Bool,
+        httpRunning: Bool,
+        httpError: String?
+    ) -> (status: ServerHealth.Status, label: String) {
+        if let httpError, !httpError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (.failed, "HTTP listener failed: \(httpError)")
+        }
+        guard hasSessionProcess, httpRunning else {
+            return (.stopped, "Stopped")
+        }
+        switch engineState {
+        case .stopped:
+            return (.failed, "Listener has no running model")
+        case .loading(let progress):
+            return (.loading, progress.label)
+        case .running:
+            return (.running, "Running")
+        case .standby:
+            return (.sleeping, "Sleeping")
+        case .error(let message):
+            return (.failed, message)
+        }
+    }
+}
+
 @MainActor
 final class StudioModelService: ModelService {
     private let app: AppState
@@ -1800,7 +1910,7 @@ final class StudioModelService: ModelService {
     }
 
     func listLocalModels() async throws -> [ModelSummary] {
-        let entries = await app.engine.scanModels(force: false)
+        let entries = await app.modelCatalogEngine.scanModels(force: false)
         let loadedPath = await app.engine.loadedModelPath
         return entries
             .filter { $0.modality != .embedding && $0.modality != .rerank }
@@ -1895,12 +2005,12 @@ final class StudioModelService: ModelService {
     }
 
     func deleteModel(_ model: ModelRef) async throws {
-        let library = await app.engine.modelLibrary
+        let library = await app.modelCatalogEngine.modelLibrary
         _ = try await library.deleteEntry(byId: model.id)
     }
 
     func addLocalModelDirectory(_ url: URL) async {
-        let library = await app.engine.modelLibrary
+        let library = await app.modelCatalogEngine.modelLibrary
         await library.addUserDir(url)
         _ = await library.scan(force: true)
     }
@@ -2023,7 +2133,7 @@ final class StudioModelInstallService: ModelInstallService {
     }
 
     private func resolveInstalledModel(repo: String, localPath: URL?) async throws -> ModelSummary {
-        let library = await app.engine.modelLibrary
+        let library = await app.modelCatalogEngine.modelLibrary
         _ = await library.scan(force: true)
         let models = try await StudioModelService(app: app).listLocalModels()
 
@@ -2170,7 +2280,9 @@ final class StudioServerService: ServerService {
     }
 
     func stopServer() async throws {
-        if let id = app.selectedServerSessionId ?? app.sessions.first?.id {
+        if let active = await activeOwnedServerSession() {
+            await app.stopSession(active.id)
+        } else if let id = app.selectedServerSessionId ?? app.sessions.first?.id {
             await app.stopSession(id)
         } else {
             await app.engine.stop()
@@ -2178,12 +2290,23 @@ final class StudioServerService: ServerService {
     }
 
     func health() async throws -> ServerHealth {
-        let session = app.sessions.first { $0.id == app.selectedServerSessionId }
+        // Prefer the session that actually owns a running HTTP actor. The
+        // selected durable row can lag after a model is loaded from Models,
+        // especially when an older session for the same canonical path was
+        // restored at launch.
+        let session = await activeOwnedServerSession()
+            ?? app.sessions.first { $0.id == app.selectedServerSessionId }
             ?? app.sessions.first
         let endpoint = session.map {
             StudioServerCommandFormatter.endpoint(host: $0.host, port: $0.port)
         } ?? StudioServerCommandFormatter.endpoint(host: "127.0.0.1", port: 8000)
-        let state = session?.state ?? app.engineState
+        // Session rows are durable UI snapshots and can lag the actor by one
+        // observer turn. Server health must use the live per-session engine
+        // state or a healthy owned listener can be mislabeled as Stopped.
+        let state = session.map { app.engine(for: $0.id).state } ?? app.engineState
+        let http = session.flatMap { app.httpServers[$0.id] }
+        let httpRunning = await http?.isRunning ?? false
+        let httpError = await http?.lastError
         let activeAPIKey: String
         if let session {
             let resolved = await app.engine(for: session.id).settings.resolved(sessionId: session.id)
@@ -2193,18 +2316,20 @@ final class StudioServerService: ServerService {
             activeAPIKey = ""
         }
 
-        switch state {
-        case .stopped:
-            return ServerHealth(status: .stopped, label: "Stopped", endpoint: endpoint, apiKey: activeAPIKey)
-        case .loading(let progress):
-            return ServerHealth(status: .loading, label: progress.label, endpoint: endpoint, apiKey: activeAPIKey)
-        case .running:
-            return ServerHealth(status: .running, label: "Running", endpoint: endpoint, apiKey: activeAPIKey)
-        case .standby:
-            return ServerHealth(status: .sleeping, label: "Sleeping", endpoint: endpoint, apiKey: activeAPIKey)
-        case .error(let message):
-            return ServerHealth(status: .failed, label: message, endpoint: endpoint, apiKey: activeAPIKey)
-        }
+        let resolved = StudioServerHealthResolver.resolve(
+            engineState: state,
+            // The HTTP actor is in-process. A running owned listener is
+            // stronger evidence than a lagging PID snapshot on the row.
+            hasSessionProcess: session?.pid != nil || httpRunning,
+            httpRunning: httpRunning,
+            httpError: httpError
+        )
+        return ServerHealth(
+            status: resolved.status,
+            label: resolved.label,
+            endpoint: endpoint,
+            apiKey: activeAPIKey
+        )
     }
 
     func routeCatalog() -> [APIRoute] {
@@ -2219,10 +2344,28 @@ final class StudioServerService: ServerService {
         }
     }
 
+    private func activeOwnedServerSession() async -> Session? {
+        let selectedID = app.selectedServerSessionId
+        var ordered = app.sessions
+        if let selectedID,
+           let index = ordered.firstIndex(where: { $0.id == selectedID }) {
+            let selected = ordered.remove(at: index)
+            ordered.insert(selected, at: 0)
+        }
+        for session in ordered {
+            guard let http = app.httpServers[session.id] else { continue }
+            if await http.isRunning, await http.lastError == nil {
+                return session
+            }
+        }
+        return nil
+    }
+
     private func verifyStartedSession(_ id: UUID) async throws {
         var latestFailure = "Server did not report a running listener."
         for _ in 0..<20 {
             let session = app.sessions.first { $0.id == id }
+            let liveState = app.engine(for: id).state
             let http = app.httpServers[id]
             let httpRunning: Bool
             let httpError: String?
@@ -2234,8 +2377,8 @@ final class StudioServerService: ServerService {
                 httpError = nil
             }
             let failure = StudioServerLifecycleGuard.startFailureMessage(
-                sessionState: session?.state,
-                hasSessionProcess: session?.pid != nil,
+                sessionState: liveState,
+                hasSessionProcess: session?.pid != nil || httpRunning,
                 httpRunning: httpRunning,
                 httpError: httpError
             )

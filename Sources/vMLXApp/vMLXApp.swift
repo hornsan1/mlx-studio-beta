@@ -471,6 +471,11 @@ final class AppState {
         return defaultEngine
     }
 
+    /// Stable owner of the canonical on-disk model catalog. Runtime selection
+    /// may switch `engine` to a per-session actor, but discovery surfaces must
+    /// not lose the shared library when that happens.
+    var modelCatalogEngine: Engine { defaultEngine }
+
     /// Strictly-typed accessor for call sites that want to distinguish
     /// "no active session" from "default fallback". Returns nil when the
     /// selected session has no engine AND no session is selected.

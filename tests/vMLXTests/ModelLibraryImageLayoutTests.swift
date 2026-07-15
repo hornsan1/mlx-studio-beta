@@ -1,11 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import MLXStudioDomain
 import SQLite3
 import XCTest
 @testable import vMLXEngine
 
 final class ModelLibraryImageLayoutTests: XCTestCase {
+    func testForcedScanPreservesLineageDerivedArtifactsOutsideScanRoots() {
+        let parentID = ModelArtifactID()
+        let derived = ModelArtifact(
+            projectID: ModelProjectID(),
+            parentArtifactID: parentID,
+            name: "Verified Optimize Output",
+            localURL: URL(fileURLWithPath: "/artifacts/verified-output"),
+            format: .jang,
+            state: .ready,
+            verificationStatus: .passed
+        )
+        let stale = ModelLibrary.staleScanManagedIDs(
+            existingIDs: ["legacy-scan-row", derived.id.rawValue],
+            discoveredIDs: [],
+            artifactForID: { $0 == derived.id ? derived : nil }
+        )
+
+        XCTAssertEqual(stale, ["legacy-scan-row"])
+    }
+
     func testIncompleteSafetensorShardSetIsNotReady() throws {
         let root = try makeDirectory(named: "incomplete-shards")
         defer { try? FileManager.default.removeItem(at: root) }

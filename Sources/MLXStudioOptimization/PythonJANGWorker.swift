@@ -268,7 +268,13 @@ public actor PythonJANGWorker: OptimizationWorker {
             handle.processDidLaunch()
             try? stdoutPipe.fileHandleForWriting.close()
             try? stderrPipe.fileHandleForWriting.close()
-            await Task.detached { process.waitUntilExit() }.value
+            // Foundation's `waitUntilExit()` can remain blocked after a very
+            // short-lived child has already been reaped (observed in the
+            // packaged-worker regression suite). Polling `isRunning` keeps
+            // this wait cancellable and reflects the actual process state.
+            while process.isRunning {
+                try await Task.sleep(for: .milliseconds(10))
+            }
         } catch is CancellationError {
             handle.cancel()
             try? stdoutPipe.fileHandleForWriting.close()
@@ -458,6 +464,18 @@ public actor PythonJANGWorker: OptimizationWorker {
             ?? ProcessInfo.processInfo.environment
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONNOUSERSITE"] = "1"
+        // The packaged interpreter and jang_tools live inside the signed app bundle.
+        // Python must never create or refresh __pycache__ beside those resources,
+        // otherwise a normal worker launch invalidates the bundle's code signature.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        let cacheRoot = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        environment["PYTHONPYCACHEPREFIX"] = cacheRoot
+            .appendingPathComponent("MLX Studio", isDirectory: true)
+            .appendingPathComponent("PythonBytecode", isDirectory: true)
+            .path
         for (key, value) in configuration.secretEnvironment {
             environment[key] = value
         }

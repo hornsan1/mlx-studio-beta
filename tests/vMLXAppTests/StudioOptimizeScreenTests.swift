@@ -78,8 +78,13 @@ final class StudioOptimizeScreenTests: XCTestCase {
             state: .ready
         )
         XCTAssertEqual(
-            StudioOptimizeViewModel.defaultOutputPath(for: artifact),
-            root.deletingLastPathComponent().appendingPathComponent("Qwen fixture-optimized").path
+            StudioOptimizeViewModel.defaultOutputPath(
+                for: artifact,
+                applicationSupportURL: root.appendingPathComponent("Application Support")
+            ),
+            root.appendingPathComponent(
+                "Application Support/MLX Studio/Artifacts/Qwen fixture-optimized"
+            ).path
         )
 
         let atlas = ExpertAtlas(promptCount: 50, experts: [

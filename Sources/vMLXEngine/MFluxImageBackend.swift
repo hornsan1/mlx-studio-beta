@@ -146,8 +146,9 @@ public enum MFluxImageBackend {
         ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        for path in explicit where fileManager.isExecutableFile(atPath: path) {
-            return URL(fileURLWithPath: path)
+        for path in explicit {
+            let url = URL(fileURLWithPath: path)
+            if isRunnableExecutable(url, fileManager: fileManager) { return url }
         }
 
         let pathDirs = (environment["PATH"] ?? "")
@@ -170,11 +171,35 @@ public enum MFluxImageBackend {
         ]
         for dir in candidates {
             let url = URL(fileURLWithPath: dir).appendingPathComponent(executableName)
-            if fileManager.isExecutableFile(atPath: url.path) {
+            if isRunnableExecutable(url, fileManager: fileManager) {
                 return url
             }
         }
         return nil
+    }
+
+    /// Packaged mflux launchers use a relocatable Python.framework. An old
+    /// copied venv can leave the launcher executable while its framework is
+    /// absent; treating that as Ready only defers a guaranteed dyld failure
+    /// until the user presses Generate.
+    private static func isRunnableExecutable(
+        _ url: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard fileManager.isExecutableFile(atPath: url.path) else { return false }
+        guard let prefix = try? String(
+            contentsOf: url,
+            encoding: .utf8
+        ).prefix(2_048), prefix.contains("PYTHON_FRAMEWORK=") else {
+            return true
+        }
+        let bin = url.deletingLastPathComponent()
+        let python = bin.appendingPathComponent("python3.14")
+        let framework = bin
+            .appendingPathComponent("../../../Frameworks/Python.framework/Versions/3.14/Python")
+            .standardizedFileURL
+        return fileManager.isExecutableFile(atPath: python.path)
+            && fileManager.isExecutableFile(atPath: framework.path)
     }
 
     @discardableResult

@@ -86,15 +86,43 @@ final class StudioEvaluateScreenTests: XCTestCase {
     }
 
     func testLossAttributionRequiresDistinctVariantsAndDescribesPartialMatrix() throws {
-        let artifacts = (0..<4).map { index in
-            ModelArtifact(
-                projectID: ModelProjectID(),
-                name: "Variant \(index)",
-                localURL: URL(fileURLWithPath: "/models/variant-\(index)"),
-                format: .mlx,
-                state: .ready
-            )
-        }
+        let projectID = ModelProjectID()
+        let a = ModelArtifact(
+            projectID: projectID,
+            name: "Variant A",
+            localURL: URL(fileURLWithPath: "/models/variant-a"),
+            format: .mlx,
+            precision: .init(rawValue: "bf16"),
+            state: .ready
+        )
+        let b = ModelArtifact(
+            projectID: projectID,
+            parentArtifactID: a.id,
+            name: "Variant B",
+            localURL: URL(fileURLWithPath: "/models/variant-b"),
+            format: .jang,
+            precision: .init(rawValue: "4-bit"),
+            state: .ready
+        )
+        let c = ModelArtifact(
+            projectID: projectID,
+            parentArtifactID: a.id,
+            name: "Variant C",
+            localURL: URL(fileURLWithPath: "/models/variant-c"),
+            format: .mlx,
+            precision: .init(rawValue: "bf16"),
+            state: .ready
+        )
+        let d = ModelArtifact(
+            projectID: projectID,
+            parentArtifactID: c.id,
+            name: "Variant D",
+            localURL: URL(fileURLWithPath: "/models/variant-d"),
+            format: .jang,
+            precision: .init(rawValue: "4-bit"),
+            state: .ready
+        )
+        let artifacts = [a, b, c, d]
         let model = StudioEvaluateViewModel()
         model.artifacts = artifacts
         model.promptSuite = try PromptSuiteFactory.customPrompts(
@@ -118,6 +146,30 @@ final class StudioEvaluateScreenTests: XCTestCase {
         model.fourthArtifactID = model.firstArtifactID
         XCTAssertFalse(model.canRun)
         XCTAssertNotNil(model.lossSelectionIssue)
+    }
+
+    func testLossAttributionRejectsUnrelatedModelProjects() throws {
+        let model = StudioEvaluateViewModel()
+        model.artifacts = (0..<2).map { index in
+            ModelArtifact(
+                projectID: ModelProjectID(),
+                name: "Unrelated \(index)",
+                localURL: URL(fileURLWithPath: "/models/unrelated-\(index)"),
+                format: index == 0 ? .mlx : .jang,
+                precision: .init(rawValue: index == 0 ? "bf16" : "4-bit"),
+                state: .ready
+            )
+        }
+        model.firstArtifactID = model.artifacts[0].id
+        model.secondArtifactID = model.artifacts[1].id
+        model.promptSuite = try PromptSuiteFactory.customPrompts(
+            prompts: ["Return two"],
+            generationConfiguration: .init(maximumTokenCount: 8, seed: 42)
+        )
+        model.presentationMode = .lossAttribution
+
+        XCTAssertFalse(model.canRun)
+        XCTAssertTrue(model.lossSelectionIssue?.contains("one canonical model project") == true)
     }
 
     func testArtifactSelectionAllowsPresentDiscoveredModelsButRejectsUnsafeStates() throws {

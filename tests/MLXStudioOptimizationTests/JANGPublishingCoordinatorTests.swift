@@ -27,6 +27,7 @@ final class JANGPublishingCoordinatorTests: XCTestCase {
 
         let card = try await coordinator.generateModelCard(modelURL: modelURL)
         XCTAssertEqual(card.baseModel, "org/base")
+        XCTAssertEqual(card.quantizationConfiguration?.profile, "JANG_4K")
         XCTAssertEqual(card.license, "other")
         XCTAssertTrue(card.licenseUnknown == true)
 
@@ -67,6 +68,33 @@ final class JANGPublishingCoordinatorTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? JANGPublishingError, .previewRequired)
         }
+    }
+
+    func testPlainMLXModelCardDoesNotFabricateJANGClaims() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plain-mlx-card-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"_name_or_path":"LiquidAI/LFM2.5-350M","license":"apache-2.0"}"#.utf8)
+            .write(to: root.appendingPathComponent("config.json"))
+        let artifact = ModelArtifact(
+            projectID: ModelProjectID(),
+            name: "LFM2.5-350M",
+            localURL: root,
+            format: .mlx,
+            precision: .init(rawValue: "bf16"),
+            state: .ready,
+            verificationStatus: .passed
+        )
+
+        let card = try ArtifactModelCardBuilder.build(modelURL: root, artifact: artifact)
+
+        XCTAssertEqual(card.license, "apache-2.0")
+        XCTAssertEqual(card.baseModel, "LiquidAI/LFM2.5-350M")
+        XCTAssertNil(card.quantizationConfiguration)
+        XCTAssertFalse(card.cardMarkdown.contains("JANG_4K"))
+        XCTAssertFalse(card.cardMarkdown.contains("actual_bits"))
+        XCTAssertTrue(card.cardMarkdown.contains("Format: `mlx`"))
     }
 }
 

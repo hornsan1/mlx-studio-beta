@@ -81,12 +81,26 @@ public struct JANGModelCardResult: Codable, Hashable, Sendable {
             case blockSize = "block_size"
             case sizeGB = "size_gb"
         }
+
+        public init(
+            family: String,
+            profile: String,
+            actualBits: Double,
+            blockSize: Int? = nil,
+            sizeGB: Double? = nil
+        ) {
+            self.family = family
+            self.profile = profile
+            self.actualBits = actualBits
+            self.blockSize = blockSize
+            self.sizeGB = sizeGB
+        }
     }
 
     public let license: String
     public let licenseUnknown: Bool?
     public let baseModel: String
-    public let quantizationConfiguration: QuantizationConfiguration
+    public let quantizationConfiguration: QuantizationConfiguration?
     public let cardMarkdown: String
 
     enum CodingKeys: String, CodingKey {
@@ -96,6 +110,71 @@ public struct JANGModelCardResult: Codable, Hashable, Sendable {
         case quantizationConfiguration = "quantization_config"
         case cardMarkdown = "card_markdown"
     }
+
+
+    public init(
+        license: String,
+        licenseUnknown: Bool? = nil,
+        baseModel: String,
+        quantizationConfiguration: QuantizationConfiguration? = nil,
+        cardMarkdown: String
+    ) {
+        self.license = license
+        self.licenseUnknown = licenseUnknown
+        self.baseModel = baseModel
+        self.quantizationConfiguration = quantizationConfiguration
+        self.cardMarkdown = cardMarkdown
+    }
+}
+
+public enum ArtifactModelCardBuilder {
+    public static func build(
+        modelURL: URL,
+        artifact: ModelArtifact
+    ) throws -> JANGModelCardResult {
+        let configURL = modelURL.appendingPathComponent("config.json")
+        let config = (try? JSONSerialization.jsonObject(
+            with: Data(contentsOf: configURL)
+        )) as? [String: Any]
+        let license = (config?["license"] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let resolvedLicense = license?.isEmpty == false ? license! : "other"
+        let baseModel = (config?["_name_or_path"] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).nonEmpty ?? artifact.name
+        let precisionLine = artifact.precision.map { "- Precision: `\($0.rawValue)`\n" } ?? ""
+        let markdown = """
+        ---
+        license: \(resolvedLicense)
+        tags:
+        - mlx
+        ---
+
+        # \(artifact.name)
+
+        Local MLX artifact derived from `\(baseModel)`.
+
+        ## Artifact metadata
+
+        - Format: `\(artifact.format.rawValue)`
+        \(precisionLine)- Verification: `\(artifact.verificationStatus.rawValue)`
+
+        Quantization and pruning claims are intentionally omitted unless they
+        are present in this artifact's verified manifest and lineage.
+        """
+        return .init(
+            license: resolvedLicense,
+            licenseUnknown: license == nil || license?.isEmpty == true,
+            baseModel: baseModel,
+            quantizationConfiguration: nil,
+            cardMarkdown: markdown
+        )
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 public struct JANGPublishPreview: Codable, Hashable, Sendable {

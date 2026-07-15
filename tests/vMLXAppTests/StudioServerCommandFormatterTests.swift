@@ -3,6 +3,17 @@ import XCTest
 @testable import vMLXApp
 
 final class StudioServerCommandFormatterTests: XCTestCase {
+    func testCurrentAppListenerIsNotReportedAsExternalPortConflict() {
+        XCTAssertEqual(
+            StudioPortOwnership.resolve(hasOwnedListener: true, isPortFree: false),
+            .ownedByApp
+        )
+        XCTAssertEqual(
+            StudioPortOwnership.resolve(hasOwnedListener: false, isPortFree: false),
+            .externalConflict
+        )
+    }
+
     func testEndpointNormalizesConfiguredHostAndPort() {
         XCTAssertEqual(
             StudioServerCommandFormatter.endpoint(host: " http://0.0.0.0/ ", port: 8123),
@@ -118,6 +129,36 @@ final class StudioServerCommandFormatterTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved, textURL)
+    }
+
+    func testEffectiveServerModelPreservesValidSelectedArtifactMissingFromLatestScan() throws {
+        let derivedURL = URL(fileURLWithPath: "/tmp/artifacts/LFM2.5-350M-optimized")
+
+        let effective = try XCTUnwrap(
+            StudioServerModelCompatibility.effectiveServerModel(
+                selectedPath: derivedURL,
+                localModels: []
+            )
+        )
+
+        XCTAssertEqual(effective.ref.localURL, derivedURL)
+        XCTAssertEqual(effective.ref.displayName, "LFM2.5-350M-optimized")
+        XCTAssertTrue(StudioServerModelCompatibility.isChatCapable(effective))
+    }
+
+    func testServerModelResolverMatchesCanonicalizedSelectedPath() throws {
+        let canonicalURL = URL(fileURLWithPath: "/tmp/models/Qwen3")
+        let selectedURL = URL(fileURLWithPath: "/tmp/models/./Qwen3")
+        let model = modelSummary(name: "Qwen3", path: canonicalURL, modality: "text")
+
+        let effective = try XCTUnwrap(
+            StudioServerModelCompatibility.effectiveServerModel(
+                selectedPath: selectedURL,
+                localModels: [model]
+            )
+        )
+
+        XCTAssertEqual(effective.id, model.id)
     }
 
     func testClientProbeCommandIncludesEndpointAuthAndValidJSONBody() throws {

@@ -3,6 +3,28 @@ import vMLXEngine
 @testable import vMLXApp
 
 final class StudioServerLifecycleGuardTests: XCTestCase {
+    func testLoadedChatEngineDoesNotImplyHTTPListenerHealth() {
+        let health = StudioServerHealthResolver.resolve(
+            engineState: .running,
+            hasSessionProcess: false,
+            httpRunning: false,
+            httpError: nil
+        )
+        XCTAssertEqual(health.status, .stopped)
+        XCTAssertEqual(health.label, "Stopped")
+    }
+
+    func testListenerAndRunningSessionAreBothRequiredForAcceptingState() {
+        let health = StudioServerHealthResolver.resolve(
+            engineState: .running,
+            hasSessionProcess: true,
+            httpRunning: true,
+            httpError: nil
+        )
+        XCTAssertEqual(health.status, .running)
+        XCTAssertEqual(health.label, "Running")
+    }
+
     func testRunningSessionWithListenerIsStartSuccess() {
         XCTAssertNil(StudioServerLifecycleGuard.startFailureMessage(
             sessionState: .running,

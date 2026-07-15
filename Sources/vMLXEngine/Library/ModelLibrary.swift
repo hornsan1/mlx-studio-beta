@@ -179,6 +179,17 @@ public actor ModelLibrary {
 
     public func scan(force: Bool = false) async -> [ModelEntry] {
         startWatcherIfNeeded()
+        if !force, pendingForcedRescan, !cache.isEmpty {
+            // A packaged build adds a bundled model root, but the durable
+            // index may already contain many usable local and derived rows.
+            // Return those immediately so Models/Create and load actions stay
+            // responsive. Do not enqueue the reconciliation on this actor:
+            // the synchronous filesystem walk would still monopolize the
+            // actor for slow or overlapping external roots. Explicit Refresh
+            // (and filesystem watcher events) remain the opt-in force path.
+            pendingForcedRescan = false
+            return cache
+        }
         let shouldForce = force || pendingForcedRescan
         if shouldForce {
             pendingForcedRescan = false
@@ -237,12 +248,44 @@ public actor ModelLibrary {
         let newIds = Set(discovered.map(\.id))
 
         for e in discovered { database.upsert(e) }
-        let toPurge = existingIds.subtracting(newIds)
+        let staleCandidates = Self.staleScanManagedIDs(
+            existingIDs: existingIds,
+            discoveredIDs: newIds,
+            artifactForID: { database.artifact(id: $0) }
+        )
+        // A scan can legitimately miss a still-valid path while an external
+        // volume is slow or a root is temporarily unavailable to the walker.
+        // Do not erase durable catalog rows that still exist on disk; this
+        // prevents explicit Refresh from making Models/Create go empty.
+        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        let toPurge = staleCandidates.filter { id in
+            guard let entry = existingByID[id] else { return true }
+            return !FileManager.default.fileExists(atPath: entry.canonicalPath.path)
+        }
         database.purge(toPurge)
 
         cache = database.all()
         broadcast()
         return cache
+    }
+
+    /// Disk scans own legacy/discovered rows, but not verified outputs
+    /// published by Optimize. Derived artifacts live in the canonical
+    /// artifact store and may intentionally sit outside every scan root;
+    /// removing them here makes a successful build disappear on Refresh.
+    static func staleScanManagedIDs(
+        existingIDs: Set<String>,
+        discoveredIDs: Set<String>,
+        artifactForID: (ModelArtifactID) -> ModelArtifact?
+    ) -> Set<String> {
+        existingIDs.subtracting(discoveredIDs).filter { id in
+            guard let artifactID = ModelArtifactID(rawValue: id),
+                  let artifact = artifactForID(artifactID),
+                  artifact.parentArtifactID != nil else {
+                return true
+            }
+            return false
+        }
     }
 
     public func entries() -> [ModelEntry] {
@@ -254,7 +297,9 @@ public actor ModelLibrary {
     }
 
     public func artifact(forEntryID id: String) -> ModelArtifact? {
-        database.artifact(legacyModelID: id)
+        if let legacy = database.artifact(legacyModelID: id) { return legacy }
+        guard let artifactID = ModelArtifactID(rawValue: id) else { return nil }
+        return database.artifact(id: artifactID)
     }
 
     public func artifact(id: ModelArtifactID) -> ModelArtifact? {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // ImageModelPicker — centralizes the image model catalog. Binds to
-// `appState.engine.modelLibrary.entries()` and surfaces
+// `appState.modelCatalogEngine.modelLibrary.entries()` and surfaces
 // two sections:
 //
 //   • Generate: FLUX.1 Schnell, FLUX.2 Klein, Z-Image Turbo
@@ -22,8 +22,8 @@ struct ImageModelPicker: View {
     @Environment(AppState.self) private var appState
     @Binding var selected: ImageCatalogModel?
     @Binding var mode: ImageScreen.Tab
+    @Binding var entries: [ModelLibrary.ModelEntry]
 
-    @State private var entries: [ModelLibrary.ModelEntry] = []
     @State private var installStates: [String: ModelInstallViewState] = [:]
     @State private var hubQuery = "flux schnell"
     @State private var hubResults: [ImageCatalogModel] = []
@@ -188,7 +188,7 @@ struct ImageModelPicker: View {
     }
 
     private func refresh() async {
-        entries = await appState.engine.modelLibrary.entries()
+        entries = await appState.modelCatalogEngine.modelLibrary.entries()
             .filter { $0.modality == .image || $0.family.lowercased().contains("flux") }
     }
 

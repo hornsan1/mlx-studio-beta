@@ -75,6 +75,72 @@ public enum LossAttributionPlanner {
     }
 }
 
+public enum LossAttributionLineageValidator {
+    public static func issue(
+        assignments: [LossAttributionVariant: ModelArtifact],
+        artifactUniverse: [ModelArtifact]
+    ) -> String? {
+        let selected = Array(assignments.values)
+        guard let projectID = selected.first?.projectID else { return nil }
+        guard selected.allSatisfy({ $0.projectID == projectID }) else {
+            return "All Loss Attribution variants must belong to one canonical model project."
+        }
+
+        for (variant, artifact) in assignments {
+            let expectedQuantized = variant == .baseQuantized || variant == .prunedQuantized
+            if expectedQuantized != isQuantized(artifact) {
+                return "Variant \(variant.code) does not match its required precision role."
+            }
+        }
+
+        if let a = assignments[.baseOriginalPrecision] {
+            if let b = assignments[.baseQuantized],
+               !isDescendant(b, of: a, universe: artifactUniverse) {
+                return "Variant B must be a verified quantized descendant of variant A."
+            }
+            if let c = assignments[.prunedOriginalPrecision],
+               !isDescendant(c, of: a, universe: artifactUniverse) {
+                return "Variant C must be a verified pruned descendant of variant A."
+            }
+            if assignments[.prunedOriginalPrecision] == nil,
+               let d = assignments[.prunedQuantized],
+               !isDescendant(d, of: a, universe: artifactUniverse) {
+                return "Variant D must descend from variant A through verified lineage."
+            }
+        }
+        if let c = assignments[.prunedOriginalPrecision],
+           let d = assignments[.prunedQuantized],
+           !isDescendant(d, of: c, universe: artifactUniverse) {
+            return "Variant D must be a verified quantized descendant of variant C."
+        }
+        return nil
+    }
+
+    private static func isQuantized(_ artifact: ModelArtifact) -> Bool {
+        if artifact.format == .jang || artifact.format == .jangTQ { return true }
+        guard let precision = artifact.precision?.rawValue.lowercased() else { return false }
+        if ["bf16", "bfloat16", "fp16", "float16", "fp32", "float32"].contains(precision) {
+            return false
+        }
+        return precision.contains("bit") || precision.contains("jang")
+    }
+
+    private static func isDescendant(
+        _ candidate: ModelArtifact,
+        of ancestor: ModelArtifact,
+        universe: [ModelArtifact]
+    ) -> Bool {
+        let byID = Dictionary(uniqueKeysWithValues: universe.map { ($0.id, $0) })
+        var parentID = candidate.parentArtifactID
+        var visited: Set<ModelArtifactID> = []
+        while let current = parentID, visited.insert(current).inserted {
+            if current == ancestor.id { return true }
+            parentID = byID[current]?.parentArtifactID
+        }
+        return false
+    }
+}
+
 public enum LossAttributionObservationBuilder {
     public static func build(
         plan: LossAttributionExperimentPlan,

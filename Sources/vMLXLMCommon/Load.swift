@@ -18,6 +18,35 @@ import MLXNN
 fileprivate final class _MutInt { var value: Int = 0 }
 fileprivate let _loadDiagCounter = _MutInt()
 
+/// Resolve affine quantization from the two on-disk shapes and the input
+/// width of the model layer that will receive them. Unlike header-only
+/// inference, the instantiated layer makes mixed 3/4/5/8-bit JANG tensors
+/// unambiguous: `packedCols * 32 / inputWidth` is the bit width and
+/// `inputWidth / scaleCols` is the group size.
+///
+/// Returns nil for malformed or unsupported layouts so the caller can retain
+/// its existing metadata/inference fallback and ultimately fail during strict
+/// parameter verification.
+func shapeAuthoritativeAffineQuantization(
+    originalInputWidth: Int,
+    packedColumnCount: Int,
+    scaleColumnCount: Int
+) -> (groupSize: Int, bits: Int)? {
+    guard originalInputWidth > 0,
+          packedColumnCount > 0,
+          scaleColumnCount > 0,
+          originalInputWidth.isMultiple(of: scaleColumnCount)
+    else { return nil }
+    let packedBits = packedColumnCount * 32
+    guard packedBits.isMultiple(of: originalInputWidth) else { return nil }
+    let bits = packedBits / originalInputWidth
+    let groupSize = originalInputWidth / scaleColumnCount
+    guard Set([2, 3, 4, 5, 6, 8]).contains(bits),
+          Set([16, 32, 64, 96, 128, 256]).contains(groupSize)
+    else { return nil }
+    return (groupSize, bits)
+}
+
 public func loadWeights(
     modelDirectory: URL, model: LanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
@@ -431,11 +460,35 @@ public func loadWeights(
         let loadDiag = ProcessInfo.processInfo.environment["VMLX_LOAD_DIAG"] == "1"
         let updates = model.leafModules().flattened().compactMap { (path, m) -> (String, Module)? in
             guard weights["\(path).scales"] != nil else { return nil }
-            let tup: (groupSize: Int, bits: Int, mode: QuantizationMode)?
+            var tup: (groupSize: Int, bits: Int, mode: QuantizationMode)?
             if let effectivePerLayerQuantization {
                 tup = effectivePerLayerQuantization.quantization(layer: path)?.asTuple
             } else {
                 tup = quantization?.asTuple
+            }
+            if jangConfig != nil,
+               let packedColumns = weights["\(path).weight"]?.shape.last,
+               let scaleColumns = weights["\(path).scales"]?.shape.last {
+                let originalInputWidth: Int?
+                if let linear = m as? Linear {
+                    originalInputWidth = linear.weight.shape.last
+                } else if let embedding = m as? Embedding {
+                    originalInputWidth = embedding.weight.shape.last
+                } else {
+                    originalInputWidth = nil
+                }
+                if let originalInputWidth,
+                   let shapeTruth = shapeAuthoritativeAffineQuantization(
+                       originalInputWidth: originalInputWidth,
+                       packedColumnCount: packedColumns,
+                       scaleColumnCount: scaleColumns
+                   ) {
+                    tup = (
+                        shapeTruth.groupSize,
+                        shapeTruth.bits,
+                        tup?.mode ?? .affine
+                    )
+                }
             }
             // §411 — per-leaf trace, gated. Limited to 12 entries on
             // embed/lm_head/early-layer paths so the trace is useful

@@ -59,4 +59,52 @@ final class MFluxImageBackendTests: XCTestCase {
 
         XCTAssertEqual(resolved?.path, bin.path)
     }
+
+    func testRelocatableLauncherIsRejectedWithoutItsPythonFramework() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mflux-broken-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("Resources/mflux-venv/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let launcher = bin.appendingPathComponent("mflux-generate")
+        try Data("#!/bin/sh\nPYTHON_FRAMEWORK=missing\n".utf8).write(to: launcher)
+        try Data().write(to: bin.appendingPathComponent("python3.14"))
+        for url in [launcher, bin.appendingPathComponent("python3.14")] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+
+        XCTAssertNil(MFluxImageBackend.resolvedExecutable(
+            environment: ["MLX_STUDIO_MFLUX_BIN": launcher.path, "PATH": ""]
+        ))
+    }
+
+    func testRelocatableLauncherIsReadyWithItsPythonFramework() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mflux-ready-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("Contents/Resources/mflux-venv/bin")
+        let framework = root.appendingPathComponent(
+            "Contents/Frameworks/Python.framework/Versions/3.14/Python"
+        )
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: framework.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let launcher = bin.appendingPathComponent("mflux-generate")
+        let python = bin.appendingPathComponent("python3.14")
+        try Data("#!/bin/sh\nPYTHON_FRAMEWORK=relative\n".utf8).write(to: launcher)
+        try Data().write(to: python)
+        try Data().write(to: framework)
+        for url in [launcher, python, framework] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+
+        XCTAssertEqual(
+            MFluxImageBackend.resolvedExecutable(
+                environment: ["MLX_STUDIO_MFLUX_BIN": launcher.path, "PATH": ""]
+            )?.path,
+            launcher.path
+        )
+    }
 }

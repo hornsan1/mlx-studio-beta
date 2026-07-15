@@ -1,6 +1,7 @@
 import Foundation
 import MLXStudioDomain
 import MLXStudioPersistence
+import SQLite3
 import XCTest
 @testable import MLXStudioOptimization
 
@@ -13,7 +14,8 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
             worker: worker,
             artifactRepository: context.repository,
             planRepository: context.repository.makeOptimizationPlanRepository(),
-            jobRepository: context.repository.makeJobRepository()
+            jobRepository: context.repository.makeJobRepository(),
+            runtimeVerifier: Self.passingRuntimeVerifier
         )
         let recipe = QuantizationRecipe(
             name: "JANG 4-bit",
@@ -52,7 +54,10 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
         XCTAssertEqual(persisted.id, derived.id)
         XCTAssertEqual(persisted.projectID, derived.projectID)
         XCTAssertEqual(persisted.parentArtifactID, derived.parentArtifactID)
-        XCTAssertEqual(persisted.localURL, derived.localURL)
+        XCTAssertEqual(
+            persisted.localURL.standardizedFileURL.path,
+            derived.localURL.standardizedFileURL.path
+        )
         XCTAssertEqual(persisted.format, derived.format)
         XCTAssertEqual(persisted.precision, derived.precision)
         XCTAssertEqual(persisted.state, derived.state)
@@ -64,6 +69,55 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
             try context.repository.makeOptimizationPlanRepository().plan(id: plan.id)?.validation.status,
             .valid
         )
+        XCTAssertEqual(try rowCount("build_runs", databaseURL: context.databaseURL), 1)
+        XCTAssertEqual(try rowCount("verification_reports", databaseURL: context.databaseURL), 1)
+        let indexedDerived = try XCTUnwrap(
+            context.repository.indexedModel(legacyModelID: derived.id.rawValue)
+        )
+        XCTAssertEqual(indexedDerived.canonicalURL.standardizedFileURL.path, context.output.path)
+        XCTAssertTrue(indexedDerived.isJANG)
+        XCTAssertGreaterThan(indexedDerived.totalSizeBytes, 0)
+    }
+
+    func testBuildFailsClosedWhenRuntimeVerificationIsUnavailable() async throws {
+        let context = try makeContext()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        let worker = RecordingOptimizationWorker()
+        let coordinator = OptimizationWorkspaceCoordinator(
+            worker: worker,
+            artifactRepository: context.repository,
+            planRepository: context.repository.makeOptimizationPlanRepository(),
+            jobRepository: context.repository.makeJobRepository()
+        )
+        let request = quantizeRequest(context)
+
+        do {
+            _ = try await collect(coordinator.events(for: request))
+            XCTFail("Expected runtime verification to be mandatory")
+        } catch {
+            XCTAssertEqual(error as? OptimizationWorkspaceError, .runtimeVerificationUnavailable)
+        }
+        XCTAssertEqual(try context.repository.artifacts().count, 1)
+        XCTAssertEqual(try rowCount("build_runs", databaseURL: context.databaseURL), 0)
+        XCTAssertEqual(try rowCount("verification_reports", databaseURL: context.databaseURL), 0)
+    }
+
+    func testValidatorZeroMetricsCannotPublishReadyArtifact() async throws {
+        let context = try makeContext()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        let worker = RecordingOptimizationWorker(validationMessages: ["Bits: 0\nBlocks: 0\nSize: 0.0 GB"])
+        let coordinator = makeCoordinator(context, worker: worker)
+
+        do {
+            _ = try await collect(coordinator.events(for: quantizeRequest(context)))
+            XCTFail("Expected zero validation metrics to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? OptimizationWorkspaceError,
+                .verificationFailed("the validator reported bits=0")
+            )
+        }
+        XCTAssertEqual(try context.repository.artifacts().count, 1)
     }
 
     func testAnalyzeOnlyPersistsPlanWithoutLaunchingWorkerOrPublishingArtifact() async throws {
@@ -153,6 +207,12 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? OptimizationWorkspaceError, .incompleteWorkerRun("build"))
         }
+        let failedBuild = try XCTUnwrap(
+            context.repository.makeJobRepository().record(id: workspaceRequest.buildJobID)
+        )
+        XCTAssertEqual(failedBuild.state, .failed)
+        XCTAssertNotNil(failedBuild.endedAt)
+        XCTAssertTrue(failedBuild.errorJSON?.contains("build") == true)
 
         await coordinator.cancel(workspaceRequest)
         XCTAssertEqual(
@@ -222,7 +282,26 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
             worker: worker,
             artifactRepository: context.repository,
             planRepository: context.repository.makeOptimizationPlanRepository(),
-            jobRepository: context.repository.makeJobRepository()
+            jobRepository: context.repository.makeJobRepository(),
+            runtimeVerifier: Self.passingRuntimeVerifier
+        )
+    }
+
+    private func quantizeRequest(_ context: Context) -> OptimizationWorkspaceRequest {
+        .init(
+            plan: .init(
+                projectID: context.artifact.projectID,
+                sourceArtifactID: context.artifact.id,
+                objective: .init(),
+                quantizationRecipe: .init(
+                    name: "Fixture",
+                    technology: .jang,
+                    profile: "JANG_4K"
+                )
+            ),
+            action: .quantizeOnly,
+            sourceURL: context.source,
+            outputURL: context.output
         )
     }
 
@@ -247,6 +326,7 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
         let source: URL
         let output: URL
         let repository: ModelArtifactRepository
+        let databaseURL: URL
         let artifact: ModelArtifact
     }
 
@@ -256,7 +336,8 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
         let source = root.appendingPathComponent("source")
         let output = root.appendingPathComponent("output")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
-        let repository = try ModelArtifactRepository(databaseURL: root.appendingPathComponent("models.sqlite3"))
+        let databaseURL = root.appendingPathComponent("models.sqlite3")
+        let repository = try ModelArtifactRepository(databaseURL: databaseURL)
         try repository.upsertIndexedModel(.init(
             legacyModelID: "fixture-source",
             canonicalURL: source,
@@ -276,8 +357,35 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
             source: source,
             output: output,
             repository: repository,
+            databaseURL: databaseURL,
             artifact: try XCTUnwrap(repository.artifact(legacyModelID: "fixture-source"))
         )
+    }
+
+    private static let passingRuntimeVerifier: OptimizationRuntimeVerifier = { _ in
+        .init(
+            checks: ["runtime_load": "passed", "runtime_generation": "passed"],
+            smokeGenerationID: "fixture-generation"
+        )
+    }
+
+    private func rowCount(_ table: String, databaseURL: URL) throws -> Int {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let database else {
+            throw NSError(domain: "SQLite", code: 1)
+        }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT COUNT(*) FROM \(table);", -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw NSError(domain: "SQLite", code: 2)
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw NSError(domain: "SQLite", code: 3)
+        }
+        return Int(sqlite3_column_int(statement, 0))
     }
 }
 
@@ -286,15 +394,23 @@ private final class RecordingOptimizationWorker: OptimizationWorker, @unchecked 
     private var requests: [OptimizationWorkerRequest] = []
     private var cancellations: [JobID] = []
     private let failingOperations: Set<OptimizationWorkerOperation>
+    private let validationMessages: [String]
 
-    init(failingOperations: Set<OptimizationWorkerOperation> = []) {
+    init(
+        failingOperations: Set<OptimizationWorkerOperation> = [],
+        validationMessages: [String] = []
+    ) {
         self.failingOperations = failingOperations
+        self.validationMessages = validationMessages
     }
 
     func events(
         for request: OptimizationWorkerRequest
     ) -> AsyncThrowingStream<OptimizationWorkerEventEnvelope, Error> {
         lock.withLock { requests.append(request) }
+        if !failingOperations.contains(request.operation) {
+            Self.writeFixtureOutput(for: request)
+        }
         return AsyncThrowingStream { continuation in
             continuation.yield(.init(
                 jobID: request.jobID,
@@ -310,6 +426,14 @@ private final class RecordingOptimizationWorker: OptimizationWorker, @unchecked 
                     )
                 ))
             } else {
+                if request.operation == .validate {
+                    for message in self.validationMessages {
+                        continuation.yield(.init(
+                            jobID: request.jobID,
+                            event: .message(level: .info, text: message)
+                        ))
+                    }
+                }
                 continuation.yield(.init(
                     jobID: request.jobID,
                     event: .completed(outputURL: request.outputURL)
@@ -336,5 +460,23 @@ private final class RecordingOptimizationWorker: OptimizationWorker, @unchecked 
 
     func cancelledJobIDs() -> [JobID] {
         lock.withLock { cancellations }
+    }
+
+    private static func writeFixtureOutput(for request: OptimizationWorkerRequest) {
+        guard request.operation == .convert || request.operation == .pruneQwenMoE,
+              let output = request.outputURL else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: output, withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: output.appendingPathComponent("config.json"))
+        try? Data("{}".utf8).write(to: output.appendingPathComponent("tokenizer_config.json"))
+        if request.operation == .convert {
+            let jang = #"{"quantization":{"actual_bits":4,"block_size":64},"runtime":{"total_weight_bytes":1}}"#
+            let index = #"{"metadata":{"total_size":1},"weight_map":{"weight":"model-00001-of-00001.safetensors"}}"#
+            try? Data(jang.utf8).write(to: output.appendingPathComponent("jang_config.json"))
+            try? Data(index.utf8).write(to: output.appendingPathComponent("model.safetensors.index.json"))
+            try? Data([1]).write(to: output.appendingPathComponent("model-00001-of-00001.safetensors"))
+        } else {
+            try? Data([1]).write(to: output.appendingPathComponent("model.safetensors"))
+        }
     }
 }

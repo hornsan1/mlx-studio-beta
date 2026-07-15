@@ -89,8 +89,12 @@ struct StudioModelCardSheet: View {
         Grid(alignment: .leading, horizontalSpacing: Theme.Spacing.lg, verticalSpacing: Theme.Spacing.sm) {
             GridRow { Text("License"); Text(card.license) }
             GridRow { Text("Base model"); Text(card.baseModel) }
-            GridRow { Text("Profile"); Text(card.quantizationConfiguration.profile) }
-            GridRow { Text("Average bits"); Text(String(format: "%.2f", card.quantizationConfiguration.actualBits)) }
+            if let quantization = card.quantizationConfiguration {
+                GridRow { Text("Profile"); Text(quantization.profile) }
+                GridRow { Text("Average bits"); Text(String(format: "%.2f", quantization.actualBits)) }
+            } else {
+                GridRow { Text("Quantization"); Text("Not claimed") }
+            }
         }
         .font(Theme.Typography.body)
         .foregroundStyle(Theme.Colors.textHigh)
@@ -109,15 +113,26 @@ struct StudioModelCardSheet: View {
         jobID = nextJobID
         task = Task {
             do {
-                let worker = try StudioJANGWorkerFactory.make()
-                let nextCoordinator = JANGPublishingCoordinator(worker: worker)
-                coordinator = nextCoordinator
-                let result = try await nextCoordinator.generateModelCard(
-                    modelURL: modelURL,
-                    artifactID: canonicalArtifactID,
-                    jobID: nextJobID,
-                    eventSink: progress
-                )
+                guard let artifact = canonicalArtifact else {
+                    throw StudioModelCardError.missingCanonicalArtifact
+                }
+                let result: JANGModelCardResult
+                if artifact.format == .jang || artifact.format == .jangTQ {
+                    let worker = try StudioJANGWorkerFactory.make()
+                    let nextCoordinator = JANGPublishingCoordinator(worker: worker)
+                    coordinator = nextCoordinator
+                    result = try await nextCoordinator.generateModelCard(
+                        modelURL: modelURL,
+                        artifactID: artifact.id,
+                        jobID: nextJobID,
+                        eventSink: progress
+                    )
+                } else {
+                    result = try ArtifactModelCardBuilder.build(
+                        modelURL: modelURL,
+                        artifact: artifact
+                    )
+                }
                 guard !Task.isCancelled else { return }
                 card = result
                 progress.text = "Model-card preview ready"
@@ -131,10 +146,12 @@ struct StudioModelCardSheet: View {
     }
 
     private func save(_ card: JANGModelCardResult) {
-        guard let modelURL = model.ref.localURL else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "README.md"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
-            try JANGPublishingCoordinator.writeModelCard(card, to: modelURL)
-            progress.text = "Saved \(modelURL.appendingPathComponent("README.md").path)"
+            try Data(card.cardMarkdown.utf8).write(to: destination, options: .atomic)
+            progress.text = "Saved \(destination.path)"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -147,12 +164,23 @@ struct StudioModelCardSheet: View {
         }
     }
 
-    private var canonicalArtifactID: ModelArtifactID? {
-        guard let repository = try? ModelArtifactRepository(),
-              let artifact = try? repository.artifact(legacyModelID: model.ref.id) else { return nil }
-        return artifact.id
+    private var canonicalArtifact: ModelArtifact? {
+        guard let repository = try? ModelArtifactRepository() else { return nil }
+        if let artifact = try? repository.artifact(legacyModelID: model.ref.id) {
+            return artifact
+        }
+        guard let id = ModelArtifactID(rawValue: model.ref.id) else { return nil }
+        return try? repository.artifact(id: id)
     }
 
+}
+
+private enum StudioModelCardError: Error, LocalizedError {
+    case missingCanonicalArtifact
+
+    var errorDescription: String? {
+        "The selected model is not a canonical artifact, so provenance claims cannot be generated."
+    }
 }
 
 struct StudioPublishSheet: View {
