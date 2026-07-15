@@ -224,6 +224,7 @@ struct MLXStudioApp: App {
                     .keyboardShortcut("3", modifiers: [.command])
                 Button("Library")  { appState.mode = .library }
                     .keyboardShortcut("4", modifiers: [.command])
+                Button("Evaluate") { appState.mode = .evaluate }
                 if appState.experienceMode == .advanced {
                     Button("Server") { appState.mode = .server }
                         .keyboardShortcut("5", modifiers: [.command])
@@ -298,6 +299,7 @@ final class AppState {
         case chat = "Chat"
         case create = "Create"
         case optimize = "Optimize"
+        case evaluate = "Evaluate"
         case models = "Models"
         case library = "Library"
         case server = "Server"
@@ -308,7 +310,7 @@ final class AppState {
         case api = "API"
 
         static let allCases: [Mode] = [
-            .chat, .create, .optimize, .models, .library, .server, .advancedModels, .diagnostics
+            .chat, .create, .optimize, .evaluate, .models, .library, .server, .advancedModels, .diagnostics
         ]
 
         var id: String { rawValue }
@@ -317,7 +319,7 @@ final class AppState {
             switch self {
             case .server, .advancedModels, .diagnostics, .terminal, .api:
                 return true
-            case .chat, .create, .optimize, .models, .library, .image:
+            case .chat, .create, .optimize, .evaluate, .models, .library, .image:
                 return false
             }
         }
@@ -325,9 +327,9 @@ final class AppState {
         static func visible(for experienceMode: ExperienceMode) -> [Mode] {
             switch experienceMode {
             case .beginner:
-                return [.chat, .create, .optimize, .models, .library]
+                return [.chat, .create, .optimize, .evaluate, .models, .library]
             case .advanced:
-                return [.chat, .create, .optimize, .models, .library, .server, .advancedModels, .diagnostics]
+                return [.chat, .create, .optimize, .evaluate, .models, .library, .server, .advancedModels, .diagnostics]
             }
         }
     }
@@ -1368,6 +1370,8 @@ struct RootView: View {
                             StudioCreateScreen()
                         case .optimize:
                             StudioOptimizeScreen()
+                        case .evaluate:
+                            StudioEvaluateScreen()
                         case .models:
                             StudioModelsScreen()
                         case .library:
@@ -1755,6 +1759,7 @@ private struct Sidebar: View {
         case .chat: return "bubble.left.and.bubble.right"
         case .create, .image: return "wand.and.stars"
         case .optimize: return "slider.horizontal.3"
+        case .evaluate: return "chart.bar.xaxis"
         case .models: return "square.stack.3d.up"
         case .library: return "books.vertical"
         case .server: return "server.rack"
@@ -1784,6 +1789,7 @@ private struct Sidebar: View {
         case .chat: return "Chat"
         case .create, .image: return "Create"
         case .optimize: return "Optimize"
+        case .evaluate: return "Evaluate"
         case .models: return "Models"
         case .library: return "Library"
         case .server: return "Server"

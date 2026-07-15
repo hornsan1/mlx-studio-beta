@@ -192,6 +192,43 @@ final class VMLXInferenceProviderTests: XCTestCase {
         XCTAssertNil(capturedRequest)
     }
 
+    func testDiscoveredLocalArtifactCanRunButUnavailableArtifactRemainsBlocked() async throws {
+        let discovered = makeArtifact(state: .discovered)
+        let discoveredProbe = InferenceRuntimeProbe(
+            artifact: discovered,
+            loadedPath: discovered.localURL
+        )
+        await discoveredProbe.setStreamChunks([StreamChunk(content: "ok", finishReason: "stop")])
+        let request = GenerationRequest(
+            artifactID: discovered.id,
+            messages: [.init(role: .user, content: "Hi")]
+        )
+        let events = try await collect(
+            VMLXInferenceProvider(runtime: runtime(discoveredProbe)).events(for: request)
+        )
+        XCTAssertTrue(events.contains { if case .completed = $0 { return true }; return false })
+
+        let unavailable = makeArtifact(state: .unavailable)
+        let unavailableProbe = InferenceRuntimeProbe(
+            artifact: unavailable,
+            loadedPath: unavailable.localURL
+        )
+        do {
+            _ = try await collect(
+                VMLXInferenceProvider(runtime: runtime(unavailableProbe)).events(for: .init(
+                    artifactID: unavailable.id,
+                    messages: [.init(role: .user, content: "Hi")]
+                ))
+            )
+            XCTFail("Expected unavailable artifact to remain blocked")
+        } catch {
+            XCTAssertEqual(
+                error as? VMLXInferenceProviderError,
+                .artifactNotReady(unavailable.id, .unavailable)
+            )
+        }
+    }
+
     func testRealArtifactGeneratesThroughProviderWhenProvided() async throws {
         guard let path = ProcessInfo.processInfo.environment["MLX_STUDIO_REAL_ARTIFACT_PATH"],
               !path.isEmpty
@@ -288,14 +325,14 @@ final class VMLXInferenceProviderTests: XCTestCase {
 }
 
 private extension VMLXInferenceProviderTests {
-    func makeArtifact() -> ModelArtifact {
+    func makeArtifact(state: ArtifactState = .ready) -> ModelArtifact {
         ModelArtifact(
             projectID: ModelProjectID(),
             legacyModelID: "fixture-model",
             name: "Fixture Model",
             localURL: URL(fileURLWithPath: "/models/fixture"),
             format: .mlx,
-            state: .ready
+            state: state
         )
     }
 

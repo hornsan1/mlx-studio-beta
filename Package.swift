@@ -606,6 +606,7 @@ let package = Package(
             dependencies: [
                 "MLXStudioDomain",
                 "MLXStudioPersistence",
+                "MLXStudioEvaluation",
                 "MLXStudioOptimization",
                 "JANGExpertLab",
                 "vMLXEngine",
