@@ -120,7 +120,10 @@ final class PythonJANGWorkerTests: XCTestCase {
         XCTAssertEqual(diagnostics.protocolVersion, 1)
         XCTAssertEqual(diagnostics.pythonVersion, "Python 3.11.15")
         XCTAssertEqual(diagnostics.toolVersion, "jang-tools 2.5.31 token=<REDACTED>")
-        XCTAssertEqual(diagnostics.supportedOperations, [.convert, .inspect, .profile, .validate])
+        XCTAssertEqual(
+            diagnostics.supportedOperations,
+            [.convert, .pruneQwenMoE, .inspect, .profile, .validate]
+        )
         XCTAssertTrue(diagnostics.issues.isEmpty)
         XCTAssertFalse(try JSONEncoder().encode(diagnostics).contains(Data(secret.utf8)))
     }
@@ -174,6 +177,14 @@ final class PythonJANGWorkerTests: XCTestCase {
         XCTAssertEqual(saved.state, .completed)
         XCTAssertEqual(saved.progress, 1)
         XCTAssertEqual(saved.currentStage, "completed")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(
+            OptimizationWorkerJobSnapshot.self,
+            from: Data(saved.payloadJSON.utf8)
+        )
+        XCTAssertEqual(snapshot.request, request)
+        XCTAssertNotNil(snapshot.latestEvent)
     }
 
     func testFailureQuarantinesPartialOutputAndPersistsFailure() async throws {

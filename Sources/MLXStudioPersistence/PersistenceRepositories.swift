@@ -2,6 +2,11 @@ import Foundation
 import MLXStudioDomain
 import SQLite3
 
+public enum DerivedArtifactRegistrationError: Error, Equatable, Sendable {
+    case inconsistentIdentity
+    case invalidManifestEncoding
+}
+
 public struct IndexedModelRecord: Codable, Hashable, Sendable {
     public let legacyModelID: String
     public var canonicalURL: URL
@@ -134,6 +139,10 @@ public final class ModelArtifactRepository: @unchecked Sendable {
         EvaluationRepository(store: store)
     }
 
+    public func makeOptimizationPlanRepository() -> OptimizationPlanRepository {
+        OptimizationPlanRepository(store: store)
+    }
+
     public func upsertIndexedModel(_ record: IndexedModelRecord) throws {
         try store.transaction { database in
             try SQLiteStore.execute(database, """
@@ -255,6 +264,100 @@ public final class ModelArtifactRepository: @unchecked Sendable {
         }
     }
 
+    /// Atomically publishes a verified derived artifact, its reproducibility
+    /// manifest, and its parent/child lineage. The caller must finish runtime
+    /// verification before invoking this method.
+    public func registerDerivedArtifact(
+        _ artifact: ModelArtifact,
+        manifest: ArtifactManifest,
+        lineage: ArtifactLineage
+    ) throws {
+        guard artifact.manifestID == manifest.id,
+              manifest.artifactID == artifact.id,
+              lineage.childArtifactID == artifact.id,
+              lineage.parentArtifactID == artifact.parentArtifactID,
+              lineage.manifestID == manifest.id else {
+            throw DerivedArtifactRegistrationError.inconsistentIdentity
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let payload = try Self.utf8(encoder.encode(manifest))
+        try store.transaction { database in
+            try SQLiteStore.execute(database, """
+            INSERT INTO model_artifacts (
+                id, project_id, parent_artifact_id, name, local_url,
+                canonical_path, format, precision, state, manifest_id,
+                verification_status, content_hash, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, bindings: [
+                .text(artifact.id.rawValue), .text(artifact.projectID.rawValue),
+                artifact.parentArtifactID.map { .text($0.rawValue) } ?? .null,
+                .text(artifact.name), .text(artifact.localURL.path),
+                .text(artifact.localURL.standardizedFileURL.path),
+                .text(artifact.format.rawValue),
+                artifact.precision.map { .text($0.rawValue) } ?? .null,
+                .text(artifact.state.rawValue), .text(manifest.id.rawValue),
+                .text(artifact.verificationStatus.rawValue),
+                artifact.contentHash.map(SQLiteValue.text) ?? .null,
+                .real(artifact.createdAt.timeIntervalSince1970),
+                .real(artifact.updatedAt.timeIntervalSince1970),
+            ])
+            try SQLiteStore.execute(database, """
+            INSERT INTO artifact_manifests (
+                id, artifact_id, schema_version, source_revision,
+                runtime_version, optimizer_version, kernel_version,
+                pruning_plan_id, quantization_recipe_id,
+                calibration_suite_id, hardware_profile_id, manifest_hash,
+                payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, bindings: [
+                .text(manifest.id.rawValue), .text(manifest.artifactID.rawValue),
+                .integer(Int64(manifest.schemaVersion)),
+                manifest.sourceRevision.map(SQLiteValue.text) ?? .null,
+                manifest.runtimeVersion.map(SQLiteValue.text) ?? .null,
+                manifest.optimizerVersion.map(SQLiteValue.text) ?? .null,
+                manifest.kernelVersion.map(SQLiteValue.text) ?? .null,
+                manifest.optimizationPlanID.map { .text($0.rawValue) } ?? .null,
+                manifest.quantizationRecipeID.map { .text($0.rawValue) } ?? .null,
+                manifest.calibrationSuiteID.map { .text($0.rawValue) } ?? .null,
+                manifest.hardwareProfileID.map { .text($0.rawValue) } ?? .null,
+                .text(manifest.manifestHash), .text(payload),
+                .real(manifest.createdAt.timeIntervalSince1970),
+            ])
+            for file in manifest.sourceFiles {
+                try SQLiteStore.execute(database, """
+                INSERT INTO artifact_source_files (
+                    manifest_id, relative_path, size_bytes, sha256
+                ) VALUES (?, ?, ?, ?);
+                """, bindings: [
+                    .text(manifest.id.rawValue), .text(file.relativePath),
+                    .integer(file.sizeBytes), .text(file.sha256),
+                ])
+            }
+            try SQLiteStore.execute(database, """
+            INSERT INTO artifact_lineage (
+                parent_artifact_id, child_artifact_id, operation,
+                job_id, manifest_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?);
+            """, bindings: [
+                .text(lineage.parentArtifactID.rawValue),
+                .text(lineage.childArtifactID.rawValue),
+                .text(lineage.operation.rawValue),
+                lineage.jobID.map { .text($0.rawValue) } ?? .null,
+                lineage.manifestID.map { .text($0.rawValue) } ?? .null,
+                .real(lineage.createdAt.timeIntervalSince1970),
+            ])
+        }
+    }
+
+    private static func utf8(_ data: Data) throws -> String {
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw DerivedArtifactRegistrationError.invalidManifestEncoding
+        }
+        return value
+    }
+
     public func userDirectories() throws -> [URL] {
         try store.read { database in
             try SQLiteStore.textColumn(
@@ -348,6 +451,28 @@ public final class DurableJobRepository: @unchecked Sendable {
             ORDER BY j.created_at ASC, j.id ASC;
             """
             return try readJobs(database: database, sql: sql, bindings: bindings)
+        }
+    }
+
+    public func record(id: JobID) throws -> DurableJobRecord? {
+        try store.read { database in
+            let sql = """
+            SELECT j.id, j.type, j.project_id, j.artifact_id, j.state, j.progress,
+                   j.current_stage, j.peak_memory_bytes, j.error_json,
+                   j.recovery_instructions, j.created_at, j.started_at, j.ended_at,
+                   j.updated_at,
+                   COALESCE((
+                       SELECT e.payload_json FROM job_events e
+                       WHERE e.job_id=j.id AND e.event_type='snapshot'
+                       ORDER BY e.sequence DESC LIMIT 1
+                   ), '{}')
+            FROM jobs j WHERE j.id=? LIMIT 1;
+            """
+            return try readJobs(
+                database: database,
+                sql: sql,
+                bindings: [.text(id.rawValue)]
+            ).first
         }
     }
 

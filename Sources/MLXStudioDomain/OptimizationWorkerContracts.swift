@@ -10,9 +10,75 @@ public struct OptimizationWorkerOperation: RawRepresentable, Codable, Hashable, 
 
 public extension OptimizationWorkerOperation {
     static let convert = Self(rawValue: "convert")
+    static let pruneQwenMoE = Self(rawValue: "prune-qwen-moe")
     static let inspect = Self(rawValue: "inspect")
     static let validate = Self(rawValue: "validate")
     static let profile = Self(rawValue: "profile")
+}
+
+public enum OptimizationWorkspaceAction: String, Codable, CaseIterable, Hashable, Sendable {
+    case analyzeOnly
+    case quantizeOnly
+    case pruneOnly
+}
+
+public struct OptimizationWorkspaceRequest: Codable, Hashable, Sendable {
+    public let plan: OptimizationPlan
+    public let action: OptimizationWorkspaceAction
+    public let topology: ModelExpertTopology?
+    public let sourceURL: URL
+    public let outputURL: URL?
+    public let reviewedKeepMapURL: URL?
+    public let outputName: String?
+    public let buildJobID: JobID
+    public let verificationJobID: JobID
+
+    public init(
+        plan: OptimizationPlan,
+        action: OptimizationWorkspaceAction,
+        topology: ModelExpertTopology? = nil,
+        sourceURL: URL,
+        outputURL: URL? = nil,
+        reviewedKeepMapURL: URL? = nil,
+        outputName: String? = nil,
+        buildJobID: JobID = .init(),
+        verificationJobID: JobID = .init()
+    ) {
+        self.plan = plan
+        self.action = action
+        self.topology = topology
+        self.sourceURL = sourceURL
+        self.outputURL = outputURL
+        self.reviewedKeepMapURL = reviewedKeepMapURL
+        self.outputName = outputName
+        self.buildJobID = buildJobID
+        self.verificationJobID = verificationJobID
+    }
+}
+
+public enum OptimizationWorkspaceWorkerRole: String, Codable, Hashable, Sendable {
+    case build
+    case verification
+}
+
+public enum OptimizationWorkspaceEvent: Codable, Hashable, Sendable {
+    case planReady(plan: OptimizationPlan, validation: PlanValidationResult)
+    case analysisCompleted(planID: OptimizationPlanID)
+    case worker(role: OptimizationWorkspaceWorkerRole, event: OptimizationWorkerEventEnvelope)
+    case completed(planID: OptimizationPlanID, artifact: ModelArtifact?, verified: Bool)
+}
+
+public struct OptimizationWorkerJobSnapshot: Codable, Hashable, Sendable {
+    public let request: OptimizationWorkerRequest
+    public let latestEvent: OptimizationWorkerEventEnvelope?
+
+    public init(
+        request: OptimizationWorkerRequest,
+        latestEvent: OptimizationWorkerEventEnvelope? = nil
+    ) {
+        self.request = request
+        self.latestEvent = latestEvent
+    }
 }
 
 public enum PartialOutputPolicy: String, Codable, CaseIterable, Hashable, Sendable {

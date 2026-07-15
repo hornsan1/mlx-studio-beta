@@ -70,6 +70,42 @@ public enum PythonJANGCommandBuilder {
             }
             return arguments
 
+        case .pruneQwenMoE:
+            let allowed = Set(["keep-map", "require-reviewed-comparison", "force"])
+            if let unsupported = request.parameters.keys
+                .filter({ !allowed.contains($0) })
+                .sorted()
+                .first {
+                throw PythonJANGCommandBuilderError.unsupportedParameter(unsupported)
+            }
+            guard let outputURL = request.outputURL else {
+                throw PythonJANGCommandBuilderError.missingOutputURL
+            }
+            guard let keepMap = request.parameters["keep-map"],
+                  keepMap.hasPrefix("/") else {
+                throw PythonJANGCommandBuilderError.missingParameter("keep-map")
+            }
+            guard request.parameters["require-reviewed-comparison"] == "true" else {
+                throw PythonJANGCommandBuilderError.invalidParameter(
+                    name: "require-reviewed-comparison",
+                    value: request.parameters["require-reviewed-comparison"] ?? "missing"
+                )
+            }
+            var arguments = base + [
+                "prequant-prune-qwen-moe", request.sourceURL.path, outputURL.path,
+                "--keep-map", keepMap, "--require-reviewed-comparison", "--json",
+            ]
+            if let force = request.parameters["force"] {
+                guard force == "true" || force == "false" else {
+                    throw PythonJANGCommandBuilderError.invalidParameter(
+                        name: "force",
+                        value: force
+                    )
+                }
+                if force == "true" { arguments.append("--force") }
+            }
+            return arguments
+
         case .inspect, .validate, .profile:
             if let unsupported = request.parameters.keys.sorted().first {
                 throw PythonJANGCommandBuilderError.unsupportedParameter(unsupported)
