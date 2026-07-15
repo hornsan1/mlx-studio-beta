@@ -138,6 +138,83 @@ final class PersistenceRepositoryTests: XCTestCase {
             XCTAssertEqual(try scalar(databaseURL, "SELECT COUNT(*) FROM job_events;"), 0)
         }
     }
+
+    func testOptimizationPlansAndRecipesRoundTripAndRestoreAfterRestart() throws {
+        try withRepository { artifactRepository, databaseURL in
+            let record = IndexedModelRecord(
+                legacyModelID: "optimize-source",
+                canonicalURL: URL(fileURLWithPath: "/models/optimize-source"),
+                displayName: "Optimize Source",
+                family: "qwen3_moe",
+                modality: "text",
+                totalSizeBytes: 1_000,
+                isJANG: false,
+                isJANGTQ: false,
+                quantizationBits: nil,
+                detectedAt: Date(timeIntervalSince1970: 600),
+                source: "test",
+                capabilitiesJSON: "{}"
+            )
+            try artifactRepository.upsertIndexedModel(record)
+            let artifact = try XCTUnwrap(
+                artifactRepository.artifact(legacyModelID: record.legacyModelID)
+            )
+            let recipe = QuantizationRecipe(
+                name: "Balanced JANG",
+                technology: .jang,
+                profile: "JANG_4K",
+                tensorRoleRules: ["router": "bf16"]
+            )
+            let plan = OptimizationPlan(
+                projectID: artifact.projectID,
+                sourceArtifactID: artifact.id,
+                objective: .init(
+                    maximumArtifactSizeBytes: 700,
+                    minimumQualityScore: 0.95,
+                    notes: "Preserve reasoning"
+                ),
+                strategy: .init(
+                    identifier: .init(rawValue: "man"),
+                    version: "test-v1",
+                    maturity: .production,
+                    supportedArchitectures: ["qwen3_moe"]
+                ),
+                pruningConstraints: .init(
+                    minimumSurvivorsPerLayer: 2,
+                    maximumRemovalFraction: 0.25
+                ),
+                strategyProposedRemovals: [.init(layerIndex: 0, expertIndex: 3)],
+                expertDirectives: [
+                    .init(
+                        coordinate: .init(layerIndex: 0, expertIndex: 1),
+                        action: .keep
+                    )
+                ],
+                quantizationRecipe: recipe,
+                estimate: .init(
+                    artifactSizeBytes: 650,
+                    qualityScore: 0.96,
+                    confidence: 0.7
+                ),
+                validation: .init(
+                    status: .valid,
+                    warnings: ["fixture warning"]
+                ),
+                createdAt: Date(timeIntervalSince1970: 601),
+                updatedAt: Date(timeIntervalSince1970: 602)
+            )
+
+            try artifactRepository.makeOptimizationPlanRepository().upsert(plan)
+            let reopened = try OptimizationPlanRepository(databaseURL: databaseURL)
+            XCTAssertEqual(try reopened.plan(id: plan.id), plan)
+            XCTAssertEqual(try reopened.plans(projectID: artifact.projectID), [plan])
+            XCTAssertEqual(try scalar(databaseURL, "SELECT COUNT(*) FROM optimization_plans;"), 1)
+            XCTAssertEqual(try scalar(databaseURL, "SELECT COUNT(*) FROM quantization_recipes;"), 1)
+
+            try reopened.remove([plan.id])
+            XCTAssertNil(try reopened.plan(id: plan.id))
+        }
+    }
 }
 
 private extension PersistenceRepositoryTests {

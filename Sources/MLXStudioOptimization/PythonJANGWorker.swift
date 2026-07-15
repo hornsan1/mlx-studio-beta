@@ -54,7 +54,7 @@ public enum PythonJANGWorkerError: Error, Equatable, LocalizedError, Sendable {
 
 public actor PythonJANGWorker: OptimizationWorker {
     public static let supportedOperations: [OptimizationWorkerOperation] = [
-        .convert, .inspect, .profile, .validate,
+        .convert, .pruneQwenMoE, .inspect, .profile, .validate,
     ]
 
     private typealias Continuation = AsyncThrowingStream<
@@ -335,7 +335,7 @@ public actor PythonJANGWorker: OptimizationWorker {
             state: .running,
             progress: 0,
             currentStage: "launching",
-            payloadJSON: "{}",
+            payloadJSON: Self.jsonString(OptimizationWorkerJobSnapshot(request: request)),
             createdAt: now,
             startedAt: now,
             updatedAt: now
@@ -379,7 +379,9 @@ public actor PythonJANGWorker: OptimizationWorker {
         default:
             break
         }
-        record.payloadJSON = Self.jsonString(envelope)
+        record.payloadJSON = Self.jsonString(
+            OptimizationWorkerJobSnapshot(request: request, latestEvent: envelope)
+        )
         record.updatedAt = envelope.timestamp
         records[request.jobID] = record
         try? jobRepository?.upsert(record)

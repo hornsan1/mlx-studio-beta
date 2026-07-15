@@ -605,6 +605,8 @@ let package = Package(
             name: "vMLXApp",
             dependencies: [
                 "MLXStudioDomain",
+                "MLXStudioPersistence",
+                "MLXStudioOptimization",
                 "vMLXEngine",
                 "vMLXServer",
                 "vMLXTheme",
