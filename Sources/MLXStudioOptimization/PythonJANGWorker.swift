@@ -55,6 +55,7 @@ public enum PythonJANGWorkerError: Error, Equatable, LocalizedError, Sendable {
 public actor PythonJANGWorker: OptimizationWorker {
     public static let supportedOperations: [OptimizationWorkerOperation] = [
         .convert, .pruneQwenMoE, .inspect, .profile, .validate,
+        .generateModelCard, .publishHuggingFace,
     ]
 
     private typealias Continuation = AsyncThrowingStream<
@@ -203,11 +204,22 @@ public actor PythonJANGWorker: OptimizationWorker {
             do {
                 for try await line in stdoutPipe.fileHandleForReading.bytes.lines {
                     let text = redactor.redact(String(line))
-                    await self.emit(
-                        .message(level: .log, text: text),
-                        for: request,
-                        continuation: continuation
-                    )
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if request.operation == .generateModelCard
+                        || request.operation == .publishHuggingFace,
+                       trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
+                        await self.emit(
+                            .structuredOutput(json: trimmed),
+                            for: request,
+                            continuation: continuation
+                        )
+                    } else {
+                        await self.emit(
+                            .message(level: .log, text: text),
+                            for: request,
+                            continuation: continuation
+                        )
+                    }
                 }
             } catch {}
         }
@@ -459,6 +471,8 @@ public actor PythonJANGWorker: OptimizationWorker {
         switch event {
         case .message(let level, let text):
             return .message(level: level, text: redactor.redact(text))
+        case .structuredOutput(let json):
+            return .structuredOutput(json: redactor.redact(json))
         case .toolReportedCompletion(let ok, let output, let error):
             return .toolReportedCompletion(
                 ok: ok,

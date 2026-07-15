@@ -11,6 +11,8 @@
 #   CODESIGN_IDENTITY="Developer ID..." Defaults to ad-hoc signing (-).
 #   BUNDLE_MFLUX=1|0                   Defaults to 1 when a local mflux venv exists.
 #   MFLUX_VENV=/path/to/venv           Defaults to ~/Library/Application Support/vMLX/mflux-venv.
+#   BUNDLE_JANG=1|0                    Defaults to 1 when JANG_PYTHON_BUNDLE exists.
+#   JANG_PYTHON_BUNDLE=/path/to/python Standalone Python 3.11 tree with jang_tools installed.
 #   BUNDLE_LFM=1|0                     Defaults to 1 when local LFM snapshot exists.
 #   LFM_MODEL_SRC=/path/to/snapshot    Defaults to HF cache LiquidAI/LFM2.5-350M main snapshot.
 
@@ -27,6 +29,7 @@ BUILD_NUMBER="${2:-${BUILD_NUMBER:-1}}"
 BUNDLE_ID="${BUNDLE_ID:-ai.dealign.mlxstudio.beta}"
 SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 MFLUX_VENV="${MFLUX_VENV:-$HOME/Library/Application Support/vMLX/mflux-venv}"
+JANG_PYTHON_BUNDLE="${JANG_PYTHON_BUNDLE:-$HOME/Library/Application Support/MLX Studio/jang-python}"
 LFM_MODEL_SRC="${LFM_MODEL_SRC:-$HOME/.cache/huggingface/hub/models--LiquidAI--LFM2.5-350M/snapshots/main}"
 if [[ -z "${BUNDLE_MFLUX+x}" ]]; then
     if [[ -x "$MFLUX_VENV/bin/mflux-generate" ]]; then
@@ -40,6 +43,13 @@ if [[ -z "${BUNDLE_LFM+x}" ]]; then
         BUNDLE_LFM=1
     else
         BUNDLE_LFM=0
+    fi
+fi
+if [[ -z "${BUNDLE_JANG+x}" ]]; then
+    if [[ -x "$JANG_PYTHON_BUNDLE/bin/python3.11" ]]; then
+        BUNDLE_JANG=1
+    else
+        BUNDLE_JANG=0
     fi
 fi
 
@@ -191,6 +201,22 @@ if [[ "$BUNDLE_MFLUX" == "1" ]]; then
     done < <(find "$MFLUX_BIN_DIR" -type f -perm -111 -print0)
 fi
 
+if [[ "$BUNDLE_JANG" == "1" ]]; then
+    if [[ ! -x "$JANG_PYTHON_BUNDLE/bin/python3.11" ]]; then
+        echo "ERROR: BUNDLE_JANG=1 but $JANG_PYTHON_BUNDLE/bin/python3.11 is not executable" >&2
+        exit 1
+    fi
+    echo "==> Bundling structured JANG worker"
+    JANG_DEST="$APP_PATH/Contents/Resources/jang-python"
+    rm -rf "$JANG_DEST"
+    /usr/bin/ditto --noextattr "$JANG_PYTHON_BUNDLE" "$JANG_DEST"
+    chmod -R a+rX "$JANG_DEST"
+    if ! PYTHONHOME="$JANG_DEST" "$JANG_DEST/bin/python3.11" -m jang_tools --version >/dev/null; then
+        echo "ERROR: bundled JANG Python cannot import jang_tools" >&2
+        exit 1
+    fi
+fi
+
 if [[ "$BUNDLE_LFM" == "1" ]]; then
     echo "==> Bundling LiquidAI/LFM2.5-350M starter model"
     for required in config.json tokenizer.json tokenizer_config.json model.safetensors; do
@@ -243,6 +269,12 @@ strip_signing_xattrs
 if [[ "$BUNDLE_MFLUX" == "1" ]]; then
     codesign --force --sign "$SIGN_IDENTITY" \
         "$APP_PATH/Contents/Resources/mflux-venv/bin/python3.14"
+fi
+if [[ "$BUNDLE_JANG" == "1" ]]; then
+    test -x "$APP_PATH/Contents/Resources/jang-python/bin/python3.11"
+    PYTHONHOME="$APP_PATH/Contents/Resources/jang-python" \
+        "$APP_PATH/Contents/Resources/jang-python/bin/python3.11" \
+        -m jang_tools --version >/dev/null
 fi
 SIGN_ARGS=(
     --force
@@ -326,4 +358,5 @@ echo "App: $FINAL_APP_PATH"
 echo "Executable: $APP_PATH/Contents/MacOS/$PRODUCT_NAME"
 echo "Bundle ID: $BUNDLE_ID"
 echo "Signature: $SIGN_IDENTITY"
+echo "Bundled JANG: $BUNDLE_JANG"
 echo "Bundled LFM: $BUNDLE_LFM"

@@ -779,6 +779,7 @@ final class StudioOptimizeViewModel {
         case .progress(let completed, let total, let label):
             return "\(label ?? "progress") \(completed)/\(total)"
         case .message(_, let text): return text
+        case .structuredOutput: return "structured worker output"
         case .toolReportedCompletion(let ok, _, let error): return ok ? "tool completed" : (error ?? "tool failed")
         case .completed: return "completed"
         case .cancelled: return "cancelled"
@@ -797,16 +798,7 @@ final class StudioOptimizeViewModel {
     }
 
     private static func workerConfiguration() -> PythonJANGWorkerConfiguration {
-        let variables = ProcessInfo.processInfo.environment
-        let python = variables["MLX_STUDIO_JANG_PYTHON"] ?? "/usr/bin/python3"
-        var environment = variables
-        if let pythonPath = variables["MLX_STUDIO_JANG_PYTHONPATH"] {
-            environment["PYTHONPATH"] = pythonPath
-        }
-        return .init(
-            executableURL: URL(fileURLWithPath: python),
-            environment: environment
-        )
+        StudioJANGWorkerFactory.configuration()
     }
 
     static func isSelectableArtifact(_ artifact: ModelArtifact) -> Bool {

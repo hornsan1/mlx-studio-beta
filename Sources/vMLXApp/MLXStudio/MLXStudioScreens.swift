@@ -1957,6 +1957,8 @@ struct StudioModelToolsScreen: View {
     @State private var status = "Ready"
     @State private var jobService: StudioModelToolJobStore?
     @State private var latestActionJobID: JobID?
+    @State private var modelCardModel: ModelSummary?
+    @State private var publishModel: ModelSummary?
 
     private var selected: ModelSummary? {
         models.first { $0.id == selectedID }
@@ -2018,6 +2020,12 @@ struct StudioModelToolsScreen: View {
             } catch {
                 status = "Canonical jobs unavailable: \(error.localizedDescription)"
             }
+        }
+        .sheet(item: $modelCardModel) { model in
+            StudioModelCardSheet(model: model)
+        }
+        .sheet(item: $publishModel) { model in
+            StudioPublishSheet(model: model)
         }
     }
 
@@ -2213,6 +2221,22 @@ struct StudioModelToolsScreen: View {
             .help(reportUnavailableReason ?? "Export inspection report")
             .accessibilityIdentifier(reportActionTitle)
             .accessibilityLabel(reportActionTitle)
+
+            Button {
+                modelCardModel = selected
+            } label: {
+                Label("Model Card", systemImage: "doc.richtext")
+            }
+            .disabled(selected?.ref.localURL == nil)
+            .accessibilityIdentifier("Model Tools Generate Model Card")
+
+            Button {
+                publishModel = selected
+            } label: {
+                Label("Publish", systemImage: "arrow.up.circle")
+            }
+            .disabled(selected?.ref.localURL == nil)
+            .accessibilityIdentifier("Model Tools Publish to Hugging Face")
 
             Spacer(minLength: Theme.Spacing.md)
 

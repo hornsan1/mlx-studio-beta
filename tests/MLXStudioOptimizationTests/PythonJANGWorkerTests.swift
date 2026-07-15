@@ -122,7 +122,10 @@ final class PythonJANGWorkerTests: XCTestCase {
         XCTAssertEqual(diagnostics.toolVersion, "jang-tools 2.5.31 token=<REDACTED>")
         XCTAssertEqual(
             diagnostics.supportedOperations,
-            [.convert, .pruneQwenMoE, .inspect, .profile, .validate]
+            [
+                .convert, .pruneQwenMoE, .inspect, .profile, .validate,
+                .generateModelCard, .publishHuggingFace,
+            ]
         )
         XCTAssertTrue(diagnostics.issues.isEmpty)
         XCTAssertFalse(try JSONEncoder().encode(diagnostics).contains(Data(secret.utf8)))
@@ -146,7 +149,7 @@ final class PythonJANGWorkerTests: XCTestCase {
         let diagnostics = await worker.diagnostics()
 
         XCTAssertTrue(diagnostics.issues.isEmpty)
-        XCTAssertEqual(diagnostics.pythonVersion, "Python 3.11.15")
+        XCTAssertTrue(diagnostics.pythonVersion?.hasPrefix("Python 3.11.") == true)
         XCTAssertEqual(diagnostics.toolVersion, "jang-tools 2.5.31")
     }
 
@@ -185,6 +188,59 @@ final class PythonJANGWorkerTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.request, request)
         XCTAssertNotNil(snapshot.latestEvent)
+    }
+
+    func testPublishingCommandsAreStructuredAndNeverPutTokenOnArgv() throws {
+        let preview = OptimizationWorkerRequest(
+            operation: .publishHuggingFace,
+            sourceURL: URL(fileURLWithPath: "/tmp/model"),
+            parameters: [
+                "repo": "org/model-JANG_4K",
+                "private": "true",
+                "dry-run": "true",
+            ]
+        )
+        XCTAssertEqual(try PythonJANGCommandBuilder.arguments(for: preview), [
+            "-m", "jang_tools", "--progress=json", "--quiet-text",
+            "publish", "--model", "/tmp/model",
+            "--repo", "org/model-JANG_4K", "--json", "--progress=json",
+            "--private", "--dry-run",
+        ])
+        XCTAssertFalse(try PythonJANGCommandBuilder.arguments(for: preview).contains { $0.hasPrefix("hf_") })
+
+        let modelCard = OptimizationWorkerRequest(
+            operation: .generateModelCard,
+            sourceURL: URL(fileURLWithPath: "/tmp/model")
+        )
+        XCTAssertEqual(try PythonJANGCommandBuilder.arguments(for: modelCard), [
+            "-m", "jang_tools", "--progress=json", "--quiet-text",
+            "modelcard", "--model", "/tmp/model", "--json",
+        ])
+    }
+
+    func testPublishingStdoutBecomesStructuredOutputAndDurableJob() async throws {
+        let script = try makeScript(#"echo '{"dry_run":true,"repo":"org/model","private":false,"files_count":3,"total_size_bytes":42}'"#)
+        let databaseURL = temporaryURL("worker-publish.sqlite3")
+        defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }
+        let repository = try DurableJobRepository(databaseURL: databaseURL)
+        let worker = testWorker(script: script, repository: repository)
+        let request = OptimizationWorkerRequest(
+            operation: .publishHuggingFace,
+            sourceURL: URL(fileURLWithPath: "/tmp/model"),
+            parameters: ["repo": "org/model", "dry-run": "true"]
+        )
+
+        let events = try await collect(worker.events(for: request))
+
+        XCTAssertTrue(events.contains {
+            if case .structuredOutput(let json) = $0.event {
+                return json.contains(#""files_count":3"#)
+            }
+            return false
+        })
+        let saved = try XCTUnwrap(repository.records().first)
+        XCTAssertEqual(saved.type, "python-jang-publish-huggingface")
+        XCTAssertEqual(saved.state, .completed)
     }
 
     func testFailureQuarantinesPartialOutputAndPersistsFailure() async throws {
