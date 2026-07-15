@@ -421,6 +421,19 @@ public final class EvaluationRepository: @unchecked Sendable {
             )
         }
     }
+
+    public func humanJudgments() throws -> [HumanJudgment] {
+        try store.read { database in
+            try Self.readHumanJudgments(
+                database: database,
+                sql: """
+                SELECT id, run_id, case_id, assignment_json, choice, notes, revealed_at, created_at
+                FROM human_judgments ORDER BY created_at ASC, id ASC;
+                """,
+                bindings: []
+            )
+        }
+    }
 }
 
 private extension EvaluationRepository {

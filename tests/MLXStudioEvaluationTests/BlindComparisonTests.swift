@@ -129,6 +129,7 @@ final class BlindComparisonTests: XCTestCase {
             caseID: evaluationCase.id
         ), revealed)
         XCTAssertEqual(try reopened.humanJudgments(runID: request.id), [revealed])
+        XCTAssertEqual(try reopened.humanJudgments(), [revealed])
 
         let postRevealMutation = BlindJudgmentWorkflow.choosing(.responseB, in: revealed)
         XCTAssertThrowsError(try reopened.saveHumanJudgment(postRevealMutation))

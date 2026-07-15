@@ -345,6 +345,7 @@ public enum BlindResponseChoice: String, Codable, CaseIterable, Hashable, Sendab
     case responseA = "response_a"
     case responseB = "response_b"
     case tie
+    case bothFailed = "both_failed"
 }
 
 /// Immutable mapping between anonymous response labels and real artifacts for
@@ -372,7 +373,7 @@ public struct BlindAssignment: Codable, Hashable, Sendable {
         switch choice {
         case .responseA: responseAArtifactID
         case .responseB: responseBArtifactID
-        case .tie: nil
+        case .tie, .bothFailed: nil
         }
     }
 }
