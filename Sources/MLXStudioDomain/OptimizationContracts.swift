@@ -24,6 +24,9 @@ public struct OptimizationObjective: Codable, Hashable, Sendable {
 
 /// Predicted values. Completed build/runtime measurements use artifact and evaluation records instead.
 public struct OptimizationEstimate: Codable, Hashable, Sendable {
+    /// Predictions are never presented as measured build or evaluation results.
+    public static let displayLabel = "Estimate"
+
     public var artifactSizeBytes: Int64?
     public var peakMemoryBytes: Int64?
     public var qualityScore: Double?
@@ -43,6 +46,8 @@ public struct OptimizationEstimate: Codable, Hashable, Sendable {
         self.tokensPerSecond = tokensPerSecond
         self.confidence = confidence
     }
+
+    public var displayLabel: String { Self.displayLabel }
 }
 
 public struct ExpertCoordinate: Codable, Hashable, Sendable {
@@ -84,6 +89,64 @@ public struct PruningConstraints: Codable, Hashable, Sendable {
         self.minimumSurvivorsPerLayer = minimumSurvivorsPerLayer
         self.maximumRemovalFraction = maximumRemovalFraction
         self.protectedExperts = protectedExperts
+    }
+}
+
+public struct ExpertLayerTopology: Codable, Hashable, Sendable {
+    public let layerIndex: Int
+    public let expertCount: Int
+    public let trainedTopK: Int
+
+    public init(layerIndex: Int, expertCount: Int, trainedTopK: Int) {
+        self.layerIndex = layerIndex
+        self.expertCount = expertCount
+        self.trainedTopK = trainedTopK
+    }
+}
+
+public struct ModelExpertTopology: Codable, Hashable, Sendable {
+    public let architecture: String
+    public let layers: [ExpertLayerTopology]
+
+    public init(architecture: String, layers: [ExpertLayerTopology]) {
+        self.architecture = architecture
+        self.layers = layers
+    }
+}
+
+/// A normalized, serialization-stable mask. Expert indices are sorted and unique.
+public struct StructuralExpertMask: Codable, Hashable, Sendable {
+    public let removedExpertsByLayer: [Int: [Int]]
+
+    public init(removedExpertsByLayer: [Int: [Int]]) {
+        self.removedExpertsByLayer = removedExpertsByLayer.reduce(into: [:]) { result, entry in
+            let experts = Array(Set(entry.value)).sorted()
+            if !experts.isEmpty {
+                result[entry.key] = experts
+            }
+        }
+    }
+
+    public func removedExperts(inLayer layerIndex: Int) -> Set<Int> {
+        Set(removedExpertsByLayer[layerIndex] ?? [])
+    }
+
+    public var removalCount: Int {
+        removedExpertsByLayer.values.reduce(0) { $0 + $1.count }
+    }
+}
+
+public struct OptimizationPlanValidation: Codable, Hashable, Sendable {
+    public let result: PlanValidationResult
+    public let structuralMask: StructuralExpertMask?
+
+    public init(result: PlanValidationResult, structuralMask: StructuralExpertMask?) {
+        self.result = result
+        self.structuralMask = structuralMask
+    }
+
+    public var isExecutable: Bool {
+        result.status == .valid && structuralMask != nil
     }
 }
 
@@ -173,6 +236,8 @@ public struct OptimizationPlan: Codable, Hashable, Sendable {
     public var objective: OptimizationObjective
     public var strategy: StrategyDescriptor?
     public var pruningConstraints: PruningConstraints
+    /// Strategy-selected removals before Auto/Keep/Remove user directives are resolved.
+    public var strategyProposedRemovals: Set<ExpertCoordinate>?
     public var expertDirectives: [ExpertDirective]
     public var quantizationRecipe: QuantizationRecipe?
     public var estimate: OptimizationEstimate?
@@ -188,6 +253,7 @@ public struct OptimizationPlan: Codable, Hashable, Sendable {
         objective: OptimizationObjective,
         strategy: StrategyDescriptor? = nil,
         pruningConstraints: PruningConstraints = .init(),
+        strategyProposedRemovals: Set<ExpertCoordinate>? = nil,
         expertDirectives: [ExpertDirective] = [],
         quantizationRecipe: QuantizationRecipe? = nil,
         estimate: OptimizationEstimate? = nil,
@@ -202,6 +268,7 @@ public struct OptimizationPlan: Codable, Hashable, Sendable {
         self.objective = objective
         self.strategy = strategy
         self.pruningConstraints = pruningConstraints
+        self.strategyProposedRemovals = strategyProposedRemovals
         self.expertDirectives = expertDirectives
         self.quantizationRecipe = quantizationRecipe
         self.estimate = estimate

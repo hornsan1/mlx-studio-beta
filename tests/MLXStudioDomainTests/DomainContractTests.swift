@@ -222,6 +222,9 @@ final class DomainContractTests: XCTestCase {
             objective: .init(maximumPeakMemoryBytes: 64_000_000_000, minimumQualityScore: 0.9),
             strategy: descriptor,
             pruningConstraints: .init(minimumSurvivorsPerLayer: 2, maximumRemovalFraction: 0.25),
+            strategyProposedRemovals: [
+                .init(layerIndex: 0, expertIndex: 2)
+            ],
             expertDirectives: [
                 .init(coordinate: .init(layerIndex: 0, expertIndex: 1), action: .keep)
             ],
@@ -257,6 +260,9 @@ final class DomainContractTests: XCTestCase {
         requireSendable(EvaluationRunManifest.self)
         requireSendable(EvaluationRunResult.self)
         requireSendable(OptimizationPlan.self)
+        requireSendable(ModelExpertTopology.self)
+        requireSendable(StructuralExpertMask.self)
+        requireSendable(OptimizationPlanValidation.self)
         requireSendable(StrategyAnalysisRequest.self)
         requireSendable(StrategyAnalysisResult.self)
     }
