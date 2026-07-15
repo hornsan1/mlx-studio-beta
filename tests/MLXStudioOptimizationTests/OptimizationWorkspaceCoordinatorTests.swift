@@ -48,7 +48,18 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
         XCTAssertEqual(derived.name, "Optimized Fixture")
         XCTAssertEqual(derived.parentArtifactID, context.artifact.id)
         XCTAssertEqual(derived.verificationStatus, .passed)
-        XCTAssertEqual(try context.repository.artifact(id: derived.id), derived)
+        let persisted = try XCTUnwrap(context.repository.artifact(id: derived.id))
+        XCTAssertEqual(persisted.id, derived.id)
+        XCTAssertEqual(persisted.projectID, derived.projectID)
+        XCTAssertEqual(persisted.parentArtifactID, derived.parentArtifactID)
+        XCTAssertEqual(persisted.localURL, derived.localURL)
+        XCTAssertEqual(persisted.format, derived.format)
+        XCTAssertEqual(persisted.precision, derived.precision)
+        XCTAssertEqual(persisted.state, derived.state)
+        XCTAssertEqual(persisted.manifestID, derived.manifestID)
+        XCTAssertEqual(persisted.verificationStatus, derived.verificationStatus)
+        XCTAssertEqual(persisted.createdAt.timeIntervalSince1970, derived.createdAt.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(persisted.updatedAt.timeIntervalSince1970, derived.updatedAt.timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(
             try context.repository.makeOptimizationPlanRepository().plan(id: plan.id)?.validation.status,
             .valid
@@ -97,7 +108,7 @@ final class OptimizationWorkspaceCoordinatorTests: XCTestCase {
             strategyProposedRemovals: [.init(layerIndex: 0, expertIndex: 3)]
         )
         let keepMap = context.root.appendingPathComponent("reviewed-keep-map.json")
-        try Data("{}".utf8).write(to: keepMap)
+        try Data(#"{"layers":{"0":{"keep":[0,1,2]}}}"#.utf8).write(to: keepMap)
         _ = try await collect(coordinator.events(for: .init(
             plan: plan,
             action: .pruneOnly,

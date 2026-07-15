@@ -607,6 +607,7 @@ let package = Package(
                 "MLXStudioDomain",
                 "MLXStudioPersistence",
                 "MLXStudioOptimization",
+                "JANGExpertLab",
                 "vMLXEngine",
                 "vMLXServer",
                 "vMLXTheme",
