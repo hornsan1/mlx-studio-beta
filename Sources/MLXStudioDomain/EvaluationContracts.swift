@@ -130,6 +130,69 @@ public struct EvaluationRunRequest: Codable, Hashable, Sendable {
     }
 }
 
+public struct EvaluationCaseManifest: Codable, Hashable, Sendable {
+    public let caseID: EvaluationCaseID
+    public let ordinal: Int
+    public let messagesHash: String
+    public let generationConfiguration: GenerationConfiguration
+
+    public init(
+        caseID: EvaluationCaseID,
+        ordinal: Int,
+        messagesHash: String,
+        generationConfiguration: GenerationConfiguration
+    ) {
+        self.caseID = caseID
+        self.ordinal = ordinal
+        self.messagesHash = messagesHash
+        self.generationConfiguration = generationConfiguration
+    }
+}
+
+/// Immutable, reproducible description of one evaluation run.
+public struct EvaluationRunManifest: Codable, Hashable, Sendable {
+    public let schemaVersion: Int
+    public let runID: EvaluationRunID
+    public let suiteID: EvaluationSuiteID
+    public let suiteHash: String
+    public let candidates: [EvaluationCandidate]
+    public let executionOrder: [ModelArtifactID]
+    public let hardwareProfileID: HardwareProfileID?
+    public let runtimeVersion: String?
+    public let kernelVersion: String?
+    public let cases: [EvaluationCaseManifest]
+    public let createdAt: Date
+    public let manifestHash: String
+
+    public init(
+        schemaVersion: Int = 1,
+        runID: EvaluationRunID,
+        suiteID: EvaluationSuiteID,
+        suiteHash: String,
+        candidates: [EvaluationCandidate],
+        executionOrder: [ModelArtifactID],
+        hardwareProfileID: HardwareProfileID? = nil,
+        runtimeVersion: String? = nil,
+        kernelVersion: String? = nil,
+        cases: [EvaluationCaseManifest],
+        createdAt: Date,
+        manifestHash: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.runID = runID
+        self.suiteID = suiteID
+        self.suiteHash = suiteHash
+        self.candidates = candidates
+        self.executionOrder = executionOrder
+        self.hardwareProfileID = hardwareProfileID
+        self.runtimeVersion = runtimeVersion
+        self.kernelVersion = kernelVersion
+        self.cases = cases
+        self.createdAt = createdAt
+        self.manifestHash = manifestHash
+    }
+}
+
 public struct EvaluationScore: Codable, Hashable, Sendable {
     public let kind: EvaluationScoreKind
     public let value: Double
