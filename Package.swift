@@ -254,6 +254,9 @@ let package = Package(
         .library(name: "MLXLinalg", targets: ["MLXLinalg"]),
         .library(name: "MLXFast", targets: ["MLXFast"]),
 
+        // MLX Studio application domain (Foundation-only contracts).
+        .library(name: "MLXStudioDomain", targets: ["MLXStudioDomain"]),
+
         // vMLX engine + app libraries.
         .library(name: "vMLXEngine", targets: ["vMLXEngine"]),
         .library(name: "vMLXServer", targets: ["vMLXServer"]),
@@ -304,6 +307,16 @@ let package = Package(
         // Patch details in Vendor/Jinja/Sources/Utilities.swift.
     ],
     targets: [
+
+        // MARK: - MLX Studio domain
+
+        .target(
+            name: "MLXStudioDomain",
+            path: "Sources/MLXStudioDomain",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
 
         // MARK: - MLX runtime (vendored from mlx-swift @ osaurus-0.31.3)
 
@@ -554,6 +567,13 @@ let package = Package(
             resources: [
                 .process("Resources"),
             ]
+        ),
+
+        // MARK: - Domain contract tests (runnable via `swift test`)
+        .testTarget(
+            name: "MLXStudioDomainTests",
+            dependencies: ["MLXStudioDomain"],
+            path: "tests/MLXStudioDomainTests"
         ),
 
         // MARK: - Parser unit tests (runnable via `swift test`)
