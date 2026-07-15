@@ -241,6 +241,10 @@ public actor OptimizationWorkspaceCoordinator {
       guard validation.status == .valid else {
         throw OptimizationWorkspaceError.invalidPlan(validation.errors)
       }
+      if let keepMap = request.reviewedKeepMapURL,
+         let mask = validator.validate(plan: request.plan, topology: topology).structuralMask {
+        try ReviewedKeepMapValidator.validate(url: keepMap, topology: topology, mask: mask)
+      }
       return validation
     }
   }
