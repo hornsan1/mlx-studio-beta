@@ -23,7 +23,7 @@ Every PR is reviewable independently. A PR may begin only after its prerequisite
 | 17 | Prompt-suite runner and domain scorecards | Suite primitives stable | Import/export, exact/regex/unit adapters, custom prompts, restart/resume |
 | 18 | Loss Attribution | Four artifact variants representable | Missing variants, A/B/A-C/C-D/A-D attribution, quality/performance/human reports |
 | 19 | Navigation and service consolidation | Feature parity matrix green | Home/Chat/Models/Optimize/Evaluate plus secondary navigation; no duplicate selector/runtime/job/comparison paths |
-| 20 | JANG Studio retirement | All required JANG capabilities and migration docs shipped | Redirect release host, remove old shell from active development, final duplicate-runtime scan |
+| 20 | JANG Studio retirement | All required JANG capabilities and migration docs shipped, including the publishing catch-up gate in PR #23 | Redirect release host, freeze the old shell as migration/reference source, publish manual settings/model adoption and rollback instructions, and pass `scripts/verify-jang-studio-retirement.sh`; preserve historical releases |
 
 ## Cross-PR release gates
 

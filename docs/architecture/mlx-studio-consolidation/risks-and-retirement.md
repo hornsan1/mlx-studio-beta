@@ -21,7 +21,7 @@
 | Thermal/unified-memory pressure | Analysis/build/evaluation can exceed Apple Silicon memory | Preflight estimates, sequential evaluation, concurrency limits, thermal and swap observations |
 | Evaluation validity | Baseline-invalid prompts and non-identical settings can create false pruning confidence | Baseline qualification, canonical generation configuration, suite/artifact/runtime fingerprints |
 | UI consolidation regression | Chat and model workflows still have duplicate polished/feature-rich paths | Feature matrix and installed-app regression suite before navigation deletion |
-| Public-host transition | `jang-studio-beta` is release-only but users may still depend on it | Redirect only after parity and migration documentation; keep historical releases accessible |
+| Public-host transition | `jang-studio-beta` is release-only but users may still depend on it | PR 20 redirects new users to MLX Studio, publishes manual adoption/rollback guidance, and keeps historical releases accessible |
 
 ## Conditional retirement list
 
@@ -39,9 +39,9 @@ No item below is deleted in Phase 0.
 | `ModelJob`, `StudioJobService`, and duplicate job events in `MLXStudioServices.swift` | Shared durable job system | Downloads/inspect/validate/benchmark/package/optimization/evaluation/publishing all use `MLXStudioJobs` |
 | JANG UI-local comparison and prompt-run orchestration in `JANGStudio/JANGStudio/Wizard/ExpertLabSheet.swift` and `JANGStudio/JANGStudio/Wizard/PrequantPruneSheet.swift` | Evaluation/optimization services own execution | Same-suite validation and reviewed-prune fixture parity plus persisted-run restart tests |
 | Duplicate JANG verification orchestration in `JANGStudio/JANGStudio/Verify/PreflightRunner.swift` and `JANGStudio/JANGStudio/Verify/PostConvertVerifier.swift` | Shared verification service aggregates checks | All existing good/broken fixtures and native smoke checks represented in `VerificationReport` |
-| JANG Studio settings/publishing/model-card sheets | MLX Studio Settings and job-driven Publish own workflows | Setting migration, dry-run, token security, model-card output and publish cancel tests pass |
+| JANG Studio settings/publishing/model-card sheets | MLX Studio Settings and job-driven Publish own workflows | Manual settings mapping is documented (no silent cross-bundle import); dry-run, token security, model-card output and publish cancel tests pass |
 | Legacy `models` table/path-only readers | Artifact repository is universal | All selectors/chat/server/jobs use artifact IDs; rollback window and two installed upgrade passes complete |
-| Old JANG Studio active-development guidance | Product consolidation complete | PR 20 redirects README/releases and publishes migration instructions |
+| Old JANG Studio active-development guidance | Product consolidation complete | PR 20 freezes the migration-source shell, redirects the public host, publishes migration/rollback instructions, and passes the duplicate-runtime verifier |
 
 ## Code that must be preserved or audited, not blanket-deleted
 
@@ -58,3 +58,5 @@ No item below is deleted in Phase 0.
 3. Run focused unit/integration/golden tests plus the relevant real-artifact installed-app path.
 4. Preserve provenance and fixtures needed to diagnose regressions.
 5. Delete in a narrow PR with rollback instructions; never combine retirement with a new architecture implementation.
+
+PR 20 closes the product-shell retirement gate without blanket deletion. See [the accepted retirement record](jang-studio-retirement.md) for exact evidence, intentional survivors, user migration, rollback and the executable three-repository check.
