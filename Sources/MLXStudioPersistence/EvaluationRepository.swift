@@ -205,6 +205,43 @@ public final class EvaluationRepository: @unchecked Sendable {
         }
     }
 
+    /// Returns durable runs newest first so application surfaces can discover
+    /// interrupted work after a process restart and offer an explicit resume.
+    public func runs() throws -> [StoredEvaluationRun] {
+        try store.read { database in
+            let sql = """
+            SELECT request_json, manifest_json, status, ended_at
+            FROM evaluation_runs ORDER BY started_at DESC, id ASC;
+            """
+            var statement: OpaquePointer?
+            try SQLiteStore.prepare(database, sql, statement: &statement)
+            defer { sqlite3_finalize(statement) }
+            var runs: [StoredEvaluationRun] = []
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { return runs }
+                guard result == SQLITE_ROW else { throw SQLiteStore.error(database, result, sql) }
+                guard let status = EvaluationRunStatus(rawValue: SQLiteStore.text(statement, 2)) else {
+                    throw EvaluationPersistenceError.invalidPayload(
+                        "invalid evaluation run status"
+                    )
+                }
+                runs.append(StoredEvaluationRun(
+                    request: try Self.decode(
+                        EvaluationRunRequest.self,
+                        from: SQLiteStore.text(statement, 0)
+                    ),
+                    manifest: try Self.decode(
+                        EvaluationRunManifest.self,
+                        from: SQLiteStore.text(statement, 1)
+                    ),
+                    status: status,
+                    endedAt: SQLiteStore.optionalDate(statement, 3)
+                ))
+            }
+        }
+    }
+
     public func setRunStatus(
         _ status: EvaluationRunStatus,
         runID: EvaluationRunID,

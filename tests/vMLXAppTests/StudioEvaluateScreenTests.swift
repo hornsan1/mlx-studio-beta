@@ -11,7 +11,7 @@ final class StudioEvaluateScreenTests: XCTestCase {
         XCTAssertTrue(AppState.Mode.visible(for: .advanced).contains(.evaluate))
         XCTAssertFalse(AppState.Mode.evaluate.isAdvancedOnly)
 
-        let model = StudioQuickCompareViewModel()
+        let model = StudioEvaluateViewModel()
         let first = ModelArtifactID()
         model.firstArtifactID = first
         model.secondArtifactID = first
@@ -54,6 +54,37 @@ final class StudioEvaluateScreenTests: XCTestCase {
         XCTAssertEqual(first.tags, ["quick-compare"])
     }
 
+    func testPromptSuiteModeRequiresOneArtifactAndExportsCanonicalJSONL() throws {
+        let model = StudioEvaluateViewModel()
+        model.presentationMode = .promptSuite
+        model.firstArtifactID = ModelArtifactID()
+        model.secondArtifactID = nil
+        model.promptSuite = try PromptSuiteFactory.customPrompts(
+            prompts: ["First", "Second"],
+            generationConfiguration: .init(maximumTokenCount: 16, seed: 42)
+        )
+        model.resumableRequest = nil
+
+        XCTAssertTrue(model.canRun)
+        XCTAssertEqual(model.runButtonTitle, "Run Prompt Suite")
+        XCTAssertEqual(model.templateIdentifier, PromptSuiteRunner.templateIdentifier)
+        XCTAssertTrue(model.modeSubtitle.contains("resumability"))
+        XCTAssertEqual(
+            try EvaluationJSONL.decode(XCTUnwrap(model.exportData)),
+            model.promptSuite
+        )
+
+        model.resumableRequest = EvaluationRunRequest(
+            suite: try XCTUnwrap(model.promptSuite),
+            candidates: [.init(
+                artifactID: try XCTUnwrap(model.firstArtifactID),
+                blindLabel: "Candidate"
+            )],
+            executionOrder: [try XCTUnwrap(model.firstArtifactID)]
+        )
+        XCTAssertEqual(model.runButtonTitle, "Resume Prompt Suite")
+    }
+
     func testArtifactSelectionAllowsPresentDiscoveredModelsButRejectsUnsafeStates() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("evaluate-selectable-\(UUID().uuidString)")
@@ -74,12 +105,12 @@ final class StudioEvaluateScreenTests: XCTestCase {
             state: .unavailable
         )
 
-        XCTAssertTrue(StudioQuickCompareViewModel.isSelectableArtifact(discovered))
-        XCTAssertFalse(StudioQuickCompareViewModel.isSelectableArtifact(unavailable))
+        XCTAssertTrue(StudioEvaluateViewModel.isSelectableArtifact(discovered))
+        XCTAssertFalse(StudioEvaluateViewModel.isSelectableArtifact(unavailable))
     }
 
     func testBlindPresentationHidesIdentityAndOrderUntilPersistedReveal() throws {
-        let model = StudioQuickCompareViewModel()
+        let model = StudioEvaluateViewModel()
         let first = ModelArtifact(
             projectID: ModelProjectID(),
             name: "First Secret Model",
