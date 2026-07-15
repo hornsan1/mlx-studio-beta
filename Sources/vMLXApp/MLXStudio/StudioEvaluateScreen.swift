@@ -582,7 +582,21 @@ final class StudioEvaluateViewModel {
         guard ids.count >= 2 else {
             return "Select at least two variants; the full A/B/C/D matrix is recommended."
         }
-        return nil
+        let variants: [(LossAttributionVariant, ModelArtifactID?)] = [
+            (.baseOriginalPrecision, firstArtifactID),
+            (.baseQuantized, secondArtifactID),
+            (.prunedOriginalPrecision, thirdArtifactID),
+            (.prunedQuantized, fourthArtifactID),
+        ]
+        let assignments: [LossAttributionVariant: ModelArtifact] = Dictionary(
+            uniqueKeysWithValues: variants.compactMap { variant, id -> (LossAttributionVariant, ModelArtifact)? in
+            guard let id, let artifact = artifacts.first(where: { $0.id == id }) else { return nil }
+            return (variant, artifact)
+        })
+        return LossAttributionLineageValidator.issue(
+            assignments: assignments,
+            artifactUniverse: artifacts
+        )
     }
 
     var currentLossPlan: LossAttributionExperimentPlan? {

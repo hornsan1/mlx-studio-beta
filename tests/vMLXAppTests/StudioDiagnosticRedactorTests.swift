@@ -130,6 +130,22 @@ final class StudioDiagnosticRedactorTests: XCTestCase {
         XCTAssertFalse(brief.contains("smoke-secret-123456"))
     }
 
+    func testMissingImageFrameworkRecoveryExplainsTheActualBlocker() {
+        let issue = StudioDiagnosticIssue(
+            source: .imageGeneration,
+            severity: .error,
+            title: "mflux runtime failed",
+            message: "Python.framework/Versions/3.14/Python is missing",
+            context: "mflux-venv/bin/python3.14"
+        )
+
+        let steps = StudioDiagnosticBriefFormatter.recoverySteps(for: issue)
+
+        XCTAssertEqual(steps.last?.value, "Repair image runtime")
+        XCTAssertTrue(steps.last?.caption.contains("Reinstall the current signed MLX Studio build") == true)
+        XCTAssertTrue(steps.last?.caption.contains("refresh Create proof") == true)
+    }
+
     func testDiagnosticIssueStoreLoadsNewestIssueFirst() throws {
         StudioDiagnosticIssueStore.clear()
         defer { StudioDiagnosticIssueStore.clear() }

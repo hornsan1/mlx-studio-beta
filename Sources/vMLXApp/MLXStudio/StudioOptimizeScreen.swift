@@ -4,6 +4,7 @@ import MLXStudioDomain
 import MLXStudioOptimization
 import MLXStudioPersistence
 import SwiftUI
+import vMLXEngine
 import vMLXTheme
 
 #if canImport(AppKit)
@@ -179,11 +180,16 @@ struct StudioOptimizeScreen: View {
         .background(Theme.Colors.background)
         .task { await model.refresh() }
         .onChange(of: model.action) { _, action in
+            model.configurationChanged()
             if action == .pruneOnly { model.prepareExpertControls() }
         }
         .onChange(of: model.selectedArtifactID) { _, _ in
             model.artifactSelectionChanged()
         }
+        .onChange(of: model.quantizationTechnology) { _, _ in model.configurationChanged() }
+        .onChange(of: model.quantizationProfile) { _, _ in model.configurationChanged() }
+        .onChange(of: model.quantizationMethod) { _, _ in model.configurationChanged() }
+        .onChange(of: model.outputPath) { _, _ in model.configurationChanged() }
     }
 
     @ViewBuilder
@@ -412,15 +418,79 @@ final class StudioOptimizeViewModel {
                 jobRepository: jobs
             )
             self.repository = repository
+            let verificationEngine = Engine()
             self.coordinator = OptimizationWorkspaceCoordinator(
                 worker: worker,
                 artifactRepository: repository,
                 planRepository: repository.makeOptimizationPlanRepository(),
-                jobRepository: jobs
+                jobRepository: jobs,
+                runtimeVerifier: { outputURL in
+                    try await Self.verifyRuntimeArtifact(
+                        at: outputURL,
+                        engine: verificationEngine
+                    )
+                }
             )
         } catch {
             status = "Optimize storage unavailable: \(error.localizedDescription)"
             hasError = true
+        }
+    }
+
+    nonisolated private static func verifyRuntimeArtifact(
+        at outputURL: URL,
+        engine: Engine
+    ) async throws -> OptimizationRuntimeVerification {
+        do {
+            var loadCompleted = false
+            for try await event in await engine.load(.init(modelPath: outputURL)) {
+                switch event {
+                case .done:
+                    loadCompleted = true
+                case .failed(let message):
+                    throw StudioRuntimeVerificationError.loadFailed(message)
+                case .progress:
+                    break
+                }
+            }
+            guard loadCompleted else {
+                throw StudioRuntimeVerificationError.loadFailed(
+                    "the runtime ended without a done event"
+                )
+            }
+
+            let generationID = "optimize-smoke-\(UUID().uuidString)"
+            let request = ChatRequest(
+                model: outputURL.lastPathComponent,
+                messages: [.init(role: "user", content: .string("Reply with OK."))],
+                stream: true,
+                maxTokens: 8,
+                temperature: 0,
+                enableThinking: false
+            )
+            var generatedText = ""
+            var completionTokens = 0
+            for try await chunk in await engine.stream(request: request, id: generationID) {
+                generatedText += chunk.content ?? ""
+                generatedText += chunk.reasoning ?? ""
+                completionTokens = max(completionTokens, chunk.usage?.completionTokens ?? 0)
+            }
+            guard completionTokens > 0, !generatedText.isEmpty else {
+                throw StudioRuntimeVerificationError.emptyGeneration
+            }
+            await engine.stop()
+            return .init(
+                checks: [
+                    "runtime_load": "passed",
+                    "runtime_generation": "passed",
+                    "completion_tokens": String(completionTokens),
+                    "generated_utf8_bytes": String(generatedText.lengthOfBytes(using: .utf8)),
+                ],
+                smokeGenerationID: generationID
+            )
+        } catch {
+            await engine.stop()
+            throw error
         }
     }
 
@@ -593,6 +663,7 @@ final class StudioOptimizeViewModel {
     }
 
     func artifactSelectionChanged() {
+        configurationChanged()
         guard let artifact = selectedArtifact else { return }
         outputPath = Self.defaultOutputPath(for: artifact)
         directives.removeAll()
@@ -601,6 +672,15 @@ final class StudioOptimizeViewModel {
         keepMapPath = ""
         keepMapValidationError = nil
         if action == .pruneOnly { prepareExpertControls() }
+    }
+
+    func configurationChanged() {
+        guard !isRunning else { return }
+        planValidation = nil
+        eventLog = []
+        progress = 0
+        hasError = false
+        status = artifacts.isEmpty ? "No ready model artifacts found." : "Review the updated plan."
     }
 
     func directive(for coordinate: MLXStudioDomain.ExpertCoordinate) -> ExpertDirectiveAction {
@@ -814,10 +894,21 @@ final class StudioOptimizeViewModel {
         } ?? [])
     }
 
-    static func defaultOutputPath(for artifact: ModelArtifact) -> String {
+    static func defaultOutputPath(
+        for artifact: ModelArtifact,
+        applicationSupportURL: URL? = nil
+    ) -> String {
         let outputName = artifact.name.split(separator: "/").last.map(String.init)
             ?? artifact.localURL.lastPathComponent
-        return artifact.localURL.deletingLastPathComponent()
+        let support = applicationSupportURL
+            ?? FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support")
+        return support
+            .appendingPathComponent("MLX Studio/Artifacts", isDirectory: true)
             .appendingPathComponent(outputName + "-optimized").path
     }
 
@@ -849,6 +940,20 @@ final class StudioOptimizeViewModel {
                 .init(layerIndex: $0, expertCount: expertCount, trainedTopK: topK)
             }
         )
+    }
+}
+
+private enum StudioRuntimeVerificationError: Error, LocalizedError {
+    case loadFailed(String)
+    case emptyGeneration
+
+    var errorDescription: String? {
+        switch self {
+        case .loadFailed(let message):
+            return "Runtime smoke load failed: \(message)"
+        case .emptyGeneration:
+            return "Runtime smoke generation produced no verified tokens."
+        }
     }
 }
 

@@ -32,7 +32,10 @@ MFLUX_VENV="${MFLUX_VENV:-$HOME/Library/Application Support/vMLX/mflux-venv}"
 JANG_PYTHON_BUNDLE="${JANG_PYTHON_BUNDLE:-$HOME/Library/Application Support/MLX Studio/jang-python}"
 LFM_MODEL_SRC="${LFM_MODEL_SRC:-$HOME/.cache/huggingface/hub/models--LiquidAI--LFM2.5-350M/snapshots/main}"
 if [[ -z "${BUNDLE_MFLUX+x}" ]]; then
-    if [[ -x "$MFLUX_VENV/bin/mflux-generate" ]]; then
+    MFLUX_PACKAGED_FRAMEWORK="$MFLUX_VENV/../../Frameworks/Python.framework/Versions/3.14/Python"
+    if [[ -x "$MFLUX_VENV/bin/mflux-generate" ]] \
+        && { ! grep -q 'PYTHON_FRAMEWORK=' "$MFLUX_VENV/bin/mflux-generate" \
+            || [[ -x "$MFLUX_PACKAGED_FRAMEWORK" ]]; }; then
         BUNDLE_MFLUX=1
     else
         BUNDLE_MFLUX=0
@@ -130,7 +133,11 @@ rewrite_mflux_launcher() {
     local script="$1"
     local body
     body="$(mktemp)"
-    tail -n +4 "$script" > "$body"
+    if grep -q 'PYTHON_FRAMEWORK=' "$script"; then
+        sed -n "/^' '''$/,\$p" "$script" | tail -n +2 > "$body"
+    else
+        tail -n +4 "$script" > "$body"
+    fi
     cat > "$script" <<'EOF'
 #!/bin/sh
 ''':'
@@ -139,6 +146,8 @@ VENV_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_FRAMEWORK="$(CDPATH= cd -- "$SCRIPT_DIR/../../../Frameworks/Python.framework/Versions/3.14" && pwd)"
 export PYTHONHOME="$PYTHON_FRAMEWORK"
 export PYTHONPATH="$VENV_DIR/lib/python3.14/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPYCACHEPREFIX="${HOME}/Library/Caches/MLX Studio/PythonBytecode/mflux"
 exec "$SCRIPT_DIR/python3.14" "$0" "$@"
 ' '''
 EOF
@@ -171,11 +180,16 @@ if [[ "$BUNDLE_MFLUX" == "1" ]]; then
         exit 1
     fi
     PYTHON_DYLIB="$(otool -L "$PYTHON_SRC" | awk '/Python.framework/ { print $1; exit }')"
-    if [[ -z "$PYTHON_DYLIB" || ! -f "$PYTHON_DYLIB" ]]; then
+    if [[ "$PYTHON_DYLIB" == @executable_path/* ]]; then
+        PYTHON_FRAMEWORK_SRC="$MFLUX_VENV/../../Frameworks/Python.framework"
+    elif [[ -n "$PYTHON_DYLIB" ]]; then
+        PYTHON_FRAMEWORK_SRC="${PYTHON_DYLIB%/Versions/*}"
+    fi
+    if [[ -z "${PYTHON_FRAMEWORK_SRC:-}" \
+        || ! -f "$PYTHON_FRAMEWORK_SRC/Versions/3.14/Python" ]]; then
         echo "ERROR: could not resolve Python.framework dylib for $PYTHON_SRC" >&2
         exit 1
     fi
-    PYTHON_FRAMEWORK_SRC="${PYTHON_DYLIB%/Versions/*}"
     mkdir -p "$APP_PATH/Contents/Frameworks"
     /usr/bin/ditto "$PYTHON_FRAMEWORK_SRC" "$APP_PATH/Contents/Frameworks/Python.framework"
     find "$APP_PATH/Contents/Frameworks/Python.framework/Versions" \
@@ -187,15 +201,19 @@ if [[ "$BUNDLE_MFLUX" == "1" ]]; then
         "$MFLUX_BIN_DIR/python3.14" "$MFLUX_BIN_DIR/𝜋thon"
     cp "$PYTHON_SRC" "$MFLUX_BIN_DIR/python3.14"
     chmod +x "$MFLUX_BIN_DIR/python3.14"
-    install_name_tool \
-        -change "$PYTHON_DYLIB" \
-        "@executable_path/../../../Frameworks/Python.framework/Versions/3.14/Python" \
-        "$MFLUX_BIN_DIR/python3.14"
+    DESIRED_PYTHON_DYLIB="@executable_path/../../../Frameworks/Python.framework/Versions/3.14/Python"
+    if [[ "$PYTHON_DYLIB" != "$DESIRED_PYTHON_DYLIB" ]]; then
+        install_name_tool \
+            -change "$PYTHON_DYLIB" \
+            "$DESIRED_PYTHON_DYLIB" \
+            "$MFLUX_BIN_DIR/python3.14"
+    fi
     ln -s python3.14 "$MFLUX_BIN_DIR/python"
     ln -s python3.14 "$MFLUX_BIN_DIR/python3"
     ln -s python3.14 "$MFLUX_BIN_DIR/𝜋thon"
     while IFS= read -r -d '' script; do
-        if LC_ALL=C grep -q "$MFLUX_VENV/bin/python" "$script"; then
+        if LC_ALL=C grep -q "$MFLUX_VENV/bin/python" "$script" \
+            || LC_ALL=C grep -q 'PYTHON_FRAMEWORK=' "$script"; then
             rewrite_mflux_launcher "$script"
         fi
     done < <(find "$MFLUX_BIN_DIR" -type f -perm -111 -print0)
@@ -325,8 +343,11 @@ rm -f "$VERIFY_LOG"
 test -x "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
 test -d "$APP_PATH/Contents/Resources/vmlx_Cmlx.bundle"
 test -f "$APP_PATH/Contents/Resources/vmlx_Cmlx.bundle/default.metallib"
+test -f "$APP_PATH/Contents/Resources/vmlx_vMLXApp.bundle/dealign-mascot-static.svg"
 if [[ "$BUNDLE_MFLUX" == "1" ]]; then
     test -x "$APP_PATH/Contents/Resources/mflux-venv/bin/mflux-generate"
+    PYTHONDONTWRITEBYTECODE=1 \
+        "$APP_PATH/Contents/Resources/mflux-venv/bin/mflux-generate" --help >/dev/null
 fi
 if [[ "$BUNDLE_LFM" == "1" ]]; then
     test -f "$APP_PATH/Contents/Resources/Models/LiquidAI/LFM2.5-350M/config.json"

@@ -1,10 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import MLXNN
 import XCTest
 @testable import vMLXFluxKit
+@testable import vMLXLMCommon
 
 final class WeightLoaderComponentLayoutTests: XCTestCase {
+    func testJANGAffineShapeResolutionUsesKnownLayerInputWidth() {
+        XCTAssertEqual(
+            shapeAuthoritativeAffineQuantization(
+                originalInputWidth: 4_608,
+                packedColumnCount: 720,
+                scaleColumnCount: 72
+            )?.bits,
+            5
+        )
+        XCTAssertEqual(
+            shapeAuthoritativeAffineQuantization(
+                originalInputWidth: 4_608,
+                packedColumnCount: 720,
+                scaleColumnCount: 72
+            )?.groupSize,
+            64
+        )
+        XCTAssertEqual(
+            shapeAuthoritativeAffineQuantization(
+                originalInputWidth: 1_024,
+                packedColumnCount: 256,
+                scaleColumnCount: 16
+            )?.bits,
+            8
+        )
+        XCTAssertNil(shapeAuthoritativeAffineQuantization(
+            originalInputWidth: 4_608,
+            packedColumnCount: 721,
+            scaleColumnCount: 72
+        ))
+    }
+
+    func testMLXNNAllowsBackendSupportedFiveBitAffineLayers() {
+        let layer = Linear(64, 64, bias: false)
+
+        let quantized = quantizeSingle(
+            layer: layer,
+            groupSize: 64,
+            bits: 5,
+            mode: .affine
+        )
+
+        XCTAssertEqual(quantized?.bits, 5)
+        XCTAssertEqual(quantized?.groupSize, 64)
+    }
+
     func testDiffusionShardManifestPreservesComponentNames() throws {
         let root = try makeFluxLikeDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

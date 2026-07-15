@@ -39,15 +39,11 @@ public enum AdminRoutes {
                 }
             }()
             let loadedPath = await engine.loadedModelPath
-            var model: String? = nil
-            if let lp = loadedPath {
-                _ = await engine.modelLibrary.scan(force: false)
-                let entries = await engine.modelLibrary.entries()
-                let canonical = lp.resolvingSymlinksInPath().standardizedFileURL
-                model = entries.first(where: {
-                    $0.canonicalPath.standardizedFileURL == canonical
-                })?.displayName ?? lp.lastPathComponent
-            }
+            // Liveness must never wait for a library walk. A session engine
+            // can be serving a derived artifact outside its scan roots while
+            // a first scan is traversing slow external volumes. Use the
+            // authoritative loaded path for the lightweight health label.
+            let model = loadedPath?.lastPathComponent
             // iter-85 §163: expose real scheduler pattern so callers
             // don't assume they're hitting a continuous-batching
             // engine. Swift vMLX serializes MLX Metal work per-engine

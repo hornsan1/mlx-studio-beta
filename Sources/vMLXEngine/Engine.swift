@@ -1970,17 +1970,28 @@ public actor Engine {
     }
 
     /// Stop the engine and release the model.
-    public func stop() {
-        // Cancel any in-flight generation first so the stop button is
-        // actually responsive (see Stream.swift cancellation commentary).
-        currentStreamTask?.cancel()
+    public func stop() async {
+        // Cancel and DRAIN every in-flight generation before releasing model,
+        // cache, or Metal-backed state. Cancellation is cooperative: merely
+        // calling Task.cancel() and immediately nil-ing `loaded` races an
+        // already-encoded MLX async-eval command and can SIGSEGV in the AGX
+        // driver. Snapshot both registries because the current task may also
+        // be present in the per-ID map.
+        var streamTasks = Array(streamTasksByID.values)
+        if let currentStreamTask { streamTasks.append(currentStreamTask) }
+        for task in streamTasks { task.cancel() }
         currentStreamTask = nil
+        streamTasksByID.removeAll()
         // Audit 2026-04-16: also cancel a mid-flight load so Stop during
         // a wrong-model click actually aborts the weight mmap / JANG
         // repack. Prior behavior was to only cancel streams, leaving
         // long loads uninterruptible.
-        currentLoadTask?.cancel()
+        let loadTask = currentLoadTask
+        loadTask?.cancel()
         currentLoadTask = nil
+        for task in streamTasks { await task.value }
+        await loadTask?.value
+        if let remoteClient { await remoteClient.cancelStream() }
         loaded = nil
         loadedModelPath = nil
         loadedJangConfig = nil
@@ -2014,18 +2025,10 @@ public actor Engine {
         // cancelled above) can't lose live state.
         MLX.Memory.clearCache()
         transition(.stopped)
-        // Flush any pending debounced settings writes so in-memory
-        // edits from the last 500ms don't get dropped when the app is
-        // terminating. Caller responsibility is to await the engine
-        // actor after this method returns if they want the flush to
-        // complete before exit — the vMLXApp `willTerminate` hook at
-        // `vMLXApp.swift:107-122` already uses a semaphore + Task for
-        // this. Here we fire-and-forget because `stop()` is a sync
-        // method that can be called from non-async contexts.
-        Task {
-            await settings.flushPending()
-            await logs.append(.info, category: "engine", "Engine stopped")
-        }
+        // `stop()` is async specifically so shutdown callers can know that
+        // GPU work and durability flushes are complete before process exit.
+        await settings.flushPending()
+        await logs.append(.info, category: "engine", "Engine stopped")
     }
 
     /// Generate a streaming completion. Mirrors `BatchedEngine.generate`.

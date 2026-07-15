@@ -2,6 +2,17 @@ import SwiftUI
 import vMLXEngine
 import vMLXTheme
 
+enum StudioPortOwnership: Equatable {
+    case free
+    case ownedByApp
+    case externalConflict
+
+    static func resolve(hasOwnedListener: Bool, isPortFree: Bool) -> Self {
+        if hasOwnedListener { return .ownedByApp }
+        return isPortFree ? .free : .externalConflict
+    }
+}
+
 /// Full-parity API screen. Replaces the scaffold from Phase 2 with:
 ///   * live endpoint (host/port/lan from SettingsStore)
 ///   * port validation + collision warning
@@ -160,8 +171,13 @@ struct APIScreen: View {
         return candidates.first?.ip
     }
 
-    private var portInUse: Bool {
-        app.sessions.contains(where: { $0.port == portBinding && $0.isActiveGroup })
+    private var portOwnership: StudioPortOwnership {
+        StudioPortOwnership.resolve(
+            hasOwnedListener: app.sessions.contains {
+                $0.port == portBinding && $0.isActiveGroup
+            },
+            isPortFree: Engine.isPortFree(portBinding)
+        )
     }
 
     private var portValid: Bool {
@@ -227,7 +243,7 @@ struct APIScreen: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.danger)
                     .textSelection(.enabled)
-            } else if portInUse {
+            } else if portOwnership == .externalConflict {
                 Text(L10n.APIUI.portInUseFormat.format(locale: appLocale, Int64(portBinding)))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warning)

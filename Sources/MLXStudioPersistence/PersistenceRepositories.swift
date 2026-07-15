@@ -111,6 +111,77 @@ public struct DurableJobRecord: Codable, Hashable, Sendable {
     }
 }
 
+public struct ArtifactBuildRun: Codable, Hashable, Sendable {
+    public let id: String
+    public let planID: OptimizationPlanID
+    public let jobID: JobID
+    public let outputArtifactID: ModelArtifactID
+    public let workerIdentifier: String
+    public let toolVersionsJSON: String
+    public let commandManifestJSON: String
+    public let partialOutputPolicy: PartialOutputPolicy
+    public let status: String
+    public let startedAt: Date
+    public let endedAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        planID: OptimizationPlanID,
+        jobID: JobID,
+        outputArtifactID: ModelArtifactID,
+        workerIdentifier: String,
+        toolVersionsJSON: String,
+        commandManifestJSON: String,
+        partialOutputPolicy: PartialOutputPolicy,
+        status: String,
+        startedAt: Date,
+        endedAt: Date
+    ) {
+        self.id = id
+        self.planID = planID
+        self.jobID = jobID
+        self.outputArtifactID = outputArtifactID
+        self.workerIdentifier = workerIdentifier
+        self.toolVersionsJSON = toolVersionsJSON
+        self.commandManifestJSON = commandManifestJSON
+        self.partialOutputPolicy = partialOutputPolicy
+        self.status = status
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+}
+
+public struct ArtifactVerificationReport: Codable, Hashable, Sendable {
+    public let id: String
+    public let artifactID: ModelArtifactID
+    public let jobID: JobID
+    public let status: VerificationStatus
+    public let checksJSON: String
+    public let diagnosticExportURL: URL?
+    public let runtimeSmokeGenerationID: String?
+    public let createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        artifactID: ModelArtifactID,
+        jobID: JobID,
+        status: VerificationStatus,
+        checksJSON: String,
+        diagnosticExportURL: URL? = nil,
+        runtimeSmokeGenerationID: String? = nil,
+        createdAt: Date = .init()
+    ) {
+        self.id = id
+        self.artifactID = artifactID
+        self.jobID = jobID
+        self.status = status
+        self.checksJSON = checksJSON
+        self.diagnosticExportURL = diagnosticExportURL
+        self.runtimeSmokeGenerationID = runtimeSmokeGenerationID
+        self.createdAt = createdAt
+    }
+}
+
 public final class ModelArtifactRepository: @unchecked Sendable {
     private let store: SQLiteStore
 
@@ -270,13 +341,17 @@ public final class ModelArtifactRepository: @unchecked Sendable {
     public func registerDerivedArtifact(
         _ artifact: ModelArtifact,
         manifest: ArtifactManifest,
-        lineage: ArtifactLineage
+        lineage: ArtifactLineage,
+        buildRun: ArtifactBuildRun? = nil,
+        verificationReport: ArtifactVerificationReport? = nil
     ) throws {
         guard artifact.manifestID == manifest.id,
               manifest.artifactID == artifact.id,
               lineage.childArtifactID == artifact.id,
               lineage.parentArtifactID == artifact.parentArtifactID,
-              lineage.manifestID == manifest.id else {
+              lineage.manifestID == manifest.id,
+              buildRun?.outputArtifactID == artifact.id || buildRun == nil,
+              verificationReport?.artifactID == artifact.id || verificationReport == nil else {
             throw DerivedArtifactRegistrationError.inconsistentIdentity
         }
         let encoder = JSONEncoder()
@@ -348,6 +423,39 @@ public final class ModelArtifactRepository: @unchecked Sendable {
                 lineage.manifestID.map { .text($0.rawValue) } ?? .null,
                 .real(lineage.createdAt.timeIntervalSince1970),
             ])
+            if let buildRun {
+                try SQLiteStore.execute(database, """
+                INSERT INTO build_runs (
+                    id, plan_id, job_id, output_artifact_id, worker_identifier,
+                    tool_versions_json, command_manifest_json, partial_output_policy,
+                    status, started_at, ended_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, bindings: [
+                    .text(buildRun.id), .text(buildRun.planID.rawValue),
+                    .text(buildRun.jobID.rawValue), .text(buildRun.outputArtifactID.rawValue),
+                    .text(buildRun.workerIdentifier), .text(buildRun.toolVersionsJSON),
+                    .text(buildRun.commandManifestJSON),
+                    .text(buildRun.partialOutputPolicy.rawValue), .text(buildRun.status),
+                    .real(buildRun.startedAt.timeIntervalSince1970),
+                    .real(buildRun.endedAt.timeIntervalSince1970),
+                ])
+            }
+            if let verificationReport {
+                try SQLiteStore.execute(database, """
+                INSERT INTO verification_reports (
+                    id, artifact_id, job_id, status, checks_json,
+                    diagnostic_export_url, runtime_smoke_generation_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """, bindings: [
+                    .text(verificationReport.id), .text(verificationReport.artifactID.rawValue),
+                    .text(verificationReport.jobID.rawValue),
+                    .text(verificationReport.status.rawValue),
+                    .text(verificationReport.checksJSON),
+                    verificationReport.diagnosticExportURL.map { .text($0.path) } ?? .null,
+                    verificationReport.runtimeSmokeGenerationID.map(SQLiteValue.text) ?? .null,
+                    .real(verificationReport.createdAt.timeIntervalSince1970),
+                ])
+            }
         }
     }
 
@@ -595,6 +703,7 @@ private extension ModelArtifactRepository {
         predicate legacyModelID: String?
     ) throws -> [IndexedModelRecord] {
         let filter = legacyModelID == nil ? "" : "AND m.id=?"
+        let derivedFilter = legacyModelID == nil ? "" : "AND a.id=?"
         let sql = """
         SELECT m.id, a.canonical_path, a.name, m.family, m.modality,
                m.total_size_bytes, m.is_jang, m.is_mxtq, m.quant_bits,
@@ -610,10 +719,34 @@ private extension ModelArtifactRepository {
         WHERE NOT EXISTS (
             SELECT 1 FROM model_artifacts a WHERE a.legacy_model_id=m.id
         ) \(legacyModelID == nil ? "" : "AND m.id=?")
+        UNION ALL
+        SELECT a.id, a.canonical_path, a.name,
+               COALESCE(pm.family, 'unknown'), COALESCE(pm.modality, 'text'),
+               COALESCE((
+                 SELECT SUM(sf.size_bytes)
+                 FROM artifact_source_files sf
+                 WHERE sf.manifest_id=a.manifest_id
+               ), 0),
+               CASE WHEN a.format IN ('jang','jangtq') THEN 1 ELSE 0 END,
+               CASE WHEN a.format='jangtq' THEN 1 ELSE 0 END,
+               CASE
+                 WHEN a.precision GLOB '*[0-9]-bit' THEN CAST(a.precision AS INTEGER)
+                 ELSE NULL
+               END,
+               a.created_at,
+               'user:' || a.canonical_path,
+               COALESCE(pm.capabilities_json, '{}')
+        FROM model_artifacts a
+        LEFT JOIN model_artifacts pa ON pa.id=a.parent_artifact_id
+        LEFT JOIN models pm ON pm.id=pa.legacy_model_id
+        WHERE a.legacy_model_id IS NULL
+          AND a.state='ready'
+          AND a.verification_status='passed'
+          \(derivedFilter)
         ORDER BY 3 ASC;
         """
         let bindings: [SQLiteValue] = legacyModelID.map {
-            [.text($0), .text($0)]
+            [.text($0), .text($0), .text($0)]
         } ?? []
         var statement: OpaquePointer?
         try SQLiteStore.prepare(database, sql, statement: &statement)

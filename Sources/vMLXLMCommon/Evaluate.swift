@@ -1923,17 +1923,36 @@ public func generate(
     cacheCoordinator: CacheCoordinator? = nil,
     genPromptLen: Int = 0
 ) throws -> AsyncStream<Generation> {
+    try generateTask(
+        input: input,
+        cache: cache,
+        parameters: parameters,
+        context: context,
+        wiredMemoryTicket: wiredMemoryTicket,
+        cacheCoordinator: cacheCoordinator,
+        genPromptLen: genPromptLen
+    ).0
+}
+
+/// Generation entry point that also exposes the underlying token-loop task.
+/// Long-lived engines must retain and drain this task before unloading model
+/// or Metal-backed cache state when a stream consumer terminates early.
+public func generateTask(
+    input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    cacheCoordinator: CacheCoordinator? = nil,
+    genPromptLen: Int = 0
+) throws -> (AsyncStream<Generation>, Task<Void, Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters,
         cacheCoordinator: cacheCoordinator, genPromptLen: genPromptLen,
         tokenizer: context.tokenizer)
-    let (stream, _) = generateTask(
+    return generateTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket)
-    return stream
 }
 
 /// Generates text and tool calls asynchronously using speculative decoding with a draft model.

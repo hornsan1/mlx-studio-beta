@@ -248,7 +248,6 @@ final class VMLXInferenceProviderTests: XCTestCase {
             modelLibraryDB: ModelLibraryDB(customPath: directory.appendingPathComponent("models.sqlite3")),
             settingsDB: SettingsDB(customPath: directory.appendingPathComponent("settings.sqlite3"))
         )
-        defer { Task { await engine.stop() } }
         let artifact = ModelArtifact(
             projectID: ModelProjectID(),
             legacyModelID: "real-provider-smoke",
@@ -321,6 +320,7 @@ final class VMLXInferenceProviderTests: XCTestCase {
             $0.id == cancellationRequest.id.rawValue
         }
         XCTAssertEqual(cancellation?.accepted, true)
+        await engine.stop()
     }
 }
 

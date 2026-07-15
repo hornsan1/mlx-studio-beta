@@ -236,11 +236,11 @@ actor GatewayActor {
             },
             allowedOrigins: allowedOrigins
         )
-        runTask = Task {
+        runTask = Task.detached { [weak self] in
             do {
                 try await server.run()
             } catch {
-                await self.recordRunError("\(error)")
+                await self?.recordRunError("\(error)")
                 throw error
             }
         }

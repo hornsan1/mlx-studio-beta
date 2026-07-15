@@ -168,7 +168,11 @@ struct ImageScreen: View {
 
                     HStack(alignment: .top, spacing: Theme.Spacing.lg) {
                         VStack(spacing: Theme.Spacing.lg) {
-                            ImageModelPicker(selected: $selected, mode: $tab)
+                            ImageModelPicker(
+                                selected: $selected,
+                                mode: $tab,
+                                entries: $imageLibraryEntries
+                            )
                                 .frame(width: 292)
 
                             ImageSettingsInlinePanel(
@@ -221,10 +225,14 @@ struct ImageScreen: View {
             }
         }
         .background(Theme.Colors.background)
-        .onChange(of: selected?.id) { _, _ in
+        .onChange(of: appState.downloadedModelCount) { _, _ in
             Task { await refreshImageLibrary() }
         }
-        .onChange(of: appState.downloadedModelCount) { _, _ in
+        .onChange(of: selected?.id) { _, _ in
+            // The picker and parent mount concurrently. The picker may see a
+            // hydrated catalog after the parent's initial snapshot; refresh
+            // here so selecting a ready local model never leaves the prompt
+            // bar offering a redundant "Download & Generate" action.
             Task { await refreshImageLibrary() }
         }
         .onChange(of: appState.pendingStudioImageReuse?.id) { _, _ in
@@ -686,7 +694,7 @@ struct ImageScreen: View {
     }
 
     private func imageLibraryRows() async -> [ModelLibrary.ModelEntry] {
-        await appState.engine.modelLibrary.entries()
+        await appState.modelCatalogEngine.modelLibrary.entries()
             .filter { $0.modality == .image || $0.family.lowercased().contains("flux") }
     }
 

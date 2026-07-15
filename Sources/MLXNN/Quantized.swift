@@ -45,7 +45,11 @@ public func quantizeSingle(
 }
 
 private func isQuantizationShapeSupported(layer: Module, groupSize: Int, bits: Int) -> Bool {
-    guard groupSize > 0, [2, 3, 4, 6, 8].contains(bits) else {
+    // Keep this set aligned with the vendored MLX affine kernels. Mixed
+    // precision JANG profiles legitimately emit 5-bit tensors; excluding 5
+    // here leaves those Linear modules unquantized and makes their on-disk
+    // scales/biases appear as unhandled parameters during model load.
+    guard groupSize > 0, [2, 3, 4, 5, 6, 8].contains(bits) else {
         return false
     }
 

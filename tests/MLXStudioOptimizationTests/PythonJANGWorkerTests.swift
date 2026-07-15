@@ -190,6 +190,39 @@ final class PythonJANGWorkerTests: XCTestCase {
         XCTAssertNotNil(snapshot.latestEvent)
     }
 
+    func testWorkerForcesPythonBytecodeOutsideSignedResources() async throws {
+        let script = try makeScript("""
+        [[ "$PYTHONDONTWRITEBYTECODE" == "1" ]] || {
+          echo "bytecode writes were not disabled" >&2
+          exit 31
+        }
+        [[ "$PYTHONPYCACHEPREFIX" == *"/MLX Studio/PythonBytecode" ]] || {
+          echo "bytecode cache was not redirected: $PYTHONPYCACHEPREFIX" >&2
+          exit 32
+        }
+        echo '{"v":1,"type":"done","ok":true,"output":"/tmp/out"}' >&2
+        """)
+        let worker = PythonJANGWorker(configuration: .init(
+            executableURL: URL(fileURLWithPath: "/bin/bash"),
+            argumentPrefix: [script.path],
+            environment: [
+                "PYTHONDONTWRITEBYTECODE": "0",
+                "PYTHONPYCACHEPREFIX": "/Applications/MLX Studio.app/Contents/Resources",
+            ]
+        ))
+        let request = OptimizationWorkerRequest(
+            operation: .inspect,
+            sourceURL: URL(fileURLWithPath: "/tmp/model")
+        )
+
+        let events = try await collect(worker.events(for: request))
+
+        XCTAssertTrue(events.contains {
+            if case .completed = $0.event { return true }
+            return false
+        })
+    }
+
     func testPublishingCommandsAreStructuredAndNeverPutTokenOnArgv() throws {
         let preview = OptimizationWorkerRequest(
             operation: .publishHuggingFace,

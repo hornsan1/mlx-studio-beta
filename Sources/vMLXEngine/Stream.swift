@@ -1068,6 +1068,7 @@ extension Engine {
         try Task.checkCancellation()
         let performResult: (
             stream: AsyncStream<Generation>,
+            generationTask: Task<Void, Never>,
             cache: CachePreFetch,
             genPromptLen: Int,
             promptTokenIds: [Int]
@@ -1315,7 +1316,7 @@ extension Engine {
                 //   T3 memory+disk-backfill+gp(16) — multi-turn prefix
                 //   hit restored. See gen-prompt-length fix above in
                 //   this same function.
-                let s = try vMLXLMCommon.generate(
+                let generation = try vMLXLMCommon.generateTask(
                     input: lmInput,
                     parameters: params,
                     context: ctx,
@@ -1326,9 +1327,16 @@ extension Engine {
                 // last pass to key the clean state into the companion
                 // cache without re-crossing the actor boundary.
                 let promptIds = lmInput.text.tokens.asArray(Int.self)
-                return (s, preFetch, genPromptLen, promptIds)
+                return (
+                    generation.0,
+                    generation.1,
+                    preFetch,
+                    genPromptLen,
+                    promptIds
+                )
             }
         let stream = performResult.stream
+        let generationTask = performResult.generationTask
         let cachePreFetch = performResult.cache
         let capturedGenPromptLen = performResult.genPromptLen
         let capturedPromptIds = performResult.promptTokenIds
@@ -1345,6 +1353,8 @@ extension Engine {
         if Task.isCancelled {
             await self.log(.info, "engine",
                 "stream cancelled post-prefill (prefill completed but output dropped)")
+            generationTask.cancel()
+            await generationTask.value
             return []
         }
 
@@ -2026,6 +2036,8 @@ extension Engine {
                 }
             }
         }
+        if Task.isCancelled { generationTask.cancel() }
+        await generationTask.value
 
         // Hybrid + thinking SSM re-derive — only runs on the LAST pass
         // (empty tool calls means the generation terminated naturally)

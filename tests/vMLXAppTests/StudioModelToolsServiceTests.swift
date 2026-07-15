@@ -4,6 +4,46 @@ import XCTest
 
 @MainActor
 final class StudioModelToolsServiceTests: XCTestCase {
+    func testCompletedInspectionReportIsRecoverableAfterReopen() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inspection-recovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = ModelRef(id: "fixture", displayName: "Fixture", repo: nil, localURL: root)
+        let inspection = ModelInspection(
+            model: model,
+            family: "lfm2",
+            modality: "text",
+            sizeBytes: 42,
+            configKeys: ["model_type"],
+            tokenizerPresent: true,
+            safetensorShardCount: 1,
+            notes: []
+        )
+        let report = root.appendingPathComponent("inspection.json")
+        try JSONEncoder().encode(inspection).write(to: report)
+        let job = ModelJob(
+            id: UUID(),
+            kind: .package,
+            inputModel: model,
+            outputPath: report,
+            status: .completed,
+            progress: 1,
+            logPath: nil,
+            message: "Report exported",
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+
+        let recoveredURL = try XCTUnwrap(
+            StudioModelToolsInspectionRecovery.reportURL(for: model.id, jobs: [job])
+        )
+        XCTAssertEqual(
+            StudioModelToolsInspectionRecovery.decodeReport(at: recoveredURL),
+            inspection
+        )
+    }
+
     func testBenchmarkGateRequiresLoadedTextModel() {
         XCTAssertEqual(
             StudioModelToolsBenchmarkGate.unavailableReason(

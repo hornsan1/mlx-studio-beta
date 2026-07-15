@@ -33,9 +33,10 @@ actor HTTPServerActor {
     private(set) var port: Int = 8000
     private(set) var lastError: String?
 
-    /// `true` while a run task is live, whether or not it has finished
-    /// binding its listener. Used by the UI to show running/stopped state.
-    var isRunning: Bool { runTask != nil }
+    /// A retained task is not sufficient evidence: a bind failure leaves the
+    /// task handle present. Consumers must not advertise a listener after its
+    /// run loop has reported an error.
+    var isRunning: Bool { runTask != nil && lastError == nil }
 
     // MARK: - Lifecycle
 
@@ -92,12 +93,19 @@ actor HTTPServerActor {
         // `applyAuthCredentials` can reach its `authTokens` box while
         // the listener is running.
         self.runningServer = srv
-        runTask = Task {
+        // Keep the long-lived Hummingbird service off this actor's executor.
+        // An actor-inheriting task can hold up status reads while the service
+        // is entering its run loop, leaving the UI stuck on "Starting" even
+        // though the socket has already bound.
+        runTask = Task.detached { [weak self] in
             do {
                 try await srv.run()
+                if !Task.isCancelled {
+                    await self?.recordRunError("HTTP listener stopped unexpectedly")
+                }
             } catch {
                 // Record the error so the next status poll surfaces it.
-                await self.recordRunError("\(error)")
+                await self?.recordRunError("\(error)")
                 throw error
             }
         }
