@@ -2,11 +2,11 @@ import SwiftUI
 import vMLXEngine
 import vMLXTheme
 
-/// Live request-log stream for the API tab.
+/// Live request-log stream for Settings > API & Accounts.
 ///
 /// Subscribes to `Engine.logs` filtered to `category == "server"` so every
 /// Hummingbird access-log entry surfaces here without the user having to
-/// open the Server tab's broader LogsPanel. Displays method + path +
+/// open Serve's broader LogsPanel. Displays method + path +
 /// status badge + latency, color-coded by status class (2xx / 3xx / 4xx
 /// / 5xx). Auto-scrolls to the tail unless the user scrolls up; scroll
 /// pill snaps back.

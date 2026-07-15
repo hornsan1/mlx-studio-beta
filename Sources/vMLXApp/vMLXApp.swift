@@ -216,19 +216,20 @@ struct MLXStudioApp: App {
             // top-level modes so keyboard users can navigate without
             // touching the sidebar.
             CommandMenu(L10n.Menu.view.render(uiLocale)) {
-                Button("Chat")     { appState.mode = .chat }
+                Button("Home")     { appState.mode = .home }
                     .keyboardShortcut("1", modifiers: [.command])
-                Button("Create")   { appState.mode = .create }
+                Button("Chat")     { appState.mode = .chat }
                     .keyboardShortcut("2", modifiers: [.command])
                 Button("Models")   { appState.mode = .models }
                     .keyboardShortcut("3", modifiers: [.command])
-                Button("Library")  { appState.mode = .library }
+                Button("Optimize") { appState.mode = .optimize }
                     .keyboardShortcut("4", modifiers: [.command])
                 Button("Evaluate") { appState.mode = .evaluate }
+                    .keyboardShortcut("5", modifiers: [.command])
+                Divider()
+                Button("Create") { appState.mode = .create }
                 if appState.experienceMode == .advanced {
-                    Button("Server") { appState.mode = .server }
-                        .keyboardShortcut("5", modifiers: [.command])
-                    Button("Advanced Models") { appState.mode = .advancedModels }
+                    Button("Serve") { appState.mode = .server }
                         .keyboardShortcut("6", modifiers: [.command])
                     Button("Diagnostics") { appState.mode = .diagnostics }
                         .keyboardShortcut("7", modifiers: [.command])
@@ -296,56 +297,61 @@ enum StudioChatCommandKind: Equatable {
 @MainActor
 final class AppState {
     enum Mode: String, CaseIterable, Identifiable {
+        case home = "Home"
         case chat = "Chat"
         case create = "Create"
         case optimize = "Optimize"
         case evaluate = "Evaluate"
         case models = "Models"
-        case library = "Library"
-        case server = "Server"
-        case advancedModels = "Advanced Models"
+        case server = "Serve"
         case diagnostics = "Diagnostics"
-        case image = "Image"
-        case terminal = "Terminal"
-        case api = "API"
 
         static let allCases: [Mode] = [
-            .chat, .create, .optimize, .evaluate, .models, .library, .server, .advancedModels, .diagnostics
+            .home, .chat, .models, .optimize, .evaluate, .create, .server, .diagnostics
         ]
 
         var id: String { rawValue }
 
         var isAdvancedOnly: Bool {
             switch self {
-            case .server, .advancedModels, .diagnostics, .terminal, .api:
+            case .server, .diagnostics:
                 return true
-            case .chat, .create, .optimize, .evaluate, .models, .library, .image:
+            case .home, .chat, .create, .optimize, .evaluate, .models:
                 return false
             }
         }
 
         static func visible(for experienceMode: ExperienceMode) -> [Mode] {
+            _ = experienceMode
+            return [.home, .chat, .models, .optimize, .evaluate]
+        }
+
+        static func secondary(for experienceMode: ExperienceMode) -> [Mode] {
             switch experienceMode {
             case .beginner:
-                return [.chat, .create, .optimize, .evaluate, .models, .library]
+                return [.create]
             case .advanced:
-                return [.chat, .create, .optimize, .evaluate, .models, .library, .server, .advancedModels, .diagnostics]
+                return [.create, .server, .diagnostics]
             }
         }
     }
 
-    var mode: Mode = .chat
+    var mode: Mode = .home
     var experienceMode: ExperienceMode = ExperienceMode.persisted {
         didSet {
             ExperienceMode.persist(experienceMode)
             if experienceMode == .beginner, mode.isAdvancedOnly {
-                mode = .chat
+                mode = .home
             }
         }
     }
 
     var visibleModes: [Mode] {
         Mode.visible(for: experienceMode)
+    }
+
+    var secondaryModes: [Mode] {
+        Mode.secondary(for: experienceMode)
     }
 
     func setExperienceMode(_ next: ExperienceMode) {
@@ -1335,10 +1341,9 @@ final class AppState {
 }
 
 /// O7 §293 — app-wide notifications used by the Downloads → HF token CTA.
-/// `vmlxOpenHuggingFaceTokenCard` flips the sidebar to .api; once the
-/// APIScreen is mounted it re-fires `vmlxFocusHuggingFaceTokenField`
-/// which HuggingFaceTokenCard subscribes to, focusing the TextField
-/// and scrolling the card into view.
+/// `vmlxOpenHuggingFaceTokenCard` opens the consolidated Settings scene,
+/// then re-fires `vmlxFocusHuggingFaceTokenField` so the canonical token
+/// card can focus its TextField and scroll into view.
 extension Notification.Name {
     public static let vmlxOpenHuggingFaceTokenCard =
         Notification.Name("vmlx.openHuggingFaceTokenCard")
@@ -1349,6 +1354,7 @@ extension Notification.Name {
 struct RootView: View {
     @Environment(AppState.self) private var state
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         @Bindable var s = state
@@ -1361,12 +1367,14 @@ struct RootView: View {
                 ZStack(alignment: .top) {
                     Group {
                         switch state.mode {
+                        case .home:
+                            StudioHomeScreen()
                         case .chat:
                             // One production Chat path. The redesigned
                             // Studio history is migrated into this capable
                             // SQLite-backed runtime on first open.
                             ChatScreen()
-                        case .create, .image:
+                        case .create:
                             StudioCreateScreen()
                         case .optimize:
                             StudioOptimizeScreen()
@@ -1374,18 +1382,10 @@ struct RootView: View {
                             StudioEvaluateScreen()
                         case .models:
                             StudioModelsScreen()
-                        case .library:
-                            StudioLibraryScreen()
                         case .server:
                             StudioServerScreen()
-                        case .advancedModels:
-                            StudioAdvancedModelsScreen()
                         case .diagnostics:
                             StudioDiagnosticsScreen()
-                        case .terminal:
-                            TerminalScreen()
-                        case .api:
-                            APIScreen()
                         }
                     }
                     if let msg = state.banner {
@@ -1414,16 +1414,13 @@ struct RootView: View {
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleModelDrop(providers, state: state)
         }
-        // O7 §293 — DownloadsWindow posts this when a job surfaces a
-        // 401/403 from HuggingFace. Switch to the API tab so the user
-        // lands on the HuggingFaceTokenCard, then broadcast a second
-        // notification the card subscribes to so it can focus the
-        // text field and scroll itself into view.
+        // DownloadsWindow posts this when a job surfaces a Hugging Face
+        // authorization failure. Settings is the sole token-management
+        // surface, so open it and focus the canonical token card.
         .onReceive(NotificationCenter.default
             .publisher(for: .vmlxOpenHuggingFaceTokenCard)
         ) { _ in
-            state.setExperienceMode(.advanced)
-            state.mode = .api
+            openSettings()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 NotificationCenter.default.post(
                     name: .vmlxFocusHuggingFaceTokenField,
@@ -1661,7 +1658,8 @@ fileprivate func handleModelDrop(_ providers: [NSItemProvider], state: AppState)
 private struct Sidebar: View {
     @Binding var mode: AppState.Mode
     @Environment(AppState.self) private var appState
-    @Environment(\.appLocale) private var appLocale: AppLocale
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @State private var hoveredMode: AppState.Mode?
 
     var body: some View {
@@ -1679,42 +1677,24 @@ private struct Sidebar: View {
             .padding(.bottom, Theme.Spacing.lg)
 
             ForEach(appState.visibleModes) { m in
-                let isSelected = mode == m
-                let isHovered = hoveredMode == m
-                Button {
-                    mode = m
-                } label: {
-                    HStack(spacing: Theme.Spacing.sm) {
-                        Image(systemName: icon(for: m))
-                            .frame(width: 16)
-                            .foregroundStyle(isSelected || isHovered ? Theme.Colors.textHigh : Theme.Colors.textMid)
-                        Text(label(for: m))
-                            .font(Theme.Typography.bodyHi)
-                            .foregroundStyle(isSelected || isHovered ? Theme.Colors.textHigh : Theme.Colors.textMid)
-                            .tracking(0.2)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Theme.Spacing.md)
-                    .padding(.vertical, Theme.Spacing.sm)
-                    .background(
-                        RoundedRectangle(cornerRadius: Theme.Radius.md)
-                            .fill(sidebarRowFill(isSelected: isSelected, isHovered: isHovered))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: Theme.Radius.md)
-                                    .stroke(sidebarRowStroke(isSelected: isSelected, isHovered: isHovered), lineWidth: 1)
-                            )
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-                    .padding(.horizontal, Theme.Spacing.sm)
-                    .animation(.easeInOut(duration: 0.12), value: isHovered)
-                }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onHover { hovering in
-                    hoveredMode = hovering ? m : (hoveredMode == m ? nil : hoveredMode)
-                }
+                modeButton(m)
+            }
+
+            Text("Tools")
+                .font(Theme.Typography.captionHi)
+                .foregroundStyle(Theme.Colors.textLow)
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.md)
+
+            ForEach(appState.secondaryModes) { m in
+                modeButton(m)
+            }
+
+            actionButton(title: "Downloads", systemImage: "arrow.down.circle") {
+                openWindow(id: "downloads")
+            }
+            actionButton(title: "Settings", systemImage: "gearshape") {
+                openSettings()
             }
 
             Spacer()
@@ -1756,18 +1736,79 @@ private struct Sidebar: View {
 
     private func icon(for m: AppState.Mode) -> String {
         switch m {
+        case .home: return "house"
         case .chat: return "bubble.left.and.bubble.right"
-        case .create, .image: return "wand.and.stars"
+        case .create: return "wand.and.stars"
         case .optimize: return "slider.horizontal.3"
         case .evaluate: return "chart.bar.xaxis"
         case .models: return "square.stack.3d.up"
-        case .library: return "books.vertical"
         case .server: return "server.rack"
-        case .advancedModels: return "atom"
         case .diagnostics: return "waveform.path.ecg"
-        case .terminal: return "terminal"
-        case .api: return "network"
         }
+    }
+
+    @ViewBuilder
+    private func modeButton(_ destination: AppState.Mode) -> some View {
+        let isSelected = mode == destination
+        let isHovered = hoveredMode == destination
+        Button {
+            mode = destination
+        } label: {
+            sidebarLabel(
+                title: label(for: destination),
+                systemImage: icon(for: destination),
+                isSelected: isSelected,
+                isHovered: isHovered
+            )
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredMode = hovering ? destination : (hoveredMode == destination ? nil : hoveredMode)
+        }
+    }
+
+    private func actionButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            sidebarLabel(title: title, systemImage: systemImage, isSelected: false, isHovered: false)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sidebarLabel(
+        title: String,
+        systemImage: String,
+        isSelected: Bool,
+        isHovered: Bool
+    ) -> some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            Image(systemName: systemImage)
+                .frame(width: 16)
+            Text(title)
+                .font(Theme.Typography.bodyHi)
+                .tracking(0.2)
+            Spacer()
+        }
+        .foregroundStyle(isSelected || isHovered ? Theme.Colors.textHigh : Theme.Colors.textMid)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.md)
+                .fill(sidebarRowFill(isSelected: isSelected, isHovered: isHovered))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.md)
+                        .stroke(sidebarRowStroke(isSelected: isSelected, isHovered: isHovered), lineWidth: 1)
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+        .padding(.horizontal, Theme.Spacing.sm)
     }
 
     private func sidebarRowFill(isSelected: Bool, isHovered: Bool) -> Color {
@@ -1786,17 +1827,14 @@ private struct Sidebar: View {
 
     private func label(for m: AppState.Mode) -> String {
         switch m {
+        case .home: return "Home"
         case .chat: return "Chat"
-        case .create, .image: return "Create"
+        case .create: return "Create"
         case .optimize: return "Optimize"
         case .evaluate: return "Evaluate"
         case .models: return "Models"
-        case .library: return "Library"
-        case .server: return "Server"
-        case .advancedModels: return "Advanced Models"
+        case .server: return "Serve"
         case .diagnostics: return "Diagnostics"
-        case .terminal: return L10n.Mode.terminal.render(appLocale)
-        case .api: return L10n.Mode.api.render(appLocale)
         }
     }
 }

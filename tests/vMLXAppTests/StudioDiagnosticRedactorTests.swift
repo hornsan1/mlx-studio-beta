@@ -112,19 +112,19 @@ final class StudioDiagnosticRedactorTests: XCTestCase {
         let issue = StudioDiagnosticIssue(
             source: .advancedModels,
             severity: .error,
-            title: "Advanced model benchmark failed",
+            title: "Model tools benchmark failed",
             message: "Decode failed token=hf_smokesecret123456",
             context: "Qwen smoke at \(home)/models/qwen Authorization: Bearer smoke-secret-123456"
         )
 
         let brief = StudioDiagnosticBriefFormatter.incidentBrief(for: issue, openIssueCount: 1)
 
-        XCTAssertTrue(brief.contains("Source: Advanced Models"))
+        XCTAssertTrue(brief.contains("Source: Model Tools"))
         XCTAssertTrue(brief.contains("Message: Decode failed token=[redacted]"))
         XCTAssertTrue(brief.contains("Evidence: Qwen smoke at ~/models/qwen Authorization: Bearer [redacted]"))
         XCTAssertTrue(brief.contains("Next move: Review job output"))
-        XCTAssertTrue(brief.contains("Recovery action: Safe no-op - open Advanced Models job row; no model files are changed"))
-        XCTAssertTrue(brief.contains("3. Execute move: Review job output (Safe no-op - open Advanced Models job row; no model files are changed)"))
+        XCTAssertTrue(brief.contains("Recovery action: Safe no-op - open the Models > Model Tools job row; no model files are changed"))
+        XCTAssertTrue(brief.contains("3. Execute move: Review job output (Safe no-op - open the Models > Model Tools job row; no model files are changed)"))
         XCTAssertFalse(brief.contains(home))
         XCTAssertFalse(brief.contains("hf_smokesecret123456"))
         XCTAssertFalse(brief.contains("smoke-secret-123456"))
@@ -163,7 +163,7 @@ final class StudioDiagnosticRedactorTests: XCTestCase {
         StudioDiagnosticIssueStore.clear()
         defer { StudioDiagnosticIssueStore.clear() }
 
-        let issue = StudioAdvancedModelDiagnostic.recordFailure(
+        let issue = StudioModelToolsDiagnostic.recordFailure(
             kind: .benchmark,
             model: ModelRef(
                 id: "qwen-smoke",
@@ -176,11 +176,11 @@ final class StudioDiagnosticRedactorTests: XCTestCase {
         let loaded = StudioDiagnosticIssueStore.load(limit: 1)
 
         XCTAssertEqual(issue.source, .advancedModels)
-        XCTAssertEqual(issue.title, "Advanced model benchmark failed")
+        XCTAssertEqual(issue.title, "Model tools benchmark failed")
         XCTAssertTrue(issue.redactedMessage.contains("token=[redacted]"))
         XCTAssertTrue(issue.redactedCompactContext.contains("Qwen smoke at ~/models/qwen"))
         XCTAssertFalse(issue.redactedCompactContext.contains(home))
         XCTAssertEqual(loaded.first?.source, .advancedModels)
-        XCTAssertEqual(loaded.first?.title, "Advanced model benchmark failed")
+        XCTAssertEqual(loaded.first?.title, "Model tools benchmark failed")
     }
 }

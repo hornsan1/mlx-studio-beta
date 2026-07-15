@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// ImageScreen — full-parity Image tab for the Swift rewrite.
+// ImageScreen — full-parity image workspace, presented through Create.
 //
 // IMAGE CHECKLIST VERIFICATION (feedback_image_checklist.md)
 // ==========================================================
@@ -18,7 +18,7 @@
 //
 // SERVER TAB — After model loaded (SessionView)
 //   [~] Image Gen "Open Image Generator" button ..... Server screen delegates
-//                                                     to AppState.mode=.image
+//                                                     to AppState.mode=.create
 //   [~] Image Edit "Open Image Editor" button ....... same path
 //   [✓] Chat/cache/bench/embed/perf buttons hidden .. Server screen concerns
 //   [~] Sidebar "Open Image Tab" for image .......... Sidebar already routes

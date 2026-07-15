@@ -117,30 +117,15 @@ final class StudioChatHistoryStoreTests: XCTestCase {
         XCTAssertEqual(loaded.first?.contextLimitTokens, 32_768)
     }
 
-    func testRuntimeRequestMessagesInsertSystemPromptAndClampBudgets() {
-        let messages = StudioChatRuntime.requestMessages(
-            systemPrompt: "  You are concise.  ",
-            turns: [ChatTurn(role: .user, content: "Hi")]
+    func testHistoryCompatibilityNormalizesPromptAndClampsBudgets() {
+        XCTAssertEqual(
+            StudioChatHistoryCompatibility.normalizedSystemPrompt("  You are concise.  "),
+            "You are concise."
         )
-
-        XCTAssertEqual(messages.map(\.role), ["system", "user"])
-        XCTAssertEqual(stringContent(messages[0]), "You are concise.")
-        XCTAssertEqual(stringContent(messages[1]), "Hi")
-        let generationMessages = StudioChatRuntime.generationMessages(
-            systemPrompt: "  You are concise.  ",
-            turns: [ChatTurn(role: .user, content: "Hi")]
-        )
-        XCTAssertEqual(generationMessages.map(\.role), [.system, .user])
-        XCTAssertEqual(generationMessages.map(\.content), ["You are concise.", "Hi"])
-        XCTAssertEqual(StudioChatRuntime.sanitizedMaxResponseTokens(-50), 1)
-        XCTAssertEqual(StudioChatRuntime.sanitizedContextLimitTokens(2_000_000), 1_000_000)
-        XCTAssertGreaterThan(
-            StudioChatRuntime.estimatedContextTokens(
-                systemPrompt: "You are concise.",
-                turns: [ChatTurn(role: .user, content: "Hi")],
-                draftPrompt: ""
-            ),
-            0
+        XCTAssertEqual(StudioChatHistoryCompatibility.sanitizedMaxResponseTokens(-50), 1)
+        XCTAssertEqual(
+            StudioChatHistoryCompatibility.sanitizedContextLimitTokens(2_000_000),
+            1_000_000
         )
     }
 
@@ -274,15 +259,5 @@ final class StudioChatHistoryStoreTests: XCTestCase {
         XCTAssertEqual(loaded[0].title, "Legacy prompt")
         XCTAssertEqual(loaded[0].turns, turns)
         XCTAssertNotNil(defaults.data(forKey: StudioChatHistoryStore.sessionsKey))
-    }
-
-    private func stringContent(_ message: ChatRequest.Message) -> String? {
-        guard let content = message.content else { return nil }
-        switch content {
-        case .string(let value):
-            return value
-        case .parts:
-            return nil
-        }
     }
 }

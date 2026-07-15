@@ -1119,11 +1119,11 @@ struct ModelPickerRow: View {
         defer { scanning = false }
         // A2: image models (Flux, Z-Image, SDXL, Schnell, Qwen-Image) are
         // classified modality=.image by ModelLibrary and handled by the
-        // Image tab's dedicated FluxBackend pipeline, not the chat/server
+        // Create's dedicated FluxBackend pipeline, not the chat/server
         // Engine.load() path. Surfacing them here lets users pick a Flux
         // model for a chat session which fails at load with a confusing
         // `notImplemented` error. Filter them out of the server picker;
-        // the Image tab has its own catalog.
+        // Create has its own image catalog.
         entries = await app.engine.scanModels(force: force)
             .filter { $0.modality != .image }
     }

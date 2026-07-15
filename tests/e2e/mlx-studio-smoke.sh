@@ -1222,6 +1222,11 @@ click_ax "$PID" "Image starter Concept frame"
 assert_ax_value "$PID" "Image prompt brief" "quiet futuristic Mac studio, local model cards floating as glass panels"
 shot_ax "$PID" "create-prompt-starters"
 
+# The standalone Library surface was retired after its model, chat, job, and
+# image paths converged on their canonical workspaces. Keep the historical
+# assertions temporarily available for migration archaeology, but do not run
+# them as part of the current product smoke.
+if [[ "${MLX_STUDIO_RUN_RETIRED_LIBRARY_SMOKE:-0}" == "1" ]]; then
 click_ax "$PID" "Library"
 wait_ax "$PID" "Search Library" 10
 shot_ax "$PID" "library"
@@ -2035,21 +2040,26 @@ if [[ -z "$SELECTED_SESSION_AFTER_SELECTED_DELETE" ]]; then
 else
     warn_or_fail "Delete remaining chat left selected session: $SELECTED_SESSION_AFTER_SELECTED_DELETE"
 fi
-
-if "$AX_BIN" grep "$PID" "Server" >"$REPORT_DIR/grep-${TS}-beginner-server.txt" 2>&1 \
-    && grep -qi "Server" "$REPORT_DIR/grep-${TS}-beginner-server.txt"; then
-    warn_or_fail "Server appeared in Beginner mode"
 else
-    note "Beginner nav hides Server"
+    note "Retired Library compatibility smoke skipped; Models, Chat, and Create are canonical"
+fi
+
+if "$AX_BIN" grep "$PID" "Serve" >"$REPORT_DIR/grep-${TS}-beginner-serve.txt" 2>&1 \
+    && grep -qi "Serve" "$REPORT_DIR/grep-${TS}-beginner-serve.txt"; then
+    warn_or_fail "Serve appeared in Beginner mode"
+else
+    note "Beginner nav hides Serve"
 fi
 
 click_ax "$PID" "Advanced"
-wait_ax "$PID" "Server" 10
+wait_ax "$PID" "Serve" 10
 shot_ax "$PID" "advanced"
-assert_ax_grep "$PID" "Server"
-assert_ax_grep "$PID" "Advanced Models"
+assert_ax_grep "$PID" "Serve"
+assert_ax_grep "$PID" "Models"
 assert_ax_grep "$PID" "Diagnostics"
-click_ax "$PID" "Server"
+assert_ax_not_grep "$PID" "Library"
+assert_ax_not_grep "$PID" "Advanced Models"
+click_ax "$PID" "Serve"
 wait_ax "$PID" "Control Plane" 10
 shot_ax "$PID" "server"
 assert_ax_grep "$PID" "API State"
@@ -2191,7 +2201,9 @@ if [[ "$SERVER_EXPECTED_STATE" == "stopped" ]]; then
     esac
 fi
 
-click_ax "$PID" "Advanced Models"
+click_ax "$PID" "Models"
+wait_ax "$PID" "Model Tools" 10
+click_ax "$PID" "Model Tools"
 wait_ax "$PID" "Model Inspector" 10
 shot_ax "$PID" "advanced-models"
 assert_ax_grep "$PID" "Selected Model"
@@ -2204,10 +2216,10 @@ assert_ax_grep "$PID" "Operator sequence"
 assert_ax_grep "$PID" "Inspect files"
 assert_ax_grep "$PID" "Validation gate"
 assert_ax_grep "$PID" "Benchmark path"
-assert_ax_grep "$PID" "Advanced Models Validate $SMOKE_DEFAULT_CHAT_REPO"
+assert_ax_grep "$PID" "Model Tools Validate $SMOKE_DEFAULT_CHAT_REPO"
 assert_ax_grep "$PID" "Report handoff"
 assert_ax_grep "$PID" "Run Inspect before report export"
-assert_ax_grep "$PID" "Advanced Models Export Report unavailable: Run Inspect before report export"
+assert_ax_grep "$PID" "Model Tools Export Report unavailable: Run Inspect before report export"
 assert_ax_grep "$PID" "Preflight inspector"
 assert_ax_grep "$PID" "Local artifacts before a deep inspect"
 assert_ax_grep "$PID" "Artifact Ledger"
@@ -2217,25 +2229,25 @@ assert_ax_grep "$PID" "Tokenizer"
 assert_ax_grep "$PID" "Weights"
 assert_ax_grep "$PID" "Next operation"
 ADVANCED_BENCHMARK_AVAILABLE=0
-if ax_grep_contains "$PID" "Advanced Models Benchmark $SMOKE_DEFAULT_CHAT_REPO"; then
+if ax_grep_contains "$PID" "Model Tools Benchmark $SMOKE_DEFAULT_CHAT_REPO"; then
     ADVANCED_BENCHMARK_AVAILABLE=1
     assert_ax_grep "$PID" "Runtime ready"
     assert_ax_grep "$PID" "Benchmark candidate"
-    assert_ax_grep "$PID" "Advanced Models Benchmark $SMOKE_DEFAULT_CHAT_REPO"
+    assert_ax_grep "$PID" "Model Tools Benchmark $SMOKE_DEFAULT_CHAT_REPO"
 else
     assert_ax_grep "$PID" "Not loaded"
     assert_ax_grep "$PID" "Load model before benchmark"
-    assert_ax_grep "$PID" "Advanced Models Benchmark unavailable: Load model before benchmark"
-    note "Advanced Models benchmark honestly gated until the selected text model is loaded"
+    assert_ax_grep "$PID" "Model Tools Benchmark unavailable: Load model before benchmark"
+    note "Model Tools benchmark honestly gated until the selected text model is loaded"
 fi
-click_ax "$PID" "Advanced Models Validate $SMOKE_DEFAULT_CHAT_REPO"
+click_ax "$PID" "Model Tools Validate $SMOKE_DEFAULT_CHAT_REPO"
 wait_ax "$PID" "Validation passed" 15
 assert_ax_grep "$PID" "Validate:"
 assert_ax_grep "$PID" "Completed"
 if [[ "$ADVANCED_BENCHMARK_AVAILABLE" == "1" ]]; then
     ADVANCED_BENCHMARK_MARKER="$REPORT_DIR/advanced-model-benchmark-marker-$TS"
     /usr/bin/touch "$ADVANCED_BENCHMARK_MARKER"
-    click_ax "$PID" "Advanced Models Benchmark $SMOKE_DEFAULT_CHAT_REPO"
+    click_ax "$PID" "Model Tools Benchmark $SMOKE_DEFAULT_CHAT_REPO"
     ADVANCED_BENCHMARK_PATH=""
     for _ in {1..360}; do
         ADVANCED_BENCHMARK_PATH="$(/usr/bin/find "$HOME/Library/Application Support/MLX Studio/Reports" -type f -name '*-decode256-benchmark.json' -newer "$ADVANCED_BENCHMARK_MARKER" -print 2>/dev/null | /usr/bin/head -1 || true)"
@@ -2258,23 +2270,23 @@ ok = ok and float(payload.get("tokensPerSec") or 0) > 0
 sys.exit(0 if ok else 1)
 PY
     then
-        note "Advanced Models Benchmark wrote decode256 report: $ADVANCED_BENCHMARK_PATH"
+        note "Model Tools Benchmark wrote decode256 report: $ADVANCED_BENCHMARK_PATH"
     else
-        warn_or_fail "Advanced Models Benchmark did not write expected decode256 report"
+        warn_or_fail "Model Tools Benchmark did not write expected decode256 report"
     fi
-    wait_ax "$PID" "Advanced Models Copy Benchmark Output" 10
-    click_ax "$PID" "Advanced Models Copy Benchmark Output"
+    wait_ax "$PID" "Model Tools Copy Benchmark Output" 10
+    click_ax "$PID" "Model Tools Copy Benchmark Output"
     COPIED_ADVANCED_BENCHMARK_PATH="$(/usr/bin/pbpaste | tr -d '\r')"
     if [[ "$COPIED_ADVANCED_BENCHMARK_PATH" == "$ADVANCED_BENCHMARK_PATH" ]]; then
-        note "Copied Advanced Models benchmark output path"
+        note "Copied Model Tools benchmark output path"
     else
-        warn_or_fail "Advanced Models Copy Benchmark Output wrote unexpected clipboard text"
+        warn_or_fail "Model Tools Copy Benchmark Output wrote unexpected clipboard text"
     fi
 else
-    assert_ax_grep "$PID" "Advanced Models Benchmark unavailable: Load model before benchmark"
-    assert_ax_not_grep "$PID" "Advanced Models Copy Benchmark Output"
+    assert_ax_grep "$PID" "Model Tools Benchmark unavailable: Load model before benchmark"
+    assert_ax_not_grep "$PID" "Model Tools Copy Benchmark Output"
 fi
-click_ax "$PID" "Advanced Models Run Inspect"
+click_ax "$PID" "Model Tools Run Inspect"
 wait_ax "$PID" "Inspection ready" 15
 assert_ax_grep "$PID" "Inspect:"
 assert_ax_grep "$PID" "Inspection completed"
@@ -2283,25 +2295,25 @@ assert_ax_grep "$PID" "Ready to export"
 if [[ "$ADVANCED_BENCHMARK_AVAILABLE" == "1" ]]; then
     assert_ax_grep "$PID" "Runtime ready"
     assert_ax_grep "$PID" "Benchmark candidate"
-    assert_ax_grep "$PID" "Advanced Models Benchmark $SMOKE_DEFAULT_CHAT_REPO"
+    assert_ax_grep "$PID" "Model Tools Benchmark $SMOKE_DEFAULT_CHAT_REPO"
 else
     assert_ax_grep "$PID" "Load model before benchmark"
-    assert_ax_grep "$PID" "Advanced Models Benchmark unavailable: Load model before benchmark"
+    assert_ax_grep "$PID" "Model Tools Benchmark unavailable: Load model before benchmark"
 fi
-assert_ax_grep "$PID" "Advanced Models Export Report for $SMOKE_DEFAULT_CHAT_REPO"
-click_ax "$PID" "Advanced Models Copy Path"
+assert_ax_grep "$PID" "Model Tools Export Report for $SMOKE_DEFAULT_CHAT_REPO"
+click_ax "$PID" "Model Tools Copy Path"
 COPIED_ADVANCED_MODEL_PATH="$(/usr/bin/pbpaste | tr -d '\r')"
 export COPIED_ADVANCED_MODEL_PATH
 if [[ -d "$COPIED_ADVANCED_MODEL_PATH" ]] \
     && [[ -f "$COPIED_ADVANCED_MODEL_PATH/config.json" || -f "$COPIED_ADVANCED_MODEL_PATH/model_index.json" ]]
 then
-    note "Copied Advanced Models model directory to clipboard: $COPIED_ADVANCED_MODEL_PATH"
+    note "Copied Model Tools model directory to clipboard: $COPIED_ADVANCED_MODEL_PATH"
 else
-    warn_or_fail "Advanced Models Copy Path wrote unexpected clipboard text"
+    warn_or_fail "Model Tools Copy Path wrote unexpected clipboard text"
 fi
 ADVANCED_REPORT_MARKER="$REPORT_DIR/advanced-model-report-marker-$TS"
 /usr/bin/touch "$ADVANCED_REPORT_MARKER"
-click_ax "$PID" "Advanced Models Export Report for $SMOKE_DEFAULT_CHAT_REPO"
+click_ax "$PID" "Model Tools Export Report for $SMOKE_DEFAULT_CHAT_REPO"
 wait_ax "$PID" "Report exported" 15
 ADVANCED_REPORT_PATH=""
 for _ in {1..20}; do
@@ -2341,17 +2353,17 @@ ok = ok and report_path == clipboard_path
 sys.exit(0 if ok else 1)
 PY
 then
-    note "Exported Advanced Models inspection report matching copied path: $ADVANCED_REPORT_PATH"
+    note "Exported Model Tools inspection report matching copied path: $ADVANCED_REPORT_PATH"
 else
-    warn_or_fail "Advanced Models Export Report did not write expected JSON for copied model path"
+    warn_or_fail "Model Tools Export Report did not write expected JSON for copied model path"
 fi
-assert_ax_grep "$PID" "Advanced Models Copy Report Output for $SMOKE_DEFAULT_CHAT_REPO"
-click_ax "$PID" "Advanced Models Copy Report Output"
+assert_ax_grep "$PID" "Model Tools Copy Report Output for $SMOKE_DEFAULT_CHAT_REPO"
+click_ax "$PID" "Model Tools Copy Report Output"
 COPIED_ADVANCED_REPORT_PATH="$(/usr/bin/pbpaste | tr -d '\r')"
 if [[ "$COPIED_ADVANCED_REPORT_PATH" == "$ADVANCED_REPORT_PATH" ]]; then
-    note "Copied Advanced Models report output path"
+    note "Copied Model Tools report output path"
 else
-    warn_or_fail "Advanced Models Copy Report Output wrote unexpected clipboard text"
+    warn_or_fail "Model Tools Copy Report Output wrote unexpected clipboard text"
 fi
 shot_ax "$PID" "advanced-models-after-inspect"
 click_ax "$PID" "Diagnostics"
@@ -2517,7 +2529,7 @@ assert_ax_grep "$PID" "0 errors - 0 warnings - 0 info"
 assert_ax_grep "$PID" "No recent issues"
 assert_ax_grep "$PID" "Diagnostics Clear Issues unavailable: No open issues"
 
-click_ax "$PID" "Server"
+click_ax "$PID" "Serve"
 wait_ax "$PID" "Control Plane" 10
 if [[ "$SERVER_EXPECTED_STATE" == "running" ]]; then
     click_ax "$PID" "Stop"

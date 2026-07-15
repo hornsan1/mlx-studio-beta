@@ -3,10 +3,10 @@ import XCTest
 @testable import vMLXApp
 
 @MainActor
-final class StudioAdvancedModelServiceTests: XCTestCase {
+final class StudioModelToolsServiceTests: XCTestCase {
     func testBenchmarkGateRequiresLoadedTextModel() {
         XCTAssertEqual(
-            StudioAdvancedModelBenchmarkGate.unavailableReason(
+            StudioModelToolsBenchmarkGate.unavailableReason(
                 displayName: "AITRADER/FLUX1-schnell-mlx-4bit",
                 modality: "image",
                 isLoaded: false
@@ -14,7 +14,7 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
             "Benchmark requires a loaded text model"
         )
         XCTAssertEqual(
-            StudioAdvancedModelBenchmarkGate.unavailableReason(
+            StudioModelToolsBenchmarkGate.unavailableReason(
                 displayName: "Qwen3-0.6B-8bit",
                 modality: "text",
                 isLoaded: false
@@ -22,7 +22,7 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
             "Load model before benchmark"
         )
         XCTAssertNil(
-            StudioAdvancedModelBenchmarkGate.unavailableReason(
+            StudioModelToolsBenchmarkGate.unavailableReason(
                 displayName: "Qwen3-0.6B-8bit",
                 modality: "text",
                 isLoaded: true
@@ -32,21 +32,21 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
 
     func testValidationGateRequiresSelectedModelAndTokenizer() {
         XCTAssertEqual(
-            StudioAdvancedModelValidationGate.unavailableReason(
+            StudioModelToolsValidationGate.unavailableReason(
                 hasSelectedModel: false,
                 hasTokenizer: false
             ),
             "Select a local model"
         )
         XCTAssertEqual(
-            StudioAdvancedModelValidationGate.unavailableReason(
+            StudioModelToolsValidationGate.unavailableReason(
                 hasSelectedModel: true,
                 hasTokenizer: false
             ),
             "Tokenizer required before validation"
         )
         XCTAssertNil(
-            StudioAdvancedModelValidationGate.unavailableReason(
+            StudioModelToolsValidationGate.unavailableReason(
                 hasSelectedModel: true,
                 hasTokenizer: true
             )
@@ -55,21 +55,21 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
 
     func testReportGateRequiresSelectionAndInspection() {
         XCTAssertEqual(
-            StudioAdvancedModelReportGate.unavailableReason(
+            StudioModelToolsReportGate.unavailableReason(
                 hasSelectedModel: false,
                 hasInspection: false
             ),
             "Select a local model"
         )
         XCTAssertEqual(
-            StudioAdvancedModelReportGate.unavailableReason(
+            StudioModelToolsReportGate.unavailableReason(
                 hasSelectedModel: true,
                 hasInspection: false
             ),
             "Run Inspect before report export"
         )
         XCTAssertNil(
-            StudioAdvancedModelReportGate.unavailableReason(
+            StudioModelToolsReportGate.unavailableReason(
                 hasSelectedModel: true,
                 hasInspection: true
             )
@@ -105,7 +105,12 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
             withDestinationURL: tokenizerBlob
         )
 
-        let service = StudioAdvancedModelService(app: AppState(), jobs: StudioJobService())
+        let databaseURL = temporaryJobDatabaseURL()
+        defer { removeJobDatabase(at: databaseURL) }
+        let service = StudioModelToolsService(
+            app: AppState(),
+            jobs: try StudioModelToolJobStore(databaseURL: databaseURL)
+        )
         let inspection = try await service.inspect(ModelRef(
             id: "flux-smoke",
             displayName: "Smoke FLUX Model",
@@ -134,8 +139,10 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
         StudioDiagnosticIssueStore.clear()
         defer { StudioDiagnosticIssueStore.clear() }
 
-        let jobs = StudioJobService()
-        let service = StudioAdvancedModelService(app: AppState(), jobs: jobs)
+        let databaseURL = temporaryJobDatabaseURL()
+        defer { removeJobDatabase(at: databaseURL) }
+        let jobs = try StudioModelToolJobStore(databaseURL: databaseURL)
+        let service = StudioModelToolsService(app: AppState(), jobs: jobs)
         let jobID = try await service.validate(
             ModelRef(
                 id: "missing-tokenizer",
@@ -151,7 +158,7 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
 
         XCTAssertEqual(job.message, "Validation failed: tokenizer required before validation.")
         XCTAssertEqual(issues.first?.source, .advancedModels)
-        XCTAssertEqual(issues.first?.title, "Advanced model validation failed")
+        XCTAssertEqual(issues.first?.title, "Model tools validation failed")
         XCTAssertEqual(issues.first?.message, "Validation failed: tokenizer required before validation.")
     }
 
@@ -168,8 +175,10 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
         try Data(repeating: 9, count: 4096)
             .write(to: root.appendingPathComponent("model.safetensors"))
 
-        let jobs = StudioJobService()
-        let service = StudioAdvancedModelService(app: AppState(), jobs: jobs)
+        let databaseURL = temporaryJobDatabaseURL()
+        defer { removeJobDatabase(at: databaseURL) }
+        let jobs = try StudioModelToolJobStore(databaseURL: databaseURL)
+        let service = StudioModelToolsService(app: AppState(), jobs: jobs)
         let jobID = try await service.package(
             ModelRef(
                 id: "report-ready",
@@ -195,7 +204,7 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
 
     private func waitForJob(
         _ id: JobID,
-        in jobs: StudioJobService,
+        in jobs: StudioModelToolJobStore,
         status: JobStatus
     ) async throws -> ModelJob {
         for _ in 0..<40 {
@@ -207,5 +216,16 @@ final class StudioAdvancedModelServiceTests: XCTestCase {
         }
         XCTFail("Timed out waiting for job \(id) to reach \(status.rawValue)")
         throw CancellationError()
+    }
+
+    private func temporaryJobDatabaseURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-studio-advanced-model-\(UUID().uuidString).sqlite3")
+    }
+
+    private func removeJobDatabase(at url: URL) {
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: url.path + suffix)
+        }
     }
 }

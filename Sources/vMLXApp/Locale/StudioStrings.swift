@@ -120,8 +120,8 @@ public extension L10n {
     /// Studio, HF, JANG, OpenAI, DeAlign, cURL, Hugging Face) left as-is.
     enum Studio {
         static let addFolder = L10nEntry(en: "Add Folder", ja: "フォルダを追加", ko: "폴더 추가", zh: "添加文件夹")
-        static let advModelsCopyPath = L10nEntry(en: "Advanced Models Copy Path", ja: "詳細モデル パスをコピー", ko: "고급 모델 경로 복사", zh: "高级模型 复制路径")
-        static let advModelsRunInspect = L10nEntry(en: "Advanced Models Run Inspect", ja: "詳細モデル 検査を実行", ko: "고급 모델 검사 실행", zh: "高级模型 运行检查")
+        static let advModelsCopyPath = L10nEntry(en: "Model Tools Copy Path", ja: "詳細モデル パスをコピー", ko: "고급 모델 경로 복사", zh: "高级模型 复制路径")
+        static let advModelsRunInspect = L10nEntry(en: "Model Tools Run Inspect", ja: "詳細モデル 検査を実行", ko: "고급 모델 검사 실행", zh: "高级模型 运行检查")
         static let advanced = L10nEntry(en: "Advanced", ja: "詳細", ko: "고급", zh: "高级")
         static let artifactLedger = L10nEntry(en: "Artifact Ledger", ja: "成果物台帳", ko: "아티팩트 원장", zh: "工件账本")
         static let benchmark = L10nEntry(en: "Benchmark", ja: "ベンチマーク", ko: "벤치마크", zh: "基准测试")
