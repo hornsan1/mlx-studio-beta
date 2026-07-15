@@ -1,4 +1,5 @@
 import Foundation
+import MLXStudioPersistence
 import SQLite3
 
 /// Persistent store for `ModelLibrary`. Backed by its own SQLite file at
@@ -13,6 +14,7 @@ public final class ModelLibraryDB: @unchecked Sendable {
 
     private var db: OpaquePointer?
     private let path: String
+    public private(set) var migrationErrorDescription: String?
 
     public init(customPath: URL? = nil) {
         let fm = FileManager.default
@@ -35,62 +37,18 @@ public final class ModelLibraryDB: @unchecked Sendable {
         }
         runSQL("PRAGMA journal_mode=WAL;")
         runSQL("PRAGMA synchronous=NORMAL;")
-        migrate()
+        if let db {
+            do {
+                try ModelStoreMigrator.migrate(db)
+            } catch {
+                migrationErrorDescription = String(describing: error)
+                NSLog("vMLX ModelLibraryDB migration failed: \(error)")
+            }
+        }
     }
 
     deinit {
         if db != nil { sqlite3_close(db) }
-    }
-
-    // MARK: - Migration
-
-    private func migrate() {
-        let v = userVersion()
-        if v < 1 {
-            runSQL("""
-            CREATE TABLE IF NOT EXISTS models (
-                id TEXT PRIMARY KEY,
-                canonical_path TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                family TEXT NOT NULL,
-                modality TEXT NOT NULL,
-                total_size_bytes INTEGER NOT NULL,
-                is_jang INTEGER NOT NULL,
-                is_mxtq INTEGER NOT NULL,
-                quant_bits INTEGER,
-                detected_at REAL NOT NULL,
-                source TEXT NOT NULL
-            );
-            """)
-            runSQL("CREATE INDEX IF NOT EXISTS idx_models_family ON models(family);")
-            runSQL("CREATE INDEX IF NOT EXISTS idx_models_modality ON models(modality);")
-            runSQL("""
-            CREATE TABLE IF NOT EXISTS user_dirs (
-                url TEXT PRIMARY KEY,
-                added_at REAL NOT NULL
-            );
-            """)
-            runSQL("PRAGMA user_version=1;")
-        }
-        if v < 2 {
-            // Add capabilities_json column. Existing rows get '{}' which
-            // triggers re-detection on the next scan (empty JSON decodes
-            // to `.unknown`, which the library diff layer then overwrites).
-            runSQL("ALTER TABLE models ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '{}';")
-            runSQL("PRAGMA user_version=2;")
-        }
-    }
-
-    private func userVersion() -> Int {
-        var stmt: OpaquePointer?
-        var v = 0
-        if sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nil) == SQLITE_OK {
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                v = Int(sqlite3_column_int(stmt, 0))
-            }
-        }
-        sqlite3_finalize(stmt)
-        return v
     }
 
     private func runSQL(_ sql: String) {

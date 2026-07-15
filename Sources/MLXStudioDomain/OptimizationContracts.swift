@@ -56,7 +56,7 @@ public struct ExpertCoordinate: Codable, Hashable, Sendable {
 }
 
 public enum ExpertDirectiveAction: String, Codable, CaseIterable, Hashable, Sendable {
-    case automatic
+    case automatic = "auto"
     case keep
     case remove
 }
