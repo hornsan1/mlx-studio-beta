@@ -52,11 +52,15 @@ flowchart LR
     Domain["MLXStudioDomain"] --> Persistence["MLXStudioPersistence"]
     Domain --> Evaluation["MLXStudioEvaluation"]
     Persistence --> Evaluation
+    Domain --> ExpertLabProduct["JANGExpertLab"]
+    Evaluation --> ExpertLabProduct
     Domain --> DomainTests["MLXStudioDomainTests"]
     Persistence --> PersistenceTests["MLXStudioPersistenceTests"]
     Domain --> EvaluationTests["MLXStudioEvaluationTests"]
     Persistence --> EvaluationTests
     Evaluation --> EvaluationTests
+    Domain --> ExpertLabProductTests["JANGExpertLabTests"]
+    ExpertLabProduct --> ExpertLabProductTests
     Domain --> Engine
     Persistence --> Engine
     MLX --> Engine["vMLXEngine"]
@@ -124,7 +128,7 @@ flowchart LR
 
 Arrows again run from dependency to consumer. `jang-spec-iobench` has no target dependency; external `ArgumentParser` edges are omitted.
 
-The problematic edge is `JANGKit → JANGExpertLab`: `ExpertPromptSuiteRunner` owns a `JANGKit.Model`, making Expert Lab depend on a second production inference runtime.
+At the pinned JANG source SHA, the problematic edge is `JANGKit → JANGExpertLab`: `ExpertPromptSuiteRunner` owns a `JANGKit.Model`, making Expert Lab depend on a second production inference runtime. In the canonical product package after PR 7, the adapted `JANGExpertLab` target instead depends on `MLXStudioDomain` and `MLXStudioEvaluation`; its suite runner accepts `ModelInferenceProvider` and has no `JANGKit` dependency.
 
 ## Current JANG Studio process graph
 

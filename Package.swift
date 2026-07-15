@@ -258,6 +258,7 @@ let package = Package(
         .library(name: "MLXStudioDomain", targets: ["MLXStudioDomain"]),
         .library(name: "MLXStudioPersistence", targets: ["MLXStudioPersistence"]),
         .library(name: "MLXStudioEvaluation", targets: ["MLXStudioEvaluation"]),
+        .library(name: "JANGExpertLab", targets: ["JANGExpertLab"]),
 
         // vMLX engine + app libraries.
         .library(name: "vMLXEngine", targets: ["vMLXEngine"]),
@@ -331,6 +332,17 @@ let package = Package(
             name: "MLXStudioEvaluation",
             dependencies: ["MLXStudioDomain", "MLXStudioPersistence"],
             path: "Sources/MLXStudioEvaluation",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "JANGExpertLab",
+            dependencies: [
+                "MLXStudioDomain",
+                "MLXStudioEvaluation",
+            ],
+            path: "Sources/JANGExpertLab",
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
@@ -609,6 +621,14 @@ let package = Package(
                 "MLXStudioEvaluation",
             ],
             path: "tests/MLXStudioEvaluationTests"
+        ),
+        .testTarget(
+            name: "JANGExpertLabTests",
+            dependencies: [
+                "JANGExpertLab",
+                "MLXStudioDomain",
+            ],
+            path: "tests/JANGExpertLabTests"
         ),
 
         // MARK: - Parser unit tests (runnable via `swift test`)
