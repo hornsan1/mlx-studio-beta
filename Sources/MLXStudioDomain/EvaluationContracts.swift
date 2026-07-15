@@ -278,3 +278,70 @@ public struct EvaluationRunResult: Codable, Hashable, Sendable {
         self.endedAt = endedAt
     }
 }
+
+public enum BlindResponseChoice: String, Codable, CaseIterable, Hashable, Sendable {
+    case responseA = "response_a"
+    case responseB = "response_b"
+    case tie
+}
+
+/// Immutable mapping between anonymous response labels and real artifacts for
+/// one case. Presentation code must not expose either artifact ID before the
+/// associated judgment has been submitted.
+public struct BlindAssignment: Codable, Hashable, Sendable {
+    public let responseAArtifactID: ModelArtifactID
+    public let responseBArtifactID: ModelArtifactID
+    public let assignmentSeed: UInt64
+    public let ordinal: Int
+
+    public init(
+        responseAArtifactID: ModelArtifactID,
+        responseBArtifactID: ModelArtifactID,
+        assignmentSeed: UInt64,
+        ordinal: Int
+    ) {
+        self.responseAArtifactID = responseAArtifactID
+        self.responseBArtifactID = responseBArtifactID
+        self.assignmentSeed = assignmentSeed
+        self.ordinal = ordinal
+    }
+
+    public func artifactID(for choice: BlindResponseChoice) -> ModelArtifactID? {
+        switch choice {
+        case .responseA: responseAArtifactID
+        case .responseB: responseBArtifactID
+        case .tie: nil
+        }
+    }
+}
+
+public struct HumanJudgment: Codable, Hashable, Sendable {
+    public let id: HumanJudgmentID
+    public let runID: EvaluationRunID
+    public let caseID: EvaluationCaseID
+    public let assignment: BlindAssignment
+    public var choice: BlindResponseChoice?
+    public var notes: String?
+    public var revealedAt: Date?
+    public let createdAt: Date
+
+    public init(
+        id: HumanJudgmentID = .init(),
+        runID: EvaluationRunID,
+        caseID: EvaluationCaseID,
+        assignment: BlindAssignment,
+        choice: BlindResponseChoice? = nil,
+        notes: String? = nil,
+        revealedAt: Date? = nil,
+        createdAt: Date = .init()
+    ) {
+        self.id = id
+        self.runID = runID
+        self.caseID = caseID
+        self.assignment = assignment
+        self.choice = choice
+        self.notes = notes
+        self.revealedAt = revealedAt
+        self.createdAt = createdAt
+    }
+}

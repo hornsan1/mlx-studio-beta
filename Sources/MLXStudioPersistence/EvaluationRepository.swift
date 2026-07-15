@@ -286,6 +286,104 @@ public final class EvaluationRepository: @unchecked Sendable {
             }
         }
     }
+
+    public func saveHumanJudgment(_ judgment: HumanJudgment) throws {
+        guard judgment.assignment.responseAArtifactID != judgment.assignment.responseBArtifactID else {
+            throw EvaluationPersistenceError.invalidPayload("blind assignment candidates must differ")
+        }
+        guard judgment.revealedAt == nil || judgment.choice != nil else {
+            throw EvaluationPersistenceError.invalidPayload("blind identity reveal requires a judgment")
+        }
+        let assignmentJSON = try Self.encode(judgment.assignment)
+        try store.transaction { database in
+            let existing = try Self.readHumanJudgments(
+                database: database,
+                sql: """
+                SELECT id, run_id, case_id, assignment_json, choice, notes, revealed_at, created_at
+                FROM human_judgments WHERE id=? LIMIT 1;
+                """,
+                bindings: [.text(judgment.id.rawValue)]
+            ).first
+            if let existing, existing.revealedAt != nil, existing != judgment {
+                throw EvaluationPersistenceError.invalidPayload(
+                    "revealed human judgment is immutable"
+                )
+            }
+            let duplicateLogicalJudgment = try SQLiteStore.scalarInt(
+                database,
+                "SELECT COUNT(*) FROM human_judgments WHERE run_id=? AND case_id=? AND id<>?;",
+                bindings: [
+                    .text(judgment.runID.rawValue), .text(judgment.caseID.rawValue),
+                    .text(judgment.id.rawValue),
+                ]
+            )
+            guard duplicateLogicalJudgment == 0 else {
+                throw EvaluationPersistenceError.invalidPayload(
+                    "one human judgment is allowed per evaluation run and case"
+                )
+            }
+            let immutableMismatch = try SQLiteStore.scalarInt(
+                database,
+                """
+                SELECT COUNT(*) FROM human_judgments
+                WHERE id=? AND (run_id<>? OR case_id<>? OR assignment_json<>?);
+                """,
+                bindings: [
+                    .text(judgment.id.rawValue), .text(judgment.runID.rawValue),
+                    .text(judgment.caseID.rawValue), .text(assignmentJSON),
+                ]
+            )
+            guard immutableMismatch == 0 else {
+                throw EvaluationPersistenceError.invalidPayload(
+                    "human judgment assignment is immutable"
+                )
+            }
+            try SQLiteStore.execute(database, """
+            INSERT INTO human_judgments (
+                id, run_id, case_id, assignment_json, choice, notes, revealed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                choice=excluded.choice, notes=excluded.notes, revealed_at=excluded.revealed_at;
+            """, bindings: [
+                .text(judgment.id.rawValue), .text(judgment.runID.rawValue),
+                .text(judgment.caseID.rawValue), .text(assignmentJSON),
+                judgment.choice.map { .text($0.rawValue) } ?? .null,
+                judgment.notes.map(SQLiteValue.text) ?? .null,
+                judgment.revealedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                .real(judgment.createdAt.timeIntervalSince1970),
+            ])
+        }
+    }
+
+    public func humanJudgment(
+        runID: EvaluationRunID,
+        caseID: EvaluationCaseID
+    ) throws -> HumanJudgment? {
+        try store.read { database in
+            try Self.readHumanJudgments(
+                database: database,
+                sql: """
+                SELECT id, run_id, case_id, assignment_json, choice, notes, revealed_at, created_at
+                FROM human_judgments WHERE run_id=? AND case_id=?
+                ORDER BY created_at ASC, id ASC LIMIT 1;
+                """,
+                bindings: [.text(runID.rawValue), .text(caseID.rawValue)]
+            ).first
+        }
+    }
+
+    public func humanJudgments(runID: EvaluationRunID) throws -> [HumanJudgment] {
+        try store.read { database in
+            try Self.readHumanJudgments(
+                database: database,
+                sql: """
+                SELECT id, run_id, case_id, assignment_json, choice, notes, revealed_at, created_at
+                FROM human_judgments WHERE run_id=? ORDER BY created_at ASC, id ASC;
+                """,
+                bindings: [.text(runID.rawValue)]
+            )
+        }
+    }
 }
 
 private extension EvaluationRepository {
@@ -361,6 +459,51 @@ private extension EvaluationRepository {
             if result == SQLITE_DONE { return cases }
             guard result == SQLITE_ROW else { throw SQLiteStore.error(database, result, sql) }
             cases.append(try decode(EvaluationCase.self, from: SQLiteStore.text(statement, 0)))
+        }
+    }
+
+    static func readHumanJudgments(
+        database: OpaquePointer,
+        sql: String,
+        bindings: [SQLiteValue]
+    ) throws -> [HumanJudgment] {
+        var statement: OpaquePointer?
+        try SQLiteStore.prepare(database, sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+        try SQLiteStore.bind(bindings, to: statement, database: database, sql: sql)
+        var judgments: [HumanJudgment] = []
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return judgments }
+            guard result == SQLITE_ROW else { throw SQLiteStore.error(database, result, sql) }
+            guard let id = HumanJudgmentID(rawValue: SQLiteStore.text(statement, 0)),
+                  let runID = EvaluationRunID(rawValue: SQLiteStore.text(statement, 1)),
+                  let caseID = EvaluationCaseID(rawValue: SQLiteStore.text(statement, 2))
+            else {
+                throw EvaluationPersistenceError.invalidPayload("invalid human judgment identifier")
+            }
+            let choiceText = SQLiteStore.optionalText(statement, 4)
+            let choice = try choiceText.map { value -> BlindResponseChoice in
+                guard let choice = BlindResponseChoice(rawValue: value) else {
+                    throw EvaluationPersistenceError.invalidPayload("invalid blind response choice")
+                }
+                return choice
+            }
+            let revealedAt = sqlite3_column_type(statement, 6) == SQLITE_NULL
+                ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+            judgments.append(HumanJudgment(
+                id: id,
+                runID: runID,
+                caseID: caseID,
+                assignment: try decode(
+                    BlindAssignment.self,
+                    from: SQLiteStore.text(statement, 3)
+                ),
+                choice: choice,
+                notes: SQLiteStore.optionalText(statement, 5),
+                revealedAt: revealedAt,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
+            ))
         }
     }
 
