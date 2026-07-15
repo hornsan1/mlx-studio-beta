@@ -54,6 +54,7 @@ public enum GenerationIDTag: MLXStudioIDTag {}
 public enum EvaluationSuiteIDTag: MLXStudioIDTag {}
 public enum EvaluationCaseIDTag: MLXStudioIDTag {}
 public enum EvaluationRunIDTag: MLXStudioIDTag {}
+public enum HumanJudgmentIDTag: MLXStudioIDTag {}
 public enum OptimizationPlanIDTag: MLXStudioIDTag {}
 public enum QuantizationRecipeIDTag: MLXStudioIDTag {}
 public enum StrategyAnalysisIDTag: MLXStudioIDTag {}
@@ -68,6 +69,7 @@ public typealias GenerationID = MLXStudioID<GenerationIDTag>
 public typealias EvaluationSuiteID = MLXStudioID<EvaluationSuiteIDTag>
 public typealias EvaluationCaseID = MLXStudioID<EvaluationCaseIDTag>
 public typealias EvaluationRunID = MLXStudioID<EvaluationRunIDTag>
+public typealias HumanJudgmentID = MLXStudioID<HumanJudgmentIDTag>
 public typealias OptimizationPlanID = MLXStudioID<OptimizationPlanIDTag>
 public typealias QuantizationRecipeID = MLXStudioID<QuantizationRecipeIDTag>
 public typealias StrategyAnalysisID = MLXStudioID<StrategyAnalysisIDTag>

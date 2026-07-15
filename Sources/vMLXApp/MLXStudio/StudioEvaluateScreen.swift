@@ -6,6 +6,13 @@ import SwiftUI
 import vMLXEngine
 import vMLXTheme
 
+enum StudioEvaluationMode: String, CaseIterable, Identifiable {
+    case quickCompare = "Quick Compare"
+    case blindAB = "Blind A/B"
+
+    var id: String { rawValue }
+}
+
 struct StudioEvaluateScreen: View {
     @Environment(AppState.self) private var app
     @State private var model = StudioQuickCompareViewModel()
@@ -32,9 +39,19 @@ struct StudioEvaluateScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     compareCard(
-                        "Quick Compare",
-                        subtitle: "Run identical messages and generation settings through two artifacts in a reproducible sequential order."
+                        model.presentationMode.rawValue,
+                        subtitle: model.presentationMode == .blindAB
+                            ? "Compare anonymous responses, persist your judgment, then reveal model identity."
+                            : "Run identical messages and generation settings through two artifacts in a reproducible sequential order."
                     ) {
+                        Picker("Evaluation mode", selection: $model.presentationMode) {
+                            ForEach(StudioEvaluationMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(model.isRunning || model.hasUnrevealedBlindResult)
+                        .accessibilityIdentifier("evaluate.mode")
                         HStack {
                             candidatePicker("Candidate A", selection: $model.firstArtifactID)
                             candidatePicker("Candidate B", selection: $model.secondArtifactID)
@@ -84,7 +101,7 @@ struct StudioEvaluateScreen: View {
                         subtitle: "The request, manifest, execution order, outputs, metrics, and errors are stored in models.sqlite3."
                     ) {
                         HStack {
-                            Button("Run Quick Compare") { model.run(engine: app.engine) }
+                            Button(model.runButtonTitle) { model.run(engine: app.engine) }
                                 .buttonStyle(.borderedProminent)
                                 .disabled(!model.canRun || model.isRunning)
                                 .accessibilityIdentifier("evaluate.run")
@@ -93,7 +110,7 @@ struct StudioEvaluateScreen: View {
                             if model.isRunning { ProgressView() }
                         }
                         if let manifest = model.outcome?.manifest {
-                            Text("Manifest \(manifest.manifestHash) · order \(manifest.executionOrder.map(\.rawValue).joined(separator: " → "))")
+                            Text(model.manifestSummary(manifest))
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Theme.Colors.textLow)
                                 .textSelection(.enabled)
@@ -102,9 +119,43 @@ struct StudioEvaluateScreen: View {
 
                     if let outcome = model.outcome {
                         HStack(alignment: .top, spacing: Theme.Spacing.lg) {
-                            resultColumn(for: model.firstArtifactID, outcome: outcome)
-                            resultColumn(for: model.secondArtifactID, outcome: outcome)
+                            if model.presentationMode == .blindAB {
+                                if let assignment = model.judgment?.assignment {
+                                    resultColumn(
+                                        title: model.blindTitle(response: "Response A", artifactID: assignment.responseAArtifactID),
+                                        artifactID: assignment.responseAArtifactID,
+                                        outcome: outcome,
+                                        showsMetrics: model.isRevealed,
+                                        showsDetailedError: model.isRevealed
+                                    )
+                                    resultColumn(
+                                        title: model.blindTitle(response: "Response B", artifactID: assignment.responseBArtifactID),
+                                        artifactID: assignment.responseBArtifactID,
+                                        outcome: outcome,
+                                        showsMetrics: model.isRevealed,
+                                        showsDetailedError: model.isRevealed
+                                    )
+                                } else {
+                                    Text("Blind outputs are withheld because their anonymous assignment was not persisted.")
+                                        .foregroundStyle(Theme.Colors.danger)
+                                }
+                            } else {
+                                resultColumn(
+                                    title: model.artifactName(model.firstArtifactID),
+                                    artifactID: model.firstArtifactID,
+                                    outcome: outcome
+                                )
+                                resultColumn(
+                                    title: model.artifactName(model.secondArtifactID),
+                                    artifactID: model.secondArtifactID,
+                                    outcome: outcome
+                                )
+                            }
                         }
+                    }
+
+                    if model.presentationMode == .blindAB, model.judgment != nil {
+                        blindJudgmentCard
                     }
                 }
                 .padding(Theme.Spacing.xl)
@@ -131,22 +182,26 @@ struct StudioEvaluateScreen: View {
     }
 
     private func resultColumn(
-        for artifactID: ModelArtifactID?,
-        outcome: QuickCompareOutcome
+        title: String,
+        artifactID: ModelArtifactID?,
+        outcome: QuickCompareOutcome,
+        showsMetrics: Bool = true,
+        showsDetailedError: Bool = true
     ) -> some View {
-        let artifact = model.artifacts.first { $0.id == artifactID }
         let result = outcome.result.caseResults.first { $0.artifactID == artifactID }
         return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text(artifact?.name ?? "Candidate")
+            Text(title)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Theme.Colors.textHigh)
             if let error = result?.errorDescription {
-                Text(error).foregroundStyle(Theme.Colors.danger)
+                Text(showsDetailedError
+                    ? error : "This anonymous response failed to generate; identifying details remain hidden.")
+                    .foregroundStyle(Theme.Colors.danger)
             } else {
                 Text(result?.generationResult?.text ?? "No output")
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .textSelection(.enabled)
-                if let metrics = result?.generationResult?.metrics {
+                if showsMetrics, let metrics = result?.generationResult?.metrics {
                     Text("\(metrics.generatedTokenCount) tokens · \(metrics.tokensPerSecond.map { String(format: "%.2f tok/s", $0) } ?? "rate unavailable") · \(metrics.totalDurationSeconds.map { String(format: "%.2fs", $0) } ?? "duration unavailable")")
                         .font(Theme.Typography.captionHi)
                         .foregroundStyle(Theme.Colors.textLow)
@@ -160,6 +215,35 @@ struct StudioEvaluateScreen: View {
         .overlay {
             RoundedRectangle(cornerRadius: Theme.Radius.lg)
                 .stroke(Theme.Colors.border.opacity(0.75), lineWidth: 1)
+        }
+    }
+
+    private var blindJudgmentCard: some View {
+        compareCard(
+            "Blind judgment",
+            subtitle: model.isRevealed
+                ? "Identity and runtime metrics are revealed after the persisted judgment."
+                : "Model identity, execution order, and runtime metrics remain hidden until you judge."
+        ) {
+            HStack {
+                Button("Prefer Response A") { model.choose(.responseA) }
+                    .tint(model.judgment?.choice == .responseA ? Theme.Colors.accent : nil)
+                Button("Prefer Response B") { model.choose(.responseB) }
+                    .tint(model.judgment?.choice == .responseB ? Theme.Colors.accent : nil)
+                Button("Tie") { model.choose(.tie) }
+                    .tint(model.judgment?.choice == .tie ? Theme.Colors.accent : nil)
+            }
+            .disabled(model.isRevealed || !model.canJudge)
+            Button("Reveal identities") { model.reveal() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.judgment?.choice == nil || model.isRevealed)
+                .accessibilityIdentifier("evaluate.reveal")
+            if model.isRevealed, let summary = model.revealSummary {
+                Text(summary)
+                    .font(Theme.Typography.captionHi)
+                    .foregroundStyle(Theme.Colors.textHigh)
+                    .textSelection(.enabled)
+            }
         }
     }
 
@@ -194,6 +278,14 @@ final class StudioQuickCompareViewModel {
     var artifacts: [ModelArtifact] = []
     var firstArtifactID: ModelArtifactID?
     var secondArtifactID: ModelArtifactID?
+    var presentationMode: StudioEvaluationMode = .quickCompare {
+        didSet {
+            guard presentationMode != oldValue, !isRunning else { return }
+            outcome = nil
+            judgment = nil
+            status = artifacts.count >= 2 ? "Ready" : status
+        }
+    }
     var systemPrompt = ""
     var prompt = "Reply with one concise sentence."
     var maximumTokenCount = 128
@@ -203,6 +295,7 @@ final class StudioQuickCompareViewModel {
     var hasError = false
     var isRunning = false
     var outcome: QuickCompareOutcome?
+    var judgment: HumanJudgment?
 
     private var artifactRepository: ModelArtifactRepository?
     private var evaluationRepository: EvaluationRepository?
@@ -214,6 +307,29 @@ final class StudioQuickCompareViewModel {
             && firstArtifactID != secondArtifactID
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && UInt64(seedText) != nil
+    }
+
+    var isRevealed: Bool { judgment?.revealedAt != nil }
+    var runButtonTitle: String {
+        presentationMode == .blindAB ? "Run Blind A/B" : "Run Quick Compare"
+    }
+    var canJudge: Bool { outcome?.result.status == .completed && judgment != nil }
+    var hasUnrevealedBlindResult: Bool {
+        presentationMode == .blindAB && canJudge && !isRevealed
+    }
+
+    var revealSummary: String? {
+        guard let judgment, judgment.revealedAt != nil else { return nil }
+        let a = artifactName(judgment.assignment.responseAArtifactID)
+        let b = artifactName(judgment.assignment.responseBArtifactID)
+        let choice: String
+        switch judgment.choice {
+        case .responseA: choice = "Preferred: Response A (\(a))"
+        case .responseB: choice = "Preferred: Response B (\(b))"
+        case .tie: choice = "Judgment: Tie"
+        case nil: return nil
+        }
+        return "Response A: \(a) · Response B: \(b) · \(choice)"
     }
 
     init() {
@@ -289,9 +405,34 @@ final class StudioQuickCompareViewModel {
                 proposedSuite,
                 repository: evaluationRepository
             )
-            let request = EvaluationRunRequest(
-                suite: suite,
-                candidates: [
+            let pendingJudgment: HumanJudgment?
+            let candidates: [EvaluationCandidate]
+            if presentationMode == .blindAB {
+                let assignmentSeed = UInt64.random(in: UInt64.min...UInt64.max)
+                let assignments = try BlindAssignmentPlanner.assignments(
+                    candidateIDs: [first.id, second.id],
+                    cases: suite.cases,
+                    seed: assignmentSeed
+                )
+                guard let evaluationCase = suite.cases.first,
+                      let assignment = assignments[evaluationCase.id]
+                else { return }
+                pendingJudgment = HumanJudgment(
+                    runID: EvaluationRunID(),
+                    caseID: evaluationCase.id,
+                    assignment: assignment
+                )
+                candidates = [first, second].map { artifact in
+                    EvaluationCandidate(
+                        artifactID: artifact.id,
+                        blindLabel: assignment.responseAArtifactID == artifact.id
+                            ? "Response A" : "Response B",
+                        artifactHash: artifact.contentHash
+                    )
+                }
+            } else {
+                pendingJudgment = nil
+                candidates = [
                     .init(
                         artifactID: first.id,
                         blindLabel: "Candidate A: \(first.name)",
@@ -302,7 +443,13 @@ final class StudioQuickCompareViewModel {
                         blindLabel: "Candidate B: \(second.name)",
                         artifactHash: second.contentHash
                     ),
-                ],
+                ]
+            }
+            let runID = pendingJudgment?.runID ?? EvaluationRunID()
+            let request = EvaluationRunRequest(
+                id: runID,
+                suite: suite,
+                candidates: candidates,
                 runtimeVersion: Self.runtimeVersion,
                 kernelVersion: "mlx-0.31.1",
                 executionOrder: [first.id, second.id]
@@ -314,14 +461,23 @@ final class StudioQuickCompareViewModel {
             isRunning = true
             hasError = false
             outcome = nil
-            status = "Running Candidate A, then Candidate B…"
+            judgment = nil
+            status = presentationMode == .blindAB
+                ? "Generating two anonymous responses sequentially…"
+                : "Running Candidate A, then Candidate B…"
             activeTask = Task { [weak self] in
                 do {
                     let result = try await runner.run(request)
+                    if let pendingJudgment {
+                        try evaluationRepository.saveHumanJudgment(pendingJudgment)
+                        self?.judgment = pendingJudgment
+                    }
                     self?.outcome = result
                     self?.status = result.result.status == .completed
-                        ? "Quick Compare complete and persisted."
-                        : "Quick Compare completed with candidate errors; partial results were persisted."
+                        ? (pendingJudgment == nil
+                            ? "Quick Compare complete and persisted."
+                            : "Anonymous responses ready. Judge before revealing identity.")
+                        : "Comparison completed with candidate errors; partial results were persisted."
                     self?.hasError = result.result.status == .failed
                 } catch is CancellationError {
                     self?.status = "Quick Compare cancelled; durable run state was preserved."
@@ -338,6 +494,47 @@ final class StudioQuickCompareViewModel {
 
     func cancel() {
         activeTask?.cancel()
+    }
+
+    func choose(_ choice: BlindResponseChoice) {
+        guard canJudge, let judgment, let evaluationRepository else { return }
+        do {
+            let updated = BlindJudgmentWorkflow.choosing(choice, in: judgment)
+            try evaluationRepository.saveHumanJudgment(updated)
+            self.judgment = updated
+            status = "Judgment persisted. Identity remains hidden until reveal."
+            hasError = false
+        } catch {
+            fail(error)
+        }
+    }
+
+    func reveal() {
+        guard let judgment, let evaluationRepository else { return }
+        do {
+            let revealed = try BlindJudgmentWorkflow.revealing(judgment)
+            try evaluationRepository.saveHumanJudgment(revealed)
+            self.judgment = revealed
+            status = "Judgment and identity reveal persisted."
+            hasError = false
+        } catch {
+            fail(error)
+        }
+    }
+
+    func artifactName(_ artifactID: ModelArtifactID?) -> String {
+        artifacts.first { $0.id == artifactID }?.name ?? "Candidate"
+    }
+
+    func blindTitle(response: String, artifactID: ModelArtifactID) -> String {
+        isRevealed ? "\(response) — \(artifactName(artifactID))" : response
+    }
+
+    func manifestSummary(_ manifest: EvaluationRunManifest) -> String {
+        if presentationMode == .blindAB && !isRevealed {
+            return "Manifest \(manifest.manifestHash) · randomized assignment persisted · identity hidden"
+        }
+        return "Manifest \(manifest.manifestHash) · order \(manifest.executionOrder.map(\.rawValue).joined(separator: " → "))"
     }
 
     static func isSelectableArtifact(_ artifact: ModelArtifact) -> Bool {
