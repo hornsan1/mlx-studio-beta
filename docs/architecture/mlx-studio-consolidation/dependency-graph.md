@@ -54,6 +54,9 @@ flowchart LR
     Persistence --> Evaluation
     Domain --> ExpertLabProduct["JANGExpertLab"]
     Evaluation --> ExpertLabProduct
+    Domain --> OptimizationProduct["MLXStudioOptimization"]
+    Persistence --> OptimizationProduct
+    Evaluation --> OptimizationProduct
     Domain --> DomainTests["MLXStudioDomainTests"]
     Persistence --> PersistenceTests["MLXStudioPersistenceTests"]
     Domain --> EvaluationTests["MLXStudioEvaluationTests"]
@@ -61,6 +64,9 @@ flowchart LR
     Evaluation --> EvaluationTests
     Domain --> ExpertLabProductTests["JANGExpertLabTests"]
     ExpertLabProduct --> ExpertLabProductTests
+    Domain --> OptimizationProductTests["MLXStudioOptimizationTests"]
+    Persistence --> OptimizationProductTests
+    OptimizationProduct --> OptimizationProductTests
     Domain --> Engine
     Persistence --> Engine
     MLX --> Engine["vMLXEngine"]
